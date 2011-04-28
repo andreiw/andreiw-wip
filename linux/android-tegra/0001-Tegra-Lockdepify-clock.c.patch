@@ -1,0 +1,44 @@
+From 08299182708a1da8d3ab64f20efb7de039365e5a Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Wed, 20 Apr 2011 16:37:25 -0500
+Subject: [PATCH 1/2] Tegra: Lockdepify clock.c
+
+Prevent recursive lock warning.
+
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ arch/arm/mach-tegra/clock.c |    4 ++++
+ arch/arm/mach-tegra/clock.h |    1 +
+ 2 files changed, 5 insertions(+), 0 deletions(-)
+
+diff --git a/arch/arm/mach-tegra/clock.c b/arch/arm/mach-tegra/clock.c
+index 964c4c3..577fe2c 100644
+--- a/arch/arm/mach-tegra/clock.c
++++ b/arch/arm/mach-tegra/clock.c
+@@ -116,7 +116,11 @@ static inline bool clk_cansleep(struct clk *c)
+ static inline void clk_lock_init(struct clk *c)
+ {
+ 	mutex_init(&c->mutex);
++	lockdep_set_class(&c->mutex, &c->lock_key);
++
+ 	spin_lock_init(&c->spinlock);
++	lockdep_set_class(&c->spinlock, &c->lock_key);
++
+ }
+ 
+ struct clk *tegra_get_clock_by_name(const char *name)
+diff --git a/arch/arm/mach-tegra/clock.h b/arch/arm/mach-tegra/clock.h
+index f3319d3..764b2c4 100644
+--- a/arch/arm/mach-tegra/clock.h
++++ b/arch/arm/mach-tegra/clock.h
+@@ -138,6 +138,7 @@ struct clk {
+ 
+ 	struct mutex mutex;
+ 	spinlock_t spinlock;
++	struct lock_class_key lock_key;
+ };
+ 
+ struct clk_duplicate {
+-- 
+1.7.0.4
+

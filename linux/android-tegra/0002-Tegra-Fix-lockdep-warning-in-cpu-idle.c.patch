@@ -1,0 +1,44 @@
+From 5da16301fe132be9a26471e9c4230ceaf38faa75 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Wed, 20 Apr 2011 16:38:35 -0500
+Subject: [PATCH 2/2] Tegra: Fix lockdep warning in cpu-idle.c.
+
+Fix inconsistent {IN-HARDIRQ-W} -> {HARDIRQ-ON-W} usage.
+
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ arch/arm/mach-tegra/cpuidle.c |   10 ++++++++++
+ 1 files changed, 10 insertions(+), 0 deletions(-)
+
+diff --git a/arch/arm/mach-tegra/cpuidle.c b/arch/arm/mach-tegra/cpuidle.c
+index 23cb9ac..38bcc98 100644
+--- a/arch/arm/mach-tegra/cpuidle.c
++++ b/arch/arm/mach-tegra/cpuidle.c
+@@ -105,14 +105,24 @@ static inline unsigned int time_to_bin(unsigned int time)
+ 
+ static inline void tegra_unmask_irq(int irq)
+ {
++	struct irq_desc *desc = irq_to_desc(irq);
+ 	struct irq_chip *chip = get_irq_chip(irq);
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&desc->lock, flags);
+ 	chip->unmask(irq);
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
+ }
+ 
+ static inline void tegra_mask_irq(int irq)
+ {
++	struct irq_desc *desc = irq_to_desc(irq);
+ 	struct irq_chip *chip = get_irq_chip(irq);
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&desc->lock, flags);
+ 	chip->mask(irq);
++	raw_spin_unlock_irqrestore(&desc->lock, flags);
+ }
+ 
+ static inline int tegra_pending_interrupt(void)
+-- 
+1.7.0.4
+
