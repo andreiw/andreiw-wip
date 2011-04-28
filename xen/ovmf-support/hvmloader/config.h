@@ -16,6 +16,9 @@ struct bios_config {
     /* Physical address to load at */
     unsigned int bios_address;
 
+    /* Custom load function. */
+    void (*load)(const struct bios_config *config);
+
     /* SMBIOS */
     unsigned int smbios_start, smbios_end;
 
@@ -40,6 +43,8 @@ struct bios_config {
 };
 
 extern struct bios_config rombios_config;
+extern struct bios_config ovmf32_config;
+extern struct bios_config ovmf64_config;
 
 #define PAGE_SHIFT 12
 #define PAGE_SIZE  (1ul << PAGE_SHIFT)

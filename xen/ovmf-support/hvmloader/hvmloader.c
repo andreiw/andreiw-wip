@@ -29,6 +29,8 @@
 #include <xen/hvm/params.h>
 
 #define ROM_INCLUDE_VGABIOS
+#define ROM_INCLUDE_OVMF32_VGA
+#define ROM_INCLUDE_OVMF64_VGA
 #define ROM_INCLUDE_ETHERBOOT
 #include "roms.inc"
 
@@ -342,6 +344,8 @@ struct bios_info {
     const struct bios_config *bios;
 } bios_configs[] = {
     { "rombios", &rombios_config, },
+    { "ovmf32", &ovmf32_config, },
+    { "ovmf64", &ovmf64_config, },
     { NULL, NULL }
 };
 
@@ -351,8 +355,11 @@ static const struct bios_config *detect_bios(void)
     const char *bios;
 
     bios = xenstore_read("hvmloader/bios");
+
+    /* HACK: make xend create the hvmloader/bios key. */
     if ( !bios )
-        bios = "rombios";
+        bios = "ovmf32";
+    /* bios = "rombios"; */
 
     for ( b = &bios_configs[0]; b->key != NULL; b++ )
         if ( !strcmp(bios, b->key) )
@@ -398,9 +405,13 @@ int main(void)
                                             bios->smbios_end);
     }
 
-    printf("Loading %s ...\n", bios->name);
-    memcpy((void *)bios->bios_address, bios->image,
-           bios->image_size);
+    if (bios->load) {
+        bios->load(bios);
+    } else {
+        printf("Loading %s ...\n", bios->name);
+        memcpy((void *)bios->bios_address, bios->image,
+               bios->image_size);
+    }
 
     if (bios->bios_high_setup)
         highbios = bios->bios_high_setup();
@@ -413,9 +424,24 @@ int main(void)
     {
     case VGA_cirrus:
         printf("Loading Cirrus VGABIOS ...\n");
-        memcpy((void *)VGABIOS_PHYSICAL_ADDRESS,
-               vgabios_cirrusvga, sizeof(vgabios_cirrusvga));
-        vgabios_sz = round_option_rom(sizeof(vgabios_cirrusvga));
+
+        if (bios == &ovmf32_config) {
+            memcpy((void *)VGABIOS_PHYSICAL_ADDRESS,
+                   ovmf32vga, sizeof(ovmf32vga));
+            vgabios_sz = round_option_rom(sizeof(ovmf32vga));
+            printf("OVMF32 Cirrus [0x%x-0x%x)", VGABIOS_PHYSICAL_ADDRESS,
+                   VGABIOS_PHYSICAL_ADDRESS + sizeof(ovmf32vga));
+        } else if (bios == &ovmf64_config) {
+            memcpy((void *)VGABIOS_PHYSICAL_ADDRESS,
+                   ovmf64vga, sizeof(ovmf64vga));
+            vgabios_sz = round_option_rom(sizeof(ovmf64vga));
+            printf("OVMF64 Cirrus [0x%x-0x%x)", VGABIOS_PHYSICAL_ADDRESS,
+                   VGABIOS_PHYSICAL_ADDRESS + sizeof(ovmf64vga));
+        } else {
+            memcpy((void *)VGABIOS_PHYSICAL_ADDRESS,
+                   vgabios_cirrusvga, sizeof(vgabios_cirrusvga));
+            vgabios_sz = round_option_rom(sizeof(vgabios_cirrusvga));
+        }
         break;
     case VGA_std:
         printf("Loading Standard VGABIOS ...\n");
@@ -491,7 +517,6 @@ int main(void)
         bios->bios_info_setup(highbios);
 
     xenbus_shutdown();
-
     printf("Invoking %s ...\n", bios->name);
     return 0;
 }

@@ -597,7 +597,9 @@ struct hvm_info_table *get_hvm_info_table(void)
     return table;
 }
 
-struct shared_info *get_shared_info(void) 
+static struct shared_info shinfo __attribute__ ((aligned (PAGE_SIZE)));
+
+struct shared_info *get_shared_info(void)
 {
     static struct shared_info *shared_info = NULL;
     struct xen_add_to_physmap xatp;
@@ -608,12 +610,13 @@ struct shared_info *get_shared_info(void)
     xatp.domid = DOMID_SELF;
     xatp.space = XENMAPSPACE_shared_info;
     xatp.idx   = 0;
-    xatp.gpfn  = 0xfffffu;
-    shared_info = (struct shared_info *)(xatp.gpfn << PAGE_SHIFT);
+    xatp.gpfn  = ((uint32_t) &shinfo) >> PAGE_SHIFT;
     if ( hypercall_memory_op(XENMEM_add_to_physmap, &xatp) != 0 )
         BUG();
 
+    shared_info = &shinfo;
     return shared_info;
+
 }
 
 uint16_t get_cpu_mhz(void)

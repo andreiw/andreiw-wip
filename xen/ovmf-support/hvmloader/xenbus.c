@@ -42,6 +42,8 @@ void xenbus_setup(void)
         BUG();
     rings = (void *) (unsigned long) (param.value << PAGE_SHIFT);
 
+
+
     /* Ask Xen where the xenbus event channel is. */
     param.domid = DOMID_SELF;
     param.index = HVM_PARAM_STORE_EVTCHN;
