@@ -1,4 +1,4 @@
-From 1ae1c2e9ed9b8e8b3e48ae037253f59dad43ba9d Mon Sep 17 00:00:00 2001
+From ca04823271a9cd048944c45154b7cd3229ef8db8 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 13 Apr 2011 17:22:20 -0500
 Subject: [PATCH 2/5] MMC: Use CMD23 for multiblock transfers when we can.
@@ -11,15 +11,18 @@ Cc: cjb@laptop.org
 Cc: arnd@arndb.de
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
- drivers/mmc/card/block.c |  114 ++++++++++++++++++++++++++++++++++------------
+ drivers/mmc/card/block.c |  109 +++++++++++++++++++++++++++++++++-------------
  include/linux/mmc/card.h |    1 +
  include/linux/mmc/core.h |    1 +
- include/linux/mmc/host.h |    6 ++
- include/linux/mmc/mmc.h  |    6 ++
- 5 files changed, 98 insertions(+), 30 deletions(-)
+ include/linux/mmc/host.h |    6 +++
+ include/linux/mmc/mmc.h  |    6 +++
+ 5 files changed, 93 insertions(+), 30 deletions(-)
+ mode change 100644 => 100755 drivers/mmc/card/block.c
 
 diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
-index c209953..4b1a58e 100644
+old mode 100644
+new mode 100755
+index 92e4a00..b91bec2
 --- a/drivers/mmc/card/block.c
 +++ b/drivers/mmc/card/block.c
 @@ -55,10 +55,6 @@ MODULE_ALIAS("mmc:block");
@@ -33,7 +36,7 @@ index c209953..4b1a58e 100644
  static DEFINE_MUTEX(block_mutex);
  
  /*
-@@ -85,6 +81,10 @@ struct mmc_blk_data {
+@@ -86,6 +82,10 @@ struct mmc_blk_data {
  	struct mmc_queue queue;
  	struct list_head part;
  
@@ -44,7 +47,7 @@ index c209953..4b1a58e 100644
  	unsigned int	usage;
  	unsigned int	read_only;
  	unsigned int	part_type;
-@@ -225,6 +225,7 @@ static const struct block_device_operations mmc_bdops = {
+@@ -227,6 +227,7 @@ static const struct block_device_operations mmc_bdops = {
  
  struct mmc_blk_request {
  	struct mmc_request	mrq;
@@ -52,7 +55,7 @@ index c209953..4b1a58e 100644
  	struct mmc_command	cmd;
  	struct mmc_command	stop;
  	struct mmc_data		data;
-@@ -455,13 +456,10 @@ static int mmc_blk_issue_flush(struct mmc_queue *mq, struct request *req)
+@@ -457,13 +458,10 @@ static int mmc_blk_issue_flush(struct mmc_queue *mq, struct request *req)
   * reliable write can handle, thus finish the request in
   * partial completions.
   */
@@ -69,7 +72,7 @@ index c209953..4b1a58e 100644
  	if (!(card->ext_csd.rel_param & EXT_CSD_WR_REL_PARAM_EN)) {
  		/* Legacy mode imposes restrictions on transfers. */
  		if (!IS_ALIGNED(brq->cmd.arg, card->ext_csd.rel_sectors))
-@@ -472,16 +470,6 @@ static inline int mmc_apply_rel_rw(struct mmc_blk_request *brq,
+@@ -474,16 +472,6 @@ static inline int mmc_apply_rel_rw(struct mmc_blk_request *brq,
  		else if (brq->data.blocks < card->ext_csd.rel_sectors)
  			brq->data.blocks = 1;
  	}
@@ -86,7 +89,7 @@ index c209953..4b1a58e 100644
  }
  
  static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
-@@ -498,7 +486,7 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -500,7 +488,7 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  	bool do_rel_wr = ((req->cmd_flags & REQ_FUA) ||
  			  (req->cmd_flags & REQ_META)) &&
  		(rq_data_dir(req) == WRITE) &&
@@ -95,7 +98,7 @@ index c209953..4b1a58e 100644
  
  	do {
  		struct mmc_command cmd;
-@@ -536,11 +524,9 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -539,11 +527,9 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  
  		if (brq.data.blocks > 1 || do_rel_wr) {
  			/* SPI multiblock writes terminate using a special
@@ -109,7 +112,7 @@ index c209953..4b1a58e 100644
  			    rq_data_dir(req) == READ)
  				brq.mrq.stop = &brq.stop;
  			readcmd = MMC_READ_MULTIPLE_BLOCK;
-@@ -558,8 +544,37 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -561,8 +547,37 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  			brq.data.flags |= MMC_DATA_WRITE;
  		}
  
@@ -149,7 +152,7 @@ index c209953..4b1a58e 100644
  
  		mmc_set_data_timeout(&brq.data, card);
  
-@@ -596,7 +611,8 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -599,7 +614,8 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  		 * until later as we need to wait for the card to leave
  		 * programming mode even when things go wrong.
  		 */
@@ -159,7 +162,7 @@ index c209953..4b1a58e 100644
  			if (brq.data.blocks > 1 && rq_data_dir(req) == READ) {
  				/* Redo read one sector at a time */
  				printk(KERN_WARNING "%s: retrying using single "
-@@ -607,6 +623,13 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -610,6 +626,13 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  			status = get_card_status(card, req);
  		}
  
@@ -173,7 +176,7 @@ index c209953..4b1a58e 100644
  		if (brq.cmd.error) {
  			printk(KERN_ERR "%s: error %d sending read/write "
  			       "command, response %#x, card status %#x\n",
-@@ -804,8 +827,6 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
+@@ -821,8 +844,6 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
  	md->disk->queue = md->queue.queue;
  	md->disk->driverfs_dev = parent;
  	set_disk_ro(md->disk, md->read_only || default_ro);
@@ -182,7 +185,7 @@ index c209953..4b1a58e 100644
  
  	/*
  	 * As discussed on lkml, GENHD_FL_REMOVABLE should:
-@@ -829,6 +850,19 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
+@@ -841,6 +862,19 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
  
  	blk_queue_logical_block_size(md->queue.queue, 512);
  	set_capacity(md->disk, size);
@@ -202,7 +205,7 @@ index c209953..4b1a58e 100644
  	return md;
  
   err_putdisk:
-@@ -982,6 +1016,26 @@ static const struct mmc_fixup blk_fixups[] =
+@@ -995,6 +1029,21 @@ static const struct mmc_fixup blk_fixups[] =
  	MMC_FIXUP("SEM08G", 0x2, 0x100, add_quirk, MMC_QUIRK_INAND_CMD38),
  	MMC_FIXUP("SEM16G", 0x2, 0x100, add_quirk, MMC_QUIRK_INAND_CMD38),
  	MMC_FIXUP("SEM32G", 0x2, 0x100, add_quirk, MMC_QUIRK_INAND_CMD38),
@@ -210,22 +213,17 @@ index c209953..4b1a58e 100644
 +	/*
 +	 * Some MMC cards experience performance degradation with CMD23
 +	 * instead of CMD12-bounded multiblock transfers. For now we'll
-+	 * white list what's good:
-+	 * 1) Certain SanDisk eMMCs with the old MMCA manfid.
-+	 * 2) All new SanDisk products.
++	 * black list what's bad...
++	 * - Certain Toshiba cards.
 +	 *
 +	 * N.B. This doesn't affect SD cards.
 +	 */
-+	MMC_FIXUP(CID_NAME_ANY, CID_MANFID_ANY, CID_OEMID_ANY, add_quirk_mmc,
++	MMC_FIXUP("MMC08G", 0x11, CID_OEMID_ANY, add_quirk_mmc,
 +		  MMC_QUIRK_BLK_NO_CMD23),
-+	MMC_FIXUP("SEM04G", 0x2, 0x100, remove_quirk_mmc, MMC_QUIRK_BLK_NO_CMD23),
-+	MMC_FIXUP("SEM08G", 0x2, 0x100, remove_quirk_mmc, MMC_QUIRK_BLK_NO_CMD23),
-+	MMC_FIXUP("SEM16G", 0x2, 0x100, remove_quirk_mmc, MMC_QUIRK_BLK_NO_CMD23),
-+	MMC_FIXUP("SEM32G", 0x2, 0x100, remove_quirk_mmc, MMC_QUIRK_BLK_NO_CMD23),
-+	MMC_FIXUP("SEM02G", 0x2, 0x100, remove_quirk_mmc, MMC_QUIRK_BLK_NO_CMD23),
-+	MMC_FIXUP(CID_NAME_ANY, 0x45, CID_OEMID_ANY,
-+		  remove_quirk_mmc, MMC_QUIRK_BLK_NO_CMD23),
-+
++	MMC_FIXUP("MMC16G", 0x11, CID_OEMID_ANY, add_quirk_mmc,
++		  MMC_QUIRK_BLK_NO_CMD23),
++	MMC_FIXUP("MMC32G", 0x11, CID_OEMID_ANY, add_quirk_mmc,
++		  MMC_QUIRK_BLK_NO_CMD23),
  	END_FIXUP
  };
  

@@ -1,4 +1,4 @@
-From 2c6589c2be994393a80aa4a6fc795eca5d4e771b Mon Sep 17 00:00:00 2001
+From a62ade2cb9c1f0b2aa02a23032fa8d4f7bc19e24 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 13 Apr 2011 18:08:51 -0500
 Subject: [PATCH 4/5] MMC: Block CMD23 support for UHS104/SDXC cards.
@@ -17,10 +17,10 @@ Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
  4 files changed, 18 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
-index 4b1a58e..520529a 100644
+index b91bec2..96250cf 100755
 --- a/drivers/mmc/card/block.c
 +++ b/drivers/mmc/card/block.c
-@@ -851,9 +851,12 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
+@@ -863,9 +863,12 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
  	blk_queue_logical_block_size(md->queue.queue, 512);
  	set_capacity(md->disk, size);
  

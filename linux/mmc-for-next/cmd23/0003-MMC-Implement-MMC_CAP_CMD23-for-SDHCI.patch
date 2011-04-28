@@ -1,4 +1,4 @@
-From 5548593f2a656a0558222a55f19417b78de0c8b6 Mon Sep 17 00:00:00 2001
+From 68f723f7fad6ce246bf94f5298f69fb6d5286687 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 13 Apr 2011 18:01:19 -0500
 Subject: [PATCH 3/5] MMC: Implement MMC_CAP_CMD23 for SDHCI.
