@@ -1,7 +1,7 @@
 # HG changeset patch
 # User andreiw@motorola.com
-# Date 1304032705 18000
-# Node ID 3c1f8aeaa60d89181dde1b7481a1aa6f68672598
+# Date 1304033296 18000
+# Node ID 817442a0822858cfbff0bbf841ec083d60082572
 # Parent  f728acaed4815b89cf458718cddea538bb2d67d2
 Xen: Enable OVMF support in HVMloader.
 
@@ -114,15 +114,7 @@ diff --git a/tools/firmware/hvmloader/hvmloader.c b/tools/firmware/hvmloader/hvm
      { NULL, NULL }
  };
  
-@@ -351,6 +353,7 @@
-     const char *bios;
- 
-     bios = xenstore_read("hvmloader/bios");
-+
-     if ( !bios )
-         bios = "rombios";
- 
-@@ -398,9 +401,13 @@
+@@ -398,9 +400,13 @@
                                              bios->smbios_end);
      }
  
@@ -139,7 +131,7 @@ diff --git a/tools/firmware/hvmloader/hvmloader.c b/tools/firmware/hvmloader/hvm
  
      if (bios->bios_high_setup)
          highbios = bios->bios_high_setup();
-@@ -428,8 +435,10 @@
+@@ -428,8 +434,10 @@
          vgabios_sz =
              round_option_rom((*(uint8_t *)(VGABIOS_PHYSICAL_ADDRESS+2)) * 512);
          break;
@@ -150,16 +142,6 @@ diff --git a/tools/firmware/hvmloader/hvmloader.c b/tools/firmware/hvmloader/hvm
 +        printf("No emulated VGA adapter ROM...\n");
          break;
      }
- 
-@@ -491,8 +500,8 @@
-         bios->bios_info_setup(highbios);
- 
-     xenbus_shutdown();
-+    printf("Invoking %s ...\n", bios->name);
- 
--    printf("Invoking %s ...\n", bios->name);
-     return 0;
- }
  
 diff --git a/tools/firmware/hvmloader/ovmf.c b/tools/firmware/hvmloader/ovmf.c
 new file mode 100644
@@ -247,12 +229,12 @@ new file mode 100644
 +    if (config == &ovmf32_config) {
 +        memcpy((void *)VGABIOS_PHYSICAL_ADDRESS,
 +               ovmf32_cirrus_vga, sizeof(ovmf32_cirrus_vga));
-+        printf("OVMF32 Cirrus [0x%x-0x%x)", VGABIOS_PHYSICAL_ADDRESS,
++        printf("OVMF32 Cirrus [0x%x-0x%x)\n", VGABIOS_PHYSICAL_ADDRESS,
 +               VGABIOS_PHYSICAL_ADDRESS + sizeof(ovmf32_cirrus_vga));
 +    } else if (config == &ovmf64_config) {
 +        memcpy((void *)VGABIOS_PHYSICAL_ADDRESS,
 +               ovmf64_cirrus_vga, sizeof(ovmf64_cirrus_vga));
-+        printf("OVMF64 Cirrus [0x%x-0x%x)", VGABIOS_PHYSICAL_ADDRESS,
++        printf("OVMF64 Cirrus [0x%x-0x%x)\n", VGABIOS_PHYSICAL_ADDRESS,
 +               VGABIOS_PHYSICAL_ADDRESS + sizeof(ovmf64_cirrus_vga));
 +    }
 +
