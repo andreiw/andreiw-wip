@@ -64,9 +64,11 @@ void xenbus_shutdown(void)
      * not going to surprise any frontends since it's equivalent to never 
      * having used the rings. */
     memset(rings, 0, sizeof *rings);
+    printf("Just cleared 0x%x:0x%x\n", (uint32_t) rings,  (uint32_t) sizeof *rings);
 
     /* Clear the event-channel state too. */
     memset(get_shared_info(), 0, PAGE_SIZE);
+    printf("Just cleared 0x%x:0x%x\n", (uint32_t) get_shared_info(), (uint32_t) PAGE_SIZE);
 
     rings = NULL;
 }

@@ -518,6 +518,16 @@ int main(void)
 
     xenbus_shutdown();
     printf("Invoking %s ...\n", bios->name);
+
+    /* To use with gdbsx */
+    {
+        volatile int debug_attached = 0;
+        printf("Waiting for debugger...\n");
+        while (!debug_attached) {
+            rmb();
+        }
+    }
+
     return 0;
 }
 
