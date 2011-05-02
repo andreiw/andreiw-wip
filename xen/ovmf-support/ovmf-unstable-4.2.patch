@@ -1,7 +1,7 @@
 # HG changeset patch
 # User andreiw@motorola.com
-# Date 1304034034 18000
-# Node ID 35e5f6147d2dbe3efa4fafd06c0a181a35c1cc73
+# Date 1304377311 18000
+# Node ID fdf8a9764496e971a38d7b99e0cfbe9df2197ca5
 # Parent  f728acaed4815b89cf458718cddea538bb2d67d2
 Xen: Enable OVMF support in HVMloader.
 
@@ -147,7 +147,7 @@ diff --git a/tools/firmware/hvmloader/ovmf.c b/tools/firmware/hvmloader/ovmf.c
 new file mode 100644
 --- /dev/null
 +++ b/tools/firmware/hvmloader/ovmf.c
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,177 @@
 +/*
 + * HVM OVMF UEFI support.
 + *
@@ -218,9 +218,6 @@ new file mode 100644
 +static void ovmf_load(const struct bios_config *config)
 +{
 +    xen_pfn_t mfn;
-+    struct xen_add_to_physmap xatp;
-+    struct xen_memory_reservation xmr;
-+    int over_allocated = 0;
 +    uint64_t addr = OVMF_BEGIN;
 +
 +    virtual_vga = VGA_custom;
@@ -244,46 +241,18 @@ new file mode 100644
 +           - LOWCHUNK_SIZE,
 +           LOWCHUNK_SIZE);
 +
-+
-+    printf("Copied lowchunk...\n");
-+
 +    /* Ensure we have backing page prior to moving FD. */
 +    while ((addr >> PAGE_SHIFT) != (OVMF_END >> PAGE_SHIFT)) {
 +        mfn = (uint32_t) (addr >> PAGE_SHIFT);
 +        addr += PAGE_SIZE;
 +
-+        if (!over_allocated) {
-+            xmr.domid = DOMID_SELF;
-+            xmr.mem_flags = 0;
-+            xmr.extent_order = 0;
-+            xmr.nr_extents = 1;
-+            set_xen_guest_handle(xmr.extent_start, &mfn);
-+            if ( hypercall_memory_op(XENMEM_populate_physmap, &xmr) == 1 )
-+                continue;
-+            over_allocated = 1;
-+        }
-+
-+        /* Otherwise, relocate a page from the ordinary RAM map. */
-+        if (hvm_info->high_mem_pgend) {
-+            xatp.idx = --hvm_info->high_mem_pgend;
-+            if ( xatp.idx == (1ull << (32 - PAGE_SHIFT)) )
-+                hvm_info->high_mem_pgend = 0;
-+        } else
-+            xatp.idx = --hvm_info->low_mem_pgend;
-+
-+        xatp.domid = DOMID_SELF;
-+        xatp.space = XENMAPSPACE_gmfn;
-+        xatp.gpfn  = mfn;
-+        if ( hypercall_memory_op(XENMEM_add_to_physmap, &xatp) != 0 )
-+            BUG();
++        BUG_ON(mem_back_ram(mfn));
 +    }
 +
 +    printf("Initialized FD backing pages...\n");
 +
 +    /* Copy FD. */
 +    memcpy((void *) OVMF_BEGIN, config->image, OVMF_SIZE);
-+
-+    printf("Copied FD...\n");
 +    printf("Load complete!\n");
 +}
 +
@@ -359,33 +328,152 @@ new file mode 100644
 diff --git a/tools/firmware/hvmloader/util.c b/tools/firmware/hvmloader/util.c
 --- a/tools/firmware/hvmloader/util.c
 +++ b/tools/firmware/hvmloader/util.c
-@@ -597,7 +597,9 @@
+@@ -302,12 +302,54 @@
+     *p = '\0';
+ }
+ 
++/*
++ * Ensures mfn is backed by an accessible RAM page.
++ * Returns 0 on success.
++ */
++int mem_back_ram(xen_pfn_t mfn)
++{
++    struct xen_add_to_physmap xatp;
++    struct xen_memory_reservation xmr;
++    static int over_allocated = 0;
++
++    if ( !over_allocated )
++    {
++        xmr.domid = DOMID_SELF;
++        xmr.mem_flags = 0;
++        xmr.extent_order = 0;
++        xmr.nr_extents = 1;
++        set_xen_guest_handle(xmr.extent_start, &mfn);
++        if ( hypercall_memory_op(XENMEM_populate_physmap, &xmr) == 1 )
++            return 0;
++        over_allocated = 1;
++    }
++
++    /*
++     * Couldn't allocate more memory for domain,
++     * move an existing physical page from end
++     * of RAM.
++     */
++    if ( hvm_info->high_mem_pgend )
++    {
++        xatp.idx = --hvm_info->high_mem_pgend;
++        if ( xatp.idx == (1ull << (32 - PAGE_SHIFT)) )
++            hvm_info->high_mem_pgend = 0;
++    }
++    else
++    {
++        xatp.idx = --hvm_info->low_mem_pgend;
++    }
++    xatp.domid = DOMID_SELF;
++    xatp.space = XENMAPSPACE_gmfn;
++    xatp.gpfn  = mfn;
++    if ( hypercall_memory_op(XENMEM_add_to_physmap, &xatp) != 0 )
++        BUG();
++    return 0;
++}
++
+ void *mem_alloc(uint32_t size, uint32_t align)
+ {
+     static uint32_t reserve = RESERVED_MEMBASE - 1;
+-    static int over_allocated;
+-    struct xen_add_to_physmap xatp;
+-    struct xen_memory_reservation xmr;
+     xen_pfn_t mfn;
+     uint32_t s, e;
+ 
+@@ -325,35 +367,7 @@
+         reserve += PAGE_SIZE;
+         mfn = reserve >> PAGE_SHIFT;
+ 
+-        /* Try to allocate a brand new page in the reserved area. */
+-        if ( !over_allocated )
+-        {
+-            xmr.domid = DOMID_SELF;
+-            xmr.mem_flags = 0;
+-            xmr.extent_order = 0;
+-            xmr.nr_extents = 1;
+-            set_xen_guest_handle(xmr.extent_start, &mfn);
+-            if ( hypercall_memory_op(XENMEM_populate_physmap, &xmr) == 1 )
+-                continue;
+-            over_allocated = 1;
+-        }
+-
+-        /* Otherwise, relocate a page from the ordinary RAM map. */
+-        if ( hvm_info->high_mem_pgend )
+-        {
+-            xatp.idx = --hvm_info->high_mem_pgend;
+-            if ( xatp.idx == (1ull << (32 - PAGE_SHIFT)) )
+-                hvm_info->high_mem_pgend = 0;
+-        }
+-        else
+-        {
+-            xatp.idx = --hvm_info->low_mem_pgend;
+-        }
+-        xatp.domid = DOMID_SELF;
+-        xatp.space = XENMAPSPACE_gmfn;
+-        xatp.gpfn  = mfn;
+-        if ( hypercall_memory_op(XENMEM_add_to_physmap, &xatp) != 0 )
+-            BUG();
++        BUG_ON(mem_back_ram(mfn));
+     }
+ 
+     reserve = e;
+@@ -597,22 +611,24 @@
      return table;
  }
  
 -struct shared_info *get_shared_info(void) 
-+static struct shared_info shinfo __attribute__ ((aligned (PAGE_SIZE)));
++static struct shared_info *shared_info = NULL;
 +
 +struct shared_info *get_shared_info(void)
  {
-     static struct shared_info *shared_info = NULL;
+-    static struct shared_info *shared_info = NULL;
      struct xen_add_to_physmap xatp;
-@@ -608,12 +610,13 @@
+ 
+     if ( shared_info != NULL )
+         return shared_info;
+ 
++    /* Guarantee shinfo lives in a safe (reserved) place */
++    shared_info = mem_alloc(PAGE_SIZE, PAGE_SIZE);
++
      xatp.domid = DOMID_SELF;
      xatp.space = XENMAPSPACE_shared_info;
      xatp.idx   = 0;
 -    xatp.gpfn  = 0xfffffu;
 -    shared_info = (struct shared_info *)(xatp.gpfn << PAGE_SHIFT);
-+    xatp.gpfn  = ((uint32_t) &shinfo) >> PAGE_SHIFT;
++    xatp.gpfn  = ((uint32_t) shared_info) >> PAGE_SHIFT;
      if ( hypercall_memory_op(XENMEM_add_to_physmap, &xatp) != 0 )
          BUG();
- 
-+    shared_info = &shinfo;
+-
      return shared_info;
-+
  }
  
- uint16_t get_cpu_mhz(void)
+diff --git a/tools/firmware/hvmloader/util.h b/tools/firmware/hvmloader/util.h
+--- a/tools/firmware/hvmloader/util.h
++++ b/tools/firmware/hvmloader/util.h
+@@ -3,6 +3,7 @@
+ 
+ #include <stdarg.h>
+ #include <stdint.h>
++#include <xen/memory.h>
+ #include <xen/hvm/hvm_info_table.h>
+ 
+ #define __STR(...) #__VA_ARGS__
+@@ -164,6 +165,9 @@
+ int printf(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
+ int vprintf(const char *fmt, va_list ap);
+ 
++/* Create RAM backing for guest machine frame. */
++int mem_back_ram(xen_pfn_t mfn);
++
+ /* Allocate memory in a reserved region below 4GB. */
+ void *mem_alloc(uint32_t size, uint32_t align);
+ #define virt_to_phys(v) ((unsigned long)(v))
 diff --git a/tools/firmware/hvmloader/xenbus.c b/tools/firmware/hvmloader/xenbus.c
 --- a/tools/firmware/hvmloader/xenbus.c
 +++ b/tools/firmware/hvmloader/xenbus.c
@@ -398,18 +486,6 @@ diff --git a/tools/firmware/hvmloader/xenbus.c b/tools/firmware/hvmloader/xenbus
      /* Ask Xen where the xenbus event channel is. */
      param.domid = DOMID_SELF;
      param.index = HVM_PARAM_STORE_EVTCHN;
-@@ -62,9 +64,11 @@
-      * not going to surprise any frontends since it's equivalent to never 
-      * having used the rings. */
-     memset(rings, 0, sizeof *rings);
-+    printf("Just cleared 0x%x:0x%x\n", (uint32_t) rings,  (uint32_t) sizeof *rings);
- 
-     /* Clear the event-channel state too. */
-     memset(get_shared_info(), 0, PAGE_SIZE);
-+    printf("Just cleared 0x%x:0x%x\n", (uint32_t) get_shared_info(), (uint32_t) PAGE_SIZE);
- 
-     rings = NULL;
- }
 diff --git a/tools/firmware/ovmf/ovmf-ia32-cirrus-vga.bin b/tools/firmware/ovmf/ovmf-ia32-cirrus-vga.bin
 new file mode 100644
 index 0000000000000000000000000000000000000000..94fbc6528f5019202539cf4e560d19f1a3ed69d4
