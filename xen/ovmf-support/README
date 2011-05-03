@@ -1,0 +1,15 @@
+OVMF-on-XEN
+===========
+
+Here go patches as part of my effort as a Google Summer of Code
+mentor for the OVMF-on-XEN project.
+
+http://sourceforge.net/apps/mediawiki/tianocore/index.php?title=GSOC2011#Enable_Xen_Support_in_OVMF
+
+The goal is to port UEFI OVMF (UEFI firmware for virtual machines) to run in a
+Xen HVM domain.
+
+Contact Info
+============
+
+Andrei Warkentin (andrey.warkentin@gmail.com, andreiw@motorola.com)

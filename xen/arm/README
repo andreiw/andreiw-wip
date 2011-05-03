@@ -1,0 +1,17 @@
+Xen 4.2 ARM port
+================
+
+This is a work-in-progress in trying to add ARM support
+to latest Xen 4.2-unstable tree.
+
+This is based off of the Samsung Xen 3.0 tree, which seems
+to be a dead project (http://wiki.xensource.com/xenwiki/XenARM)
+
+Initial support is PV guests on ARMv7 on a Tegra 2 SoC.
+
+Can't wait for the Cortex A15 ;-).
+
+Contact Info
+============
+
+Andrei Warkentin (andrey.warkentin@gmail.com, andreiw@motorola.com)
