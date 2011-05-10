@@ -1,7 +1,7 @@
-Index: PlatformPei/Platform.c
+Index: OvmfPkg/PlatformPei/Platform.c
 ===================================================================
---- PlatformPei/Platform.c	(revision 11547)
-+++ PlatformPei/Platform.c	(working copy)
+--- OvmfPkg/PlatformPei/Platform.c	(revision 11547)
++++ OvmfPkg/PlatformPei/Platform.c	(working copy)
 @@ -1,6 +1,8 @@
  /**@file
    Platform PEI driver
@@ -173,10 +173,10 @@ Index: PlatformPei/Platform.c
  
    MiscInitialization ();
  
-Index: Library/AcpiTimerLib/AcpiTimerLib.c
+Index: OvmfPkg/Library/AcpiTimerLib/AcpiTimerLib.c
 ===================================================================
---- Library/AcpiTimerLib/AcpiTimerLib.c	(revision 11547)
-+++ Library/AcpiTimerLib/AcpiTimerLib.c	(working copy)
+--- OvmfPkg/Library/AcpiTimerLib/AcpiTimerLib.c	(revision 11547)
++++ OvmfPkg/Library/AcpiTimerLib/AcpiTimerLib.c	(working copy)
 @@ -1,25 +1,36 @@
  /** @file
    ACPI Timer implements one instance of Timer Library.
