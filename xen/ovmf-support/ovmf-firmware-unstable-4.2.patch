@@ -6,9 +6,6 @@
 Xen: Enable OVMF support in HVMloader.
 
 Allows UEFI firmware to be loaded in an HVM domain.
-Also exposes the hvmloader/bios xenstore key in xend/xm,
-so firmware loaded can be overriden (choices: rombios,
-ovmf-ia32, ovmf-x64).
 
 Sign-off-by: Andrei Warkentin <andreiw@motorola.com>
 
