@@ -9,6 +9,19 @@ http://sourceforge.net/apps/mediawiki/tianocore/index.php?title=GSOC2011#Enable_
 The goal is to port UEFI OVMF (UEFI firmware for virtual machines) to run in a
 Xen HVM domain.
 
+Patch ToC
+=========
+
+ovmf-firmware-unstable-4.2.patch - HVMLOADER changes and binary OVMF images
+ovmf-xend-unstable-4.2.patch - XEND changes to support loading different ROM
+ovmf-edk2.patch - EDK2 patch against OvmfPkg to support Xen HVM
+
+Running
+=======
+
+With XEND patch, your XM config now has the optional hvmbios parameter, which
+can be 'rombios', 'ovmf-ia32' and 'ovmf-x64'
+
 Contact Info
 ============
 

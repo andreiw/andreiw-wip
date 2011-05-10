@@ -1,0 +1,81 @@
+# HG changeset patch
+# User andreiw@motorola.com
+# Date 1304839938 18000
+# Node ID c34f2354eec72ba9a4ff6e043df680e11ff185d5
+# Parent  f728acaed4815b89cf458718cddea538bb2d67d2
+Xen: Xend: Expose hvmloader/bios.
+
+Exposes the hvmloader/bios xenstore key in xend/xm,
+so firmware loaded can be overriden (choices: rombios,
+ovmf-ia32, ovmf-x64).
+
+Sign-off-by: Andrei Warkentin <andreiw@motorola.com>
+
+diff --git a/tools/python/xen/xend/XendConfig.py b/tools/python/xen/xend/XendConfig.py
+--- a/tools/python/xen/xend/XendConfig.py
++++ b/tools/python/xen/xend/XendConfig.py
+@@ -153,6 +153,7 @@
+     'fdb': str,
+     'keymap': str,
+     'isa' : int,
++    'hvmbios' : str,
+     'localtime': int,
+     'monitor': int,
+     'monitor_path': str,
+diff --git a/tools/python/xen/xend/XendDomainInfo.py b/tools/python/xen/xend/XendDomainInfo.py
+--- a/tools/python/xen/xend/XendDomainInfo.py
++++ b/tools/python/xen/xend/XendDomainInfo.py
+@@ -1789,6 +1789,10 @@
+         if self.info.has_key('security_label'):
+             f('security_label', self.info['security_label'])
+ 
++        hvm = self.info.is_hvm()
++        if hvm and self.info["platform"].get("hvmbios") is not None:
++            f('hvmloader/bios', self.info["platform"].get("hvmbios"))
++
+         to_store.update(self._vcpuDomDetails())
+ 
+         log.debug("Storing domain details: %s", scrub_password(to_store))
+diff --git a/tools/python/xen/xm/create.py b/tools/python/xen/xm/create.py
+--- a/tools/python/xen/xm/create.py
++++ b/tools/python/xen/xm/create.py
+@@ -168,6 +168,10 @@
+           fn=set_value, default=None,
+           use="Path to kernel image.")
+ 
++gopts.var('hvmbios', val='HVMBIOS',
++          fn=set_value, default=None,
++          use="Type of firmware to load in HVM mode")
++
+ gopts.var('ramdisk', val='FILE',
+           fn=set_value, default='',
+           use="Path to ramdisk.")
+@@ -1084,7 +1088,7 @@
+              'device_model', 'display',
+              'fda', 'fdb',
+              'gfx_passthru', 'guest_os_type',
+-             'hap', 'hpet',
++             'hap', 'hpet', 'hvmbios',
+              'isa',
+              'keymap',
+              'localtime',
+@@ -1143,7 +1147,7 @@
+                    'on_reboot', 'on_crash', 'features', 'on_xend_start',
+                    'on_xend_stop', 'target', 'cpuid', 'cpuid_check',
+                    'machine_address_size', 'suppress_spurious_page_faults',
+-                   'description'])
++                   'description' ])
+ 
+     vcpu_conf()
+     if vals.uuid is not None:
+diff --git a/tools/python/xen/xm/xenapi_create.py b/tools/python/xen/xm/xenapi_create.py
+--- a/tools/python/xen/xm/xenapi_create.py
++++ b/tools/python/xen/xm/xenapi_create.py
+@@ -1090,6 +1090,7 @@
+             'fda',
+             'fdb',
+             'keymap',
++            'hvmbios',
+             'isa',
+             'localtime',
+             'monitor',
