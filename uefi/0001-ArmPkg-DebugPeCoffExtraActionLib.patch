@@ -1,0 +1,67 @@
+From e4dc7a7977921ce9912c69e1177fc63cd926e529 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Wed, 11 May 2011 23:04:42 -0500
+Subject: [PATCH] ArmPkg: DebugPeCoffExtraActionLib
+
+Don't crash if PdbPointer is NULL, hence no debugging data.
+
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ .../DebugPeCoffExtraActionLib.c                    |   27 +++++++++++---------
+ 1 files changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/ArmPkg/Library/DebugPeCoffExtraActionLib/DebugPeCoffExtraActionLib.c b/ArmPkg/Library/DebugPeCoffExtraActionLib/DebugPeCoffExtraActionLib.c
+index 5bd1a9d..8af7d9b 100755
+--- a/ArmPkg/Library/DebugPeCoffExtraActionLib/DebugPeCoffExtraActionLib.c
++++ b/ArmPkg/Library/DebugPeCoffExtraActionLib/DebugPeCoffExtraActionLib.c
+@@ -79,15 +79,17 @@ PeCoffLoaderRelocateImageExtraAction (
+ {
+     CHAR8 Temp[512];
+ 
++    if (ImageContext->PdbPointer) {
+ #ifdef __CC_ARM
+-  // Print out the command for the RVD debugger to load symbols for this image
+-  DEBUG ((EFI_D_ERROR, "load /a /ni /np %a &0x%08x\n", DeCygwinPathIfNeeded (ImageContext->PdbPointer, Temp, sizeof (Temp)), (UINTN)(ImageContext->ImageAddress + ImageContext->SizeOfHeaders)));
++      // Print out the command for the RVD debugger to load symbols for this image
++      DEBUG ((EFI_D_ERROR, "load /a /ni /np %a &0x%08x\n", DeCygwinPathIfNeeded (ImageContext->PdbPointer, Temp, sizeof (Temp)), (UINTN)(ImageContext->ImageAddress + ImageContext->SizeOfHeaders)));
+ #elif __GNUC__
+-  // This may not work correctly if you generate PE/COFF directlyas then the Offset would not be required
+-  DEBUG ((EFI_D_ERROR, "add-symbol-file %a 0x%08x\n", DeCygwinPathIfNeeded (ImageContext->PdbPointer, Temp, sizeof (Temp)), (UINTN)(ImageContext->ImageAddress + ImageContext->SizeOfHeaders)));
++      // This may not work correctly if you generate PE/COFF directlyas then the Offset would not be required
++      DEBUG ((EFI_D_ERROR, "add-symbol-file %a 0x%08x\n", DeCygwinPathIfNeeded (ImageContext->PdbPointer, Temp, sizeof (Temp)), (UINTN)(ImageContext->ImageAddress + ImageContext->SizeOfHeaders)));
+ #else
+-  DEBUG ((EFI_D_ERROR, "Loading driver at 0x%11p EntryPoint=0x%11p ", (VOID *)(UINTN) ImageContext->ImageAddress, FUNCTION_ENTRY_POINT (ImageContext->EntryPoint)));
++      DEBUG ((EFI_D_ERROR, "Loading driver at 0x%11p EntryPoint=0x%11p ", (VOID *)(UINTN) ImageContext->ImageAddress, FUNCTION_ENTRY_POINT (ImageContext->EntryPoint)));
+ #endif
++    }
+ }
+ 
+ 
+@@ -109,16 +111,17 @@ PeCoffLoaderUnloadImageExtraAction (
+   )
+ {
+   CHAR8 Temp[512];
+-  
++
++  if (ImageContext->PdbPointer) {
+ #ifdef __CC_ARM
+-  {  
+-  // Print out the command for the RVD debugger to load symbols for this image
++
++    // Print out the command for the RVD debugger to load symbols for this image
+     DEBUG ((EFI_D_ERROR, "unload symbols_only %a", DeCygwinPathIfNeeded (ImageContext->PdbPointer, Temp, sizeof (Temp))));
+-  }
+ #elif __GNUC__
+-  // This may not work correctly if you generate PE/COFF directlyas then the Offset would not be required
+-  DEBUG ((EFI_D_ERROR, "remove-symbol-file %a 0x%08x\n", DeCygwinPathIfNeeded (ImageContext->PdbPointer, Temp, sizeof (Temp)), (UINTN)(ImageContext->ImageAddress + ImageContext->SizeOfHeaders)));
++    // This may not work correctly if you generate PE/COFF directlyas then the Offset would not be required
++    DEBUG ((EFI_D_ERROR, "remove-symbol-file %a 0x%08x\n", DeCygwinPathIfNeeded (ImageContext->PdbPointer, Temp, sizeof (Temp)), (UINTN)(ImageContext->ImageAddress + ImageContext->SizeOfHeaders)));
+ #else
+-  DEBUG ((EFI_D_ERROR, "Unloading %a", ImageContext->PdbPointer));
++    DEBUG ((EFI_D_ERROR, "Unloading %a", ImageContext->PdbPointer));
+ #endif
++  }
+ }
+-- 
+1.7.0.4
+
