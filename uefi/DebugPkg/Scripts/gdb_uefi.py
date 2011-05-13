@@ -265,7 +265,6 @@ class ReloadUefi (gdb.Command):
                 print "Skipping unknown EFI_DEBUG_IMAGE_INFO (Type 0x%x)" % \
                 entry['ImageInfoType'].dereference ()
             index = index + 1
-        print "Unloading existing symbols..."
         gdb.execute ("symbol-file")
         print "Loading new symbols..."
         for sym in syms:
@@ -334,6 +333,7 @@ class ReloadUefi (gdb.Command):
             self.usage ()
             return
 
+        gdb.execute ("symbol-file")
         gdb.execute ("symbol-file %s" % args[0])
         est = self.search_est ()
         if est == self.EINVAL:
