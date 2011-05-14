@@ -1,7 +1,7 @@
-Index: OvmfPkg/PlatformPei/Platform.c
+Index: PlatformPei/Platform.c
 ===================================================================
---- OvmfPkg/PlatformPei/Platform.c	(revision 11547)
-+++ OvmfPkg/PlatformPei/Platform.c	(working copy)
+--- PlatformPei/Platform.c	(revision 11645)
++++ PlatformPei/Platform.c	(working copy)
 @@ -1,6 +1,8 @@
  /**@file
    Platform PEI driver
@@ -11,7 +11,22 @@ Index: OvmfPkg/PlatformPei/Platform.c
    Copyright (c) 2006 - 2010, Intel Corporation. All rights reserved.<BR>
    This program and the accompanying materials
    are licensed and made available under the terms and conditions of the BSD License
-@@ -75,6 +77,24 @@
+@@ -30,11 +32,14 @@
+ #include <Library/PeiServicesLib.h>
+ #include <Library/ResourcePublicationLib.h>
+ #include <Guid/MemoryTypeInformation.h>
++#include <Guid/XenInfo.h>
+ #include <Ppi/MasterBootMode.h>
+ 
+ #include "Platform.h"
+ #include "Cmos.h"
+ 
++EFI_XEN_INFO mXenInfo;
++
+ EFI_MEMORY_TYPE_INFORMATION mDefaultMemoryTypeInformation[] = {
+   { EfiACPIMemoryNVS,       0x004 },
+   { EfiACPIReclaimMemory,   0x008 },
+@@ -75,6 +80,24 @@
  
  
  VOID
@@ -36,7 +51,7 @@ Index: OvmfPkg/PlatformPei/Platform.c
  AddIoMemoryRangeHob (
    EFI_PHYSICAL_ADDRESS        MemoryBase,
    EFI_PHYSICAL_ADDRESS        MemoryLimit
-@@ -147,7 +167,8 @@
+@@ -147,7 +170,8 @@
  
  VOID
  MemMapInitialization (
@@ -46,7 +61,7 @@ Index: OvmfPkg/PlatformPei/Platform.c
    )
  {
    //
-@@ -162,24 +183,46 @@
+@@ -162,24 +186,46 @@
    //
    // Add PCI IO Port space available for PCI resource allocations.
    //
@@ -101,7 +116,7 @@ Index: OvmfPkg/PlatformPei/Platform.c
    // Local APIC range
    //
    AddIoMemoryBaseSizeHob (0xFEC80000, SIZE_512KB);
-@@ -209,11 +252,6 @@
+@@ -209,11 +255,6 @@
    // Build the CPU hob with 36-bit addressing and 16-bits of IO space.
    //
    BuildCpuHob (36, 16);
@@ -113,70 +128,196 @@ Index: OvmfPkg/PlatformPei/Platform.c
  }
  
  
-@@ -279,6 +317,34 @@
+@@ -277,8 +318,87 @@
+   }
+ }
  
++/**
++  Connects to the Hypervisor.
  
- /**
-+  Figures out if we are running inside Xen HVM.
++  @param  XenLeaf     CPUID index used to connect.
 +
-+  @return TRUE     Running under Xen HVM.
++  @return EFI_STATUS
 +
 +**/
-+BOOLEAN
-+IsXen (
-+  VOID
++EFI_STATUS
++XenConnect (
++  UINT32 XenLeaf
 +  )
 +{
 +  UINT32 Index;
++  UINT32 TransferReg;
++  UINT32 TransferPages;
++  UINT32 XenVersion;
++
++  AsmCpuid (XenLeaf + 2, &TransferPages, &TransferReg, NULL, NULL);
++  mXenInfo.HyperPages = AllocatePages (TransferPages);
++  if (!mXenInfo.HyperPages) {
++    return EFI_OUT_OF_RESOURCES;
++  }
++
++  for (Index = 0; Index < TransferPages; Index++) {
++    AsmWriteMsr64 (TransferReg,
++                   (UINTN) mXenInfo.HyperPages +
++		   (Index << EFI_PAGE_SHIFT) + Index);
++  }
++
++  AsmCpuid (XenLeaf + 1, &XenVersion, NULL, NULL, NULL);
++  DEBUG ((EFI_D_ERROR, "Detected Xen version %d.%d\n",
++	  XenVersion >> 16, XenVersion & 0xFFFF));
++  mXenInfo.VersionMajor = XenVersion >> 16;
++  mXenInfo.VersionMinor = XenVersion & 0xFFFF;
++
++  /* TBD: Locate hvm_info and reserve it away. */
++  mXenInfo.HvmInfo = NULL;
++
++  BuildGuidDataHob (
++    &gEfiXenInfoGuid,
++    &mXenInfo,
++    sizeof(mXenInfo)
++    );
++
++  return EFI_SUCCESS;
++}
++
+ /**
++  Figures out if we are running inside Xen HVM.
++
++  @return UINT32     CPUID index used to connect to HV.
++
++**/
++UINT32
++XenDetect (
++  VOID
++  )
++{
++
++  UINT32 XenLeaf;
 +  UINT8 Signature[13];
 +
-+  for (Index = 0x40000000; Index < 0x40010000; Index += 0x100) {
-+    AsmCpuid (Index, NULL, (UINT32 *) &Signature[0],
++  for (XenLeaf = 0x40000000; XenLeaf < 0x40010000; XenLeaf += 0x100) {
++    AsmCpuid (XenLeaf, NULL, (UINT32 *) &Signature[0],
 +              (UINT32 *) &Signature[4],
 +              (UINT32 *) &Signature[8]);
 +    Signature[12] = '\0';
 +
 +    if (!AsciiStrCmp ((CHAR8 *) Signature, "XenVMMXenVMM")) {
-+      return TRUE;
++      return XenLeaf;
 +    }
 +  }
 +
-+  return FALSE;
++  return 0;
++
++
++  return TRUE;
 +}
 +
 +/**
    Perform Platform PEI initialization.
  
    @param  FileHandle      Handle of the file being invoked.
-@@ -295,9 +361,15 @@
+@@ -295,18 +415,25 @@
    )
  {
    EFI_PHYSICAL_ADDRESS  TopOfMemory;
-+  BOOLEAN XenHvm;
++  UINT32 XenLeaf;
  
    DEBUG ((EFI_D_ERROR, "Platform PEIM Loaded\n"));
  
-+  XenHvm = IsXen ();
-+  if (XenHvm) {
-+    DEBUG ((EFI_D_ERROR, "Detected Xen HVM\n"));
-+  }
++  XenLeaf = XenDetect ();
 +
    DebugDumpCmos ();
  
    TopOfMemory = MemDetect ();
-@@ -306,7 +378,7 @@
+ 
++  if (XenLeaf) {
++    XenConnect (XenLeaf);
++  }
++
+   ReserveEmuVariableNvStore ();
  
    PeiFvInitialization ();
  
 -  MemMapInitialization (TopOfMemory);
-+  MemMapInitialization (TopOfMemory, XenHvm);
++  MemMapInitialization (TopOfMemory, XenLeaf ? TRUE : FALSE);
  
    MiscInitialization ();
  
-Index: OvmfPkg/Library/AcpiTimerLib/AcpiTimerLib.c
+Index: PlatformPei/PlatformPei.inf
 ===================================================================
---- OvmfPkg/Library/AcpiTimerLib/AcpiTimerLib.c	(revision 11547)
-+++ OvmfPkg/Library/AcpiTimerLib/AcpiTimerLib.c	(working copy)
+--- PlatformPei/PlatformPei.inf	(revision 11645)
++++ PlatformPei/PlatformPei.inf	(working copy)
+@@ -41,6 +41,7 @@
+ 
+ [Guids]
+   gEfiMemoryTypeInformationGuid
++  gEfiXenInfoGuid
+ 
+ [LibraryClasses]
+   DebugLib
+Index: Include/Guid/XenInfo.h
+===================================================================
+--- Include/Guid/XenInfo.h	(revision 0)
++++ Include/Guid/XenInfo.h	(revision 0)
+@@ -0,0 +1,42 @@
++/** @file
++  XenInfo HOB passed by PEI into DXE.
++
++Copyright (c) 2011, Andrei Warkentin <andreiw@motorola.com>
++This program and the accompanying materials are licensed and made available under
++the terms and conditions of the BSD License that accompanies this distribution.
++The full text of the license may be found at
++http://opensource.org/licenses/bsd-license.php.
++
++THE PROGRAM IS DISTRIBUTED UNDER THE BSD LICENSE ON AN "AS IS" BASIS,
++WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
++
++**/
++
++#ifndef __XEN_INFO_H__
++#define __XEN_INFO_H__
++
++#define EFI_XEN_INFO_GUID \
++    { 0xd3b46f3b, 0xd441, 0x1244, {0x9a, 0x12, 0x0, 0x12, 0x27, 0x3f, 0xc1, 0x4d } }
++
++typedef struct {
++  ///
++  /// Beginning of the hypercall page.
++  ///
++  VOID *HyperPages;
++  ///
++  /// Location of the hvm_info page.
++  ///
++  VOID *HvmInfo;
++  ///
++  /// Hypervisor major version.
++  ///
++  UINT16 VersionMajor;
++  ///
++  /// Hypervisor minor version.
++  ///
++  UINT16 VersionMinor;
++} EFI_XEN_INFO;
++
++extern EFI_GUID gEfiXenInfoGuid;
++
++#endif
+Index: OvmfPkg.dec
+===================================================================
+--- OvmfPkg.dec	(revision 11645)
++++ OvmfPkg.dec	(working copy)
+@@ -33,6 +33,7 @@
+ 
+ [Guids]
+   gUefiOvmfPkgTokenSpaceGuid      = {0x93bb96af, 0xb9f2, 0x4eb8, {0x94, 0x62, 0xe0, 0xba, 0x74, 0x56, 0x42, 0x36}}
++  gEfiXenInfoGuid                 = {0xd3b46f3b, 0xd441, 0x1244, {0x9a, 0x12, 0x0, 0x12, 0x27, 0x3f, 0xc1, 0x4d}}
+ 
+ [Protocols]
+   gBlockMmioProtocolGuid          = {0x6b558ce3, 0x69e5, 0x4c67, {0xa6, 0x34, 0xf7, 0xfe, 0x72, 0xad, 0xbe, 0x84}}
+Index: Library/AcpiTimerLib/AcpiTimerLib.c
+===================================================================
+--- Library/AcpiTimerLib/AcpiTimerLib.c	(revision 11645)
++++ Library/AcpiTimerLib/AcpiTimerLib.c	(working copy)
 @@ -1,25 +1,36 @@
  /** @file
    ACPI Timer implements one instance of Timer Library.
