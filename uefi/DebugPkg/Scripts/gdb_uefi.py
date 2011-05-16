@@ -188,7 +188,7 @@ class ReloadUefi (gdb.Command):
         return gdb.Value(h_addr).cast (head_t)
 
     #
-    # Returns Turue if pe_headers refer to a PE32+ image.
+    # Returns True if pe_headers refer to a PE32+ image.
     #
 
     def pe_is_64 (self, pe_headers):
