@@ -1,4 +1,4 @@
-From 7f911c65b37ecb965c70214a693e5d505195becd Mon Sep 17 00:00:00 2001
+From d67a7a2fce2a7d4cf5e890bc7bd507e21fc5dc0e Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Sat, 16 Apr 2011 05:31:47 -0500
 Subject: [PATCH 1/5] MMC: Add/remove quirks conditional support.
@@ -6,16 +6,17 @@ Subject: [PATCH 1/5] MMC: Add/remove quirks conditional support.
 Conditional add/remove quirks for MMC and SD.
 
 Cc: cjb@laptop.org
+Cc: malchev@google.com
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
  include/linux/mmc/card.h |   40 ++++++++++++++++++++++++++++++++++++----
  1 files changed, 36 insertions(+), 4 deletions(-)
 
 diff --git a/include/linux/mmc/card.h b/include/linux/mmc/card.h
-index 72a9868..6a4ed2a 100644
+index 4910dec..7190aa2 100644
 --- a/include/linux/mmc/card.h
 +++ b/include/linux/mmc/card.h
-@@ -233,16 +233,14 @@ struct mmc_fixup {
+@@ -273,16 +273,14 @@ struct mmc_fixup {
  		    card->cid.month)
  
  /*
@@ -34,9 +35,9 @@ index 72a9868..6a4ed2a 100644
  static inline void __maybe_unused remove_quirk(struct mmc_card *card, int data)
  {
  	card->quirks &= ~data;
-@@ -264,6 +262,40 @@ static inline void __maybe_unused remove_quirk(struct mmc_card *card, int data)
- #define mmc_card_set_blockaddr(c) ((c)->state |= MMC_STATE_BLOCKADDR)
- #define mmc_card_set_ddr_mode(c) ((c)->state |= MMC_STATE_HIGHSPEED_DDR)
+@@ -308,6 +306,40 @@ static inline void __maybe_unused remove_quirk(struct mmc_card *card, int data)
+ #define mmc_sd_card_set_uhs(c) ((c)->state |= MMC_STATE_ULTRAHIGHSPEED)
+ #define mmc_card_set_ext_capacity(c) ((c)->state |= MMC_CARD_SDXC)
  
 +/*
 + * Quirk add/remove for MMC products.

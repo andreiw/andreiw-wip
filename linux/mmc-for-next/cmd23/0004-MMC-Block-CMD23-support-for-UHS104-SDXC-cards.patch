@@ -1,4 +1,4 @@
-From a62ade2cb9c1f0b2aa02a23032fa8d4f7bc19e24 Mon Sep 17 00:00:00 2001
+From c867840e682b28dee0429d98408c8b1e671336f0 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 13 Apr 2011 18:08:51 -0500
 Subject: [PATCH 4/5] MMC: Block CMD23 support for UHS104/SDXC cards.
@@ -8,19 +8,20 @@ SD cards operating at UHS104 or better support SET_BLOCK_COUNT.
 Cc: arindam.nath@amd.com
 Cc: cjb@laptop.org
 Cc: arnd@arndb.de
+Cc: malchev@google.com
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
  drivers/mmc/card/block.c |    9 ++++++---
  drivers/mmc/core/sd.c    |    7 +++++++
- include/linux/mmc/card.h |    4 ++++
+ include/linux/mmc/card.h |    3 +++
  include/linux/mmc/sd.h   |    2 +-
- 4 files changed, 18 insertions(+), 4 deletions(-)
+ 4 files changed, 17 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
-index b91bec2..96250cf 100755
+index a380acc..71da564 100755
 --- a/drivers/mmc/card/block.c
 +++ b/drivers/mmc/card/block.c
-@@ -863,9 +863,12 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
+@@ -1057,9 +1057,12 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
  	blk_queue_logical_block_size(md->queue.queue, 512);
  	set_capacity(md->disk, size);
  
@@ -37,10 +38,10 @@ index b91bec2..96250cf 100755
  	if (mmc_card_mmc(card) &&
  	    md->flags & MMC_BLK_CMD23 &&
 diff --git a/drivers/mmc/core/sd.c b/drivers/mmc/core/sd.c
-index 6dac89f..a3d771a 100644
+index 596d0b9..efff41d 100644
 --- a/drivers/mmc/core/sd.c
 +++ b/drivers/mmc/core/sd.c
-@@ -195,6 +195,13 @@ static int mmc_decode_scr(struct mmc_card *card)
+@@ -203,6 +203,13 @@ static int mmc_decode_scr(struct mmc_card *card)
  	else
  		card->erased_byte = 0x0;
  
@@ -55,14 +56,10 @@ index 6dac89f..a3d771a 100644
  }
  
 diff --git a/include/linux/mmc/card.h b/include/linux/mmc/card.h
-index c758181..e6b2e6f 100644
+index 4a0e27b..c6927a4 100644
 --- a/include/linux/mmc/card.h
 +++ b/include/linux/mmc/card.h
-@@ -67,9 +67,13 @@ struct mmc_ext_csd {
- 
- struct sd_scr {
- 	unsigned char		sda_vsn;
-+	unsigned char		sda_spec3;
+@@ -72,6 +72,9 @@ struct sd_scr {
  	unsigned char		bus_widths;
  #define SD_SCR_BUS_WIDTH_1	(1<<0)
  #define SD_SCR_BUS_WIDTH_4	(1<<2)
@@ -73,10 +70,10 @@ index c758181..e6b2e6f 100644
  
  struct sd_ssr {
 diff --git a/include/linux/mmc/sd.h b/include/linux/mmc/sd.h
-index 3fd85e0..9fe0689 100644
+index c648878..7d35d52 100644
 --- a/include/linux/mmc/sd.h
 +++ b/include/linux/mmc/sd.h
-@@ -59,7 +59,7 @@
+@@ -66,7 +66,7 @@
  
  #define SCR_SPEC_VER_0		0	/* Implements system specification 1.0 - 1.01 */
  #define SCR_SPEC_VER_1		1	/* Implements system specification 1.10 */

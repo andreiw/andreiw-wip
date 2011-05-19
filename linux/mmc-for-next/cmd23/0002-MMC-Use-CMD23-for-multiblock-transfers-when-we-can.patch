@@ -1,4 +1,4 @@
-From ca04823271a9cd048944c45154b7cd3229ef8db8 Mon Sep 17 00:00:00 2001
+From dc9fff50920375b77f04256815f27e9ea8726ad4 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 13 Apr 2011 17:22:20 -0500
 Subject: [PATCH 2/5] MMC: Use CMD23 for multiblock transfers when we can.
@@ -9,23 +9,24 @@ have a performance advantage on some MMC cards.
 Cc: arindam.nath@amd.com
 Cc: cjb@laptop.org
 Cc: arnd@arndb.de
+Cc: malchev@google.com
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
- drivers/mmc/card/block.c |  109 +++++++++++++++++++++++++++++++++-------------
+ drivers/mmc/card/block.c |  108 +++++++++++++++++++++++++++++++++------------
  include/linux/mmc/card.h |    1 +
  include/linux/mmc/core.h |    1 +
  include/linux/mmc/host.h |    6 +++
  include/linux/mmc/mmc.h  |    6 +++
- 5 files changed, 93 insertions(+), 30 deletions(-)
+ 5 files changed, 93 insertions(+), 29 deletions(-)
  mode change 100644 => 100755 drivers/mmc/card/block.c
 
 diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
 old mode 100644
 new mode 100755
-index 92e4a00..b91bec2
+index 126c7f4..a380acc
 --- a/drivers/mmc/card/block.c
 +++ b/drivers/mmc/card/block.c
-@@ -55,10 +55,6 @@ MODULE_ALIAS("mmc:block");
+@@ -59,10 +59,6 @@ MODULE_ALIAS("mmc:block");
  #define INAND_CMD38_ARG_SECTRIM1 0x81
  #define INAND_CMD38_ARG_SECTRIM2 0x88
  
@@ -36,7 +37,7 @@ index 92e4a00..b91bec2
  static DEFINE_MUTEX(block_mutex);
  
  /*
-@@ -86,6 +82,10 @@ struct mmc_blk_data {
+@@ -90,6 +86,10 @@ struct mmc_blk_data {
  	struct mmc_queue queue;
  	struct list_head part;
  
@@ -47,7 +48,7 @@ index 92e4a00..b91bec2
  	unsigned int	usage;
  	unsigned int	read_only;
  	unsigned int	part_type;
-@@ -227,6 +227,7 @@ static const struct block_device_operations mmc_bdops = {
+@@ -429,6 +429,7 @@ static const struct block_device_operations mmc_bdops = {
  
  struct mmc_blk_request {
  	struct mmc_request	mrq;
@@ -55,7 +56,7 @@ index 92e4a00..b91bec2
  	struct mmc_command	cmd;
  	struct mmc_command	stop;
  	struct mmc_data		data;
-@@ -457,13 +458,10 @@ static int mmc_blk_issue_flush(struct mmc_queue *mq, struct request *req)
+@@ -652,13 +653,10 @@ static int mmc_blk_issue_flush(struct mmc_queue *mq, struct request *req)
   * reliable write can handle, thus finish the request in
   * partial completions.
   */
@@ -67,17 +68,16 @@ index 92e4a00..b91bec2
 +				    struct request *req)
  {
 -	int err;
--	struct mmc_command set_count;
+-	struct mmc_command set_count = {0};
 -
  	if (!(card->ext_csd.rel_param & EXT_CSD_WR_REL_PARAM_EN)) {
  		/* Legacy mode imposes restrictions on transfers. */
  		if (!IS_ALIGNED(brq->cmd.arg, card->ext_csd.rel_sectors))
-@@ -474,16 +472,6 @@ static inline int mmc_apply_rel_rw(struct mmc_blk_request *brq,
+@@ -669,15 +667,6 @@ static inline int mmc_apply_rel_rw(struct mmc_blk_request *brq,
  		else if (brq->data.blocks < card->ext_csd.rel_sectors)
  			brq->data.blocks = 1;
  	}
 -
--	memset(&set_count, 0, sizeof(struct mmc_command));
 -	set_count.opcode = MMC_SET_BLOCK_COUNT;
 -	set_count.arg = brq->data.blocks | (1 << 31);
 -	set_count.flags = MMC_RSP_R1 | MMC_CMD_AC;
@@ -89,7 +89,7 @@ index 92e4a00..b91bec2
  }
  
  static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
-@@ -500,7 +488,7 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -694,7 +683,7 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  	bool do_rel_wr = ((req->cmd_flags & REQ_FUA) ||
  			  (req->cmd_flags & REQ_META)) &&
  		(rq_data_dir(req) == WRITE) &&
@@ -97,8 +97,8 @@ index 92e4a00..b91bec2
 +		(md->flags & MMC_BLK_REL_WR);
  
  	do {
- 		struct mmc_command cmd;
-@@ -539,11 +527,9 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+ 		struct mmc_command cmd = {0};
+@@ -732,11 +721,9 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  
  		if (brq.data.blocks > 1 || do_rel_wr) {
  			/* SPI multiblock writes terminate using a special
@@ -112,7 +112,7 @@ index 92e4a00..b91bec2
  			    rq_data_dir(req) == READ)
  				brq.mrq.stop = &brq.stop;
  			readcmd = MMC_READ_MULTIPLE_BLOCK;
-@@ -561,8 +547,37 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -754,8 +741,37 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  			brq.data.flags |= MMC_DATA_WRITE;
  		}
  
@@ -152,7 +152,7 @@ index 92e4a00..b91bec2
  
  		mmc_set_data_timeout(&brq.data, card);
  
-@@ -599,7 +614,8 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -792,7 +808,8 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  		 * until later as we need to wait for the card to leave
  		 * programming mode even when things go wrong.
  		 */
@@ -162,7 +162,7 @@ index 92e4a00..b91bec2
  			if (brq.data.blocks > 1 && rq_data_dir(req) == READ) {
  				/* Redo read one sector at a time */
  				printk(KERN_WARNING "%s: retrying using single "
-@@ -610,6 +626,13 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+@@ -803,6 +820,13 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
  			status = get_card_status(card, req);
  		}
  
@@ -176,7 +176,7 @@ index 92e4a00..b91bec2
  		if (brq.cmd.error) {
  			printk(KERN_ERR "%s: error %d sending read/write "
  			       "command, response %#x, card status %#x\n",
-@@ -821,8 +844,6 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
+@@ -1014,8 +1038,6 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
  	md->disk->queue = md->queue.queue;
  	md->disk->driverfs_dev = parent;
  	set_disk_ro(md->disk, md->read_only || default_ro);
@@ -185,7 +185,7 @@ index 92e4a00..b91bec2
  
  	/*
  	 * As discussed on lkml, GENHD_FL_REMOVABLE should:
-@@ -841,6 +862,19 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
+@@ -1034,6 +1056,19 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
  
  	blk_queue_logical_block_size(md->queue.queue, 512);
  	set_capacity(md->disk, size);
@@ -205,7 +205,7 @@ index 92e4a00..b91bec2
  	return md;
  
   err_putdisk:
-@@ -995,6 +1029,21 @@ static const struct mmc_fixup blk_fixups[] =
+@@ -1189,6 +1224,21 @@ static const struct mmc_fixup blk_fixups[] =
  	MMC_FIXUP("SEM08G", 0x2, 0x100, add_quirk, MMC_QUIRK_INAND_CMD38),
  	MMC_FIXUP("SEM16G", 0x2, 0x100, add_quirk, MMC_QUIRK_INAND_CMD38),
  	MMC_FIXUP("SEM32G", 0x2, 0x100, add_quirk, MMC_QUIRK_INAND_CMD38),
@@ -228,10 +228,10 @@ index 92e4a00..b91bec2
  };
  
 diff --git a/include/linux/mmc/card.h b/include/linux/mmc/card.h
-index 6a4ed2a..c758181 100644
+index 7190aa2..4a0e27b 100644
 --- a/include/linux/mmc/card.h
 +++ b/include/linux/mmc/card.h
-@@ -134,6 +134,7 @@ struct mmc_card {
+@@ -171,6 +171,7 @@ struct mmc_card {
  #define MMC_QUIRK_NONSTD_FUNC_IF (1<<4)		/* SDIO card has nonstd function interfaces */
  #define MMC_QUIRK_DISABLE_CD	(1<<5)		/* disconnect CD/DAT[3] resistor */
  #define MMC_QUIRK_INAND_CMD38	(1<<6)		/* iNAND devices have broken CMD38 */
@@ -240,7 +240,7 @@ index 6a4ed2a..c758181 100644
  	unsigned int		erase_size;	/* erase size in sectors */
   	unsigned int		erase_shift;	/* if erase unit is power 2 */
 diff --git a/include/linux/mmc/core.h b/include/linux/mmc/core.h
-index f8e4bcb..55d7fde 100644
+index cbe8d55..b6718e5 100644
 --- a/include/linux/mmc/core.h
 +++ b/include/linux/mmc/core.h
 @@ -120,6 +120,7 @@ struct mmc_data {
@@ -252,18 +252,18 @@ index f8e4bcb..55d7fde 100644
  	struct mmc_data		*data;
  	struct mmc_command	*stop;
 diff --git a/include/linux/mmc/host.h b/include/linux/mmc/host.h
-index 4f705eb..ba34fc5 100644
+index de32e6a..e946bd1 100644
 --- a/include/linux/mmc/host.h
 +++ b/include/linux/mmc/host.h
-@@ -173,6 +173,7 @@ struct mmc_host {
- 						/* DDR mode at 1.2V */
- #define MMC_CAP_POWER_OFF_CARD	(1 << 13)	/* Can power off after boot */
- #define MMC_CAP_BUS_WIDTH_TEST	(1 << 14)	/* CMD14/CMD19 bus width ok */
-+#define MMC_CAP_CMD23		(1 << 15)	/* CMD23 supported */
+@@ -210,6 +210,7 @@ struct mmc_host {
+ #define MMC_CAP_MAX_CURRENT_400	(1 << 27)	/* Host max current limit is 400mA */
+ #define MMC_CAP_MAX_CURRENT_600	(1 << 28)	/* Host max current limit is 600mA */
+ #define MMC_CAP_MAX_CURRENT_800	(1 << 29)	/* Host max current limit is 800mA */
++#define MMC_CAP_CMD23		(1 << 30)	/* CMD23 supported. */
  
  	mmc_pm_flag_t		pm_caps;	/* supported pm features */
  
-@@ -330,5 +331,10 @@ static inline int mmc_card_wake_sdio_irq(struct mmc_host *host)
+@@ -366,5 +367,10 @@ static inline int mmc_card_wake_sdio_irq(struct mmc_host *host)
  {
  	return host->pm_flags & MMC_PM_WAKE_SDIO_IRQ;
  }
@@ -275,10 +275,10 @@ index 4f705eb..ba34fc5 100644
  #endif
  
 diff --git a/include/linux/mmc/mmc.h b/include/linux/mmc/mmc.h
-index 373b2bf..ea74168 100644
+index 9fa5a73..848aab2 100644
 --- a/include/linux/mmc/mmc.h
 +++ b/include/linux/mmc/mmc.h
-@@ -82,6 +82,12 @@
+@@ -83,6 +83,12 @@
  #define MMC_APP_CMD              55   /* ac   [31:16] RCA        R1  */
  #define MMC_GEN_CMD              56   /* adtc [0] RD/WR          R1  */
  
