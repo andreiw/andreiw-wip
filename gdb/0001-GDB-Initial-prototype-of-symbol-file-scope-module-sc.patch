@@ -1,0 +1,655 @@
+From 5ea0b86f06098900309e2d73ebb3cd9446243c08 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Sat, 21 May 2011 18:57:58 -0500
+Subject: [PATCH] GDB: Initial prototype of symbol file scope ("module scope" in other debuggers).
+
+More or less works, you can do stuff like -
+print 'IsaBusDxe.dll'::DeRegisterIdeDevice
+
+Added list-symbol-files command, which will be renamed "info symfiles".
+
+print 'IsaBusDxe.dll'::gST still gives the wrong
+symbol, due to lookup/caching issues that still need to be
+investigated.
+
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ gdb/c-exp.y     |   68 ++++++++++++++++++-
+ gdb/completer.c |   22 +++++-
+ gdb/linespec.c  |   76 ++++++++++++--------
+ gdb/symfile.c   |   30 ++++++++
+ gdb/symtab.c    |  204 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ gdb/symtab.h    |    6 ++
+ 6 files changed, 370 insertions(+), 36 deletions(-)
+
+diff --git a/gdb/c-exp.y b/gdb/c-exp.y
+index 845771c..a402dcf 100644
+--- a/gdb/c-exp.y
++++ b/gdb/c-exp.y
+@@ -146,6 +146,7 @@ void yyerror (char *);
+     struct symtoken ssym;
+     int voidval;
+     struct block *bval;
++    struct objfile *ofile;
+     enum exp_opcode opcode;
+     struct internalvar *ivar;
+ 
+@@ -201,7 +202,7 @@ static struct stoken operator_stoken (const char *);
+ %token <ssym> NAME_OR_INT 
+ 
+ %token OPERATOR
+-%token STRUCT CLASS UNION ENUM SIZEOF UNSIGNED COLONCOLON
++%token STRUCT CLASS UNION ENUM SIZEOF UNSIGNED COLONCOLON COLONCOLON
+ %token TEMPLATE
+ %token ERROR
+ %token NEW DELETE
+@@ -240,9 +241,9 @@ static struct stoken operator_stoken (const char *);
+ %right ARROW ARROW_STAR '.' DOT_STAR '[' '('
+ %token <ssym> BLOCKNAME 
+ %token <bval> FILENAME
++%token <ofile> SYMFILENAME
+ %type <bval> block
+ %left COLONCOLON
+-
+ 
+ %%
+ 
+@@ -704,6 +705,29 @@ exp     :       FALSEKEYWORD
+ 
+ /* end of C++.  */
+ 
++block	:	SYMFILENAME COLONCOLON name
++			{
++			  struct symtab *s = NULL;
++			  struct symbol *tem= NULL;
++			  struct block *b = NULL;
++			  ALL_OBJFILE_SYMTABS ($1, s)
++			    {
++			      b = BLOCKVECTOR_BLOCK (BLOCKVECTOR (s), STATIC_BLOCK);
++			      tem = lookup_symbol (copy_name ($3), b,
++						   VAR_DOMAIN, (int *) NULL);
++			      if (tem && SYMBOL_CLASS (tem) == LOC_BLOCK)
++				{
++				  $$ = SYMBOL_BLOCK_VALUE (tem);
++				  break;
++				}
++			    }
++			  
++			  if (!s)
++			    error ("No function \"%s\" in specified context.",
++				   copy_name ($3));
++			}
++        ;
++
+ block	:	BLOCKNAME
+ 			{
+ 			  if ($1.sym)
+@@ -728,6 +752,36 @@ block	:	block COLONCOLON name
+ 			  $$ = SYMBOL_BLOCK_VALUE (tem); }
+ 	;
+ 
++variable:	SYMFILENAME COLONCOLON name
++			{
++			  struct symtab *s = NULL;
++			  struct symbol *sym = NULL;
++			  struct block*b  = NULL;
++			  ALL_OBJFILE_SYMTABS ($1, s)
++			    {
++			      printf ("looking for %s in %s\n", copy_name($3),
++				      s->filename);
++			      b = BLOCKVECTOR_BLOCK (BLOCKVECTOR (s), STATIC_BLOCK);
++			      sym = lookup_symbol (copy_name ($3), b,
++						   VAR_DOMAIN, (int *) NULL);
++			      if (sym)
++				{
++				  printf("found\n");
++				  write_exp_elt_opcode (OP_VAR_VALUE);
++				  /* block_found is set by lookup_symbol.  */
++				  write_exp_elt_block (block_found);
++				  write_exp_elt_sym (sym);
++				  write_exp_elt_opcode (OP_VAR_VALUE);
++				  break;
++				}
++			    }
++
++			  if (!s)
++			      error ("No symbol \"%s\" in specified context.",
++				     copy_name ($3));
++			}
++	;
++
+ variable:	block COLONCOLON name
+ 			{ struct symbol *sym;
+ 			  sym = lookup_symbol (copy_name ($3), $1,
+@@ -2376,7 +2430,15 @@ yylex (void)
+       }
+     else if (!sym)
+       {				/* See if it's a file name. */
+-	struct symtab *symtab;
++	struct symtab *symtab = NULL;
++	struct objfile *objfile = NULL;
++
++	objfile = lookup_symtabs (copy);
++	if (objfile)
++	  {
++	    yylval.ofile = objfile;
++	    return SYMFILENAME;
++	  }
+ 
+ 	symtab = lookup_symtab (copy);
+ 
+diff --git a/gdb/completer.c b/gdb/completer.c
+index 53275c0..becaf69 100644
+--- a/gdb/completer.c
++++ b/gdb/completer.c
+@@ -199,9 +199,10 @@ filename_completer (struct cmd_list_element *ignore, char *text, char *word)
+ char **
+ location_completer (struct cmd_list_element *ignore, char *text, char *word)
+ {
+-  int n_syms = 0, n_files = 0;
++  int n_syms = 0, o_syms = 0, n_files = 0;
+   char ** fn_list = NULL;
+   char ** list = NULL;
++  char ** obj_sym_list = NULL;
+   char *p;
+   int quote_found = 0;
+   int quoted = *text == '\'' || *text == '"';
+@@ -272,6 +273,8 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
+      symbols as well as on files.  */
+   if (colon)
+     {
++      obj_sym_list = make_objfile_symbol_completion_list (symbol_start,
++                                                          word, file_to_match);
+       list = make_file_symbol_completion_list (symbol_start, word,
+ 					       file_to_match);
+       xfree (file_to_match);
+@@ -281,12 +284,15 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
+       list = make_symbol_completion_list (symbol_start, word);
+       /* If text includes characters which cannot appear in a file
+ 	 name, they cannot be asking for completion on files.  */
+-      if (strcspn (text, 
++      if (strcspn (text,
+ 		   gdb_completer_file_name_break_characters) == text_len)
+ 	fn_list = make_source_files_completion_list (text, text);
+     }
+ 
+-  /* How many completions do we have in both lists?  */
++  /* How many completions do we have in all lists?  */
++  if (obj_sym_list)
++    for ( ; obj_sym_list[o_syms]; o_syms++)
++      ;
+   if (fn_list)
+     for ( ; fn_list[n_files]; n_files++)
+       ;
+@@ -294,6 +300,16 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
+     for ( ; list[n_syms]; n_syms++)
+       ;
+ 
++  /* Catenate obj_sym_list with list */
++  if (o_syms)
++    {
++      list = xrealloc (list, (n_syms + o_syms + 1) * sizeof (char *));
++      memcpy (list + n_syms, obj_sym_list, (o_syms + 1) * sizeof (char *));
++      xfree (obj_sym_list);
++      n_syms += o_syms;
++      o_syms = 0;
++    }
++
+   /* Make list[] large enough to hold both lists, then catenate
+      fn_list[] onto the end of list[].  */
+   if (n_syms && n_files)
+diff --git a/gdb/linespec.c b/gdb/linespec.c
+index 75a74e2..6904e9b 100644
+--- a/gdb/linespec.c
++++ b/gdb/linespec.c
+@@ -108,7 +108,7 @@ static struct symtabs_and_lines decode_line_2 (struct symbol *[],
+ 
+ static struct symtab *symtab_from_filename (char **argptr,
+ 					    char *p, int is_quote_enclosed,
+-					    int *not_found_ptr);
++					    int *not_found_ptr, int *symtabs);
+ 
+ static struct
+ symtabs_and_lines decode_all_digits (char **argptr,
+@@ -128,7 +128,8 @@ static struct symtabs_and_lines decode_variable (char *copy,
+ 						 int funfirstline,
+ 						 char ***canonical,
+ 						 struct symtab *file_symtab,
+-						 int *not_found_ptr);
++						 int *not_found_ptr,
++                                                 int symtabs);
+ 
+ static struct
+ symtabs_and_lines symbol_found (int funfirstline,
+@@ -687,7 +688,8 @@ decode_line_1 (char **argptr, int funfirstline, struct symtab *default_symtab,
+ {
+   char *p;
+   char *q;
+-  /* If a file name is specified, this is its symtab.  */
++  /* If a file name is specified, this is its symtab (if file was source),
++     or symtabs of file was symbol file.  */
+   struct symtab *file_symtab = NULL;
+ 
+   char *copy;
+@@ -704,6 +706,10 @@ decode_line_1 (char **argptr, int funfirstline, struct symtab *default_symtab,
+   /* If IS_QUOTED, the end of the quoted bit.  */
+   char *end_quote = NULL;
+ 
++  /* Set to 1 if filename was a symbol file name, so we need to check
++   all symtabs. */
++  int symtabs = 0;
++
+   if (not_found_ptr)
+     *not_found_ptr = 0;
+ 
+@@ -778,10 +784,10 @@ decode_line_1 (char **argptr, int funfirstline, struct symtab *default_symtab,
+       else
+ 	{
+ 	  /* No, the first part is a filename; set file_symtab to be that file's
+-	     symtab.  Also, move argptr past the filename.  */
++	     symtab(s).  Also, move argptr past the filename.  */
+ 
+ 	  file_symtab = symtab_from_filename (argptr, p, is_quote_enclosed,
+-					      not_found_ptr);
++					      not_found_ptr, &symtabs);
+ 
+ 	  /* Check for single quotes on the non-filename part.  */
+ 	  if (!is_quoted)
+@@ -903,7 +909,7 @@ decode_line_1 (char **argptr, int funfirstline, struct symtab *default_symtab,
+      If file specified, use that file's per-file block to start with.  */
+ 
+   return decode_variable (copy, funfirstline, canonical,
+-			  file_symtab, not_found_ptr);
++			  file_symtab, not_found_ptr, symtabs);
+ }
+ 
+ 
+@@ -1563,12 +1569,12 @@ find_method (int funfirstline, char ***canonical, char *saved_arg,
+ 
+ static struct symtab *
+ symtab_from_filename (char **argptr, char *p, int is_quote_enclosed, 
+-		      int *not_found_ptr)
++		      int *not_found_ptr, int *symtabs)
+ {
+   char *p1;
+   char *copy;
+   struct symtab *file_symtab;
+-  
++
+   p1 = p;
+   while (p != *argptr && p[-1] == ' ')
+     --p;
+@@ -1583,7 +1589,11 @@ symtab_from_filename (char **argptr, char *p, int is_quote_enclosed,
+     copy[p - *argptr] = 0;
+ 
+   /* Find that file's data.  */
+-  file_symtab = lookup_symtab (copy);
++  file_symtab = lookup_symtabs (copy)->symtabs;
++  if (file_symtab)
++	  *symtabs = 1;
++  else
++	  file_symtab = lookup_symtab (copy);
+   if (file_symtab == 0)
+     {
+       if (not_found_ptr)
+@@ -1775,36 +1785,42 @@ decode_dollar (char *copy, int funfirstline, struct symtab *default_symtab,
+ 
+ static struct symtabs_and_lines
+ decode_variable (char *copy, int funfirstline, char ***canonical,
+-		 struct symtab *file_symtab, int *not_found_ptr)
++		 struct symtab *file_symtab, int *not_found_ptr,
++		 int symtabs)
+ {
+   struct symbol *sym;
+-
++  struct symtab *tab;
+   struct minimal_symbol *msymbol;
+ 
+-  sym = lookup_symbol (copy,
+-		       (file_symtab
+-			? BLOCKVECTOR_BLOCK (BLOCKVECTOR (file_symtab),
+-					     STATIC_BLOCK)
+-			: get_selected_block (0)),
+-		       VAR_DOMAIN, 0);
++  for (tab = file_symtab; tab != NULL; tab = tab->next)
++    {
++      sym = lookup_symbol (copy,
++                           (tab
++                            ? BLOCKVECTOR_BLOCK (BLOCKVECTOR (tab),
++                                                 STATIC_BLOCK)
++                            : get_selected_block (0)),
++                           VAR_DOMAIN, 0);
++
++      if (sym != NULL)
++        return symbol_found (funfirstline, canonical, copy, sym, tab);
+ 
+-  if (sym != NULL)
+-    return symbol_found (funfirstline, canonical, copy, sym, file_symtab);
++      msymbol = lookup_minimal_symbol (copy, NULL, NULL);
+ 
+-  msymbol = lookup_minimal_symbol (copy, NULL, NULL);
++      if (msymbol != NULL)
++        return minsym_found (funfirstline, msymbol);
+ 
+-  if (msymbol != NULL)
+-    return minsym_found (funfirstline, msymbol);
++      if (not_found_ptr)
++        *not_found_ptr = 1;
+ 
+-  if (not_found_ptr)
+-    *not_found_ptr = 1;
++      if (!have_full_symbols ()
++          && !have_partial_symbols ()
++          && !have_minimal_symbols ())
++        throw_error (NOT_FOUND_ERROR,
++                     _("No symbol table is loaded.  Use the \"file\" command."));
+ 
+-  if (!have_full_symbols ()
+-      && !have_partial_symbols ()
+-      && !have_minimal_symbols ())
+-    throw_error (NOT_FOUND_ERROR,
+-		 _("No symbol table is loaded.  Use the \"file\" command."));
+-  throw_error (NOT_FOUND_ERROR, _("Function \"%s\" not defined."), copy);
++      if (!symtabs)
++        throw_error (NOT_FOUND_ERROR, _("Function \"%s\" not defined."), copy);
++    }
+ }
+ 
+ 
+diff --git a/gdb/symfile.c b/gdb/symfile.c
+index 9c28fb0..77549ef 100644
+--- a/gdb/symfile.c
++++ b/gdb/symfile.c
+@@ -2012,6 +2012,33 @@ print_transfer_performance (struct ui_file *stream,
+   ui_out_text (uiout, ".\n");
+ }
+ 
++/* List loaded symbol files .*/
++static void
++list_symbol_files (char *args, int from_tty)
++{
++  struct objfile *objfile;
++  struct obj_section *osect;
++
++  ALL_OBJFILES (objfile)
++    {
++      struct gdbarch *gdbarch = get_objfile_arch (objfile);
++      printf_filtered("Symbol file: %s\n", objfile->name);
++      ALL_OBJFILE_OSECTIONS (objfile, osect)
++        {
++          const char *name;
++          bfd_vma vma;
++          int size;
++
++          vma = bfd_section_vma (objfile->obfd, osect->the_bfd_section);
++          size = bfd_get_section_size (osect->the_bfd_section);
++          name = bfd_section_name (objfile->obfd, osect->the_bfd_section);
++          printf_filtered ("\tSection %s, loaded at ", name);
++          puts_filtered (paddress (gdbarch, vma));
++          puts_filtered ("\n");
++        }
++    }
++}
++
+ /* This function allows the addition of incrementally linked object files.
+    It does not modify any state in the target, only in the debugger.  */
+ /* Note: ezannoni 2000-04-13 This function/command used to have a
+@@ -3803,6 +3830,9 @@ _initialize_symfile (void)
+ {
+   struct cmd_list_element *c;
+ 
++  c = add_cmd ("list-symbol-files", class_files, list_symbol_files, _("\
++List loaded symbol files\n."), &cmdlist);
++
+   c = add_cmd ("symbol-file", class_files, symbol_file_command, _("\
+ Load symbol table from executable file FILE.\n\
+ The `file' command can also load symbol tables, as well as setting the file\n\
+diff --git a/gdb/symtab.c b/gdb/symtab.c
+index e69edb9..cca7ce2 100644
+--- a/gdb/symtab.c
++++ b/gdb/symtab.c
+@@ -152,6 +152,49 @@ multiple_symbols_select_mode (void)
+ 
+ const struct block *block_found;
+ 
++
++/* Check for symtabs given a symbol file name. */
++
++struct objfile *
++lookup_symtabs (const char *name)
++{
++  struct symtab *s;
++  struct partial_symtab *ps;
++  struct objfile *objfile;
++  char *real_path = NULL;
++  char *full_path = NULL;
++  char *found = NULL;
++
++  /* Here we are interested in canonicalizing an absolute path, not
++     absolutizing a relative path.  */
++  if (IS_ABSOLUTE_PATH (name))
++    {
++      full_path = xfullpath (name);
++      make_cleanup (xfree, full_path);
++      real_path = gdb_realpath (name);
++      make_cleanup (xfree, real_path);
++    }
++
++  ALL_OBJFILES (objfile)
++    {
++      found = strstr(objfile->name, name);
++      if (found && *(found + strlen(name)) == '\0') {
++        break;
++      }
++    }
++
++  if (!objfile)
++    return NULL;
++
++  /* Back with symtabs... */
++  ALL_OBJFILE_PSYMTABS (objfile, ps)
++    {
++      PSYMTAB_TO_SYMTAB (ps);
++    }
++
++  return objfile;
++}
++
+ /* Check for a symtab of a specific name; first in symtabs, then in
+    psymtabs.  *If* there is no '/' in the name, a match after a '/'
+    in the symtab filename will also work.  */
+@@ -4083,6 +4126,167 @@ default_make_symbol_completion_list (char *text, char *word)
+   return (return_val);
+ }
+ 
++char **
++make_objfile_symbol_completion_list (char *text, char *word, char *objname)
++{
++  /* Problem: All of the symbols have to be copied because readline
++     frees them.  I'm not going to worry about this; hopefully there
++     won't be that many.  */
++
++  struct symbol *sym;
++  struct symtab *s;
++  struct partial_symtab *ps;
++  struct minimal_symbol *msymbol;
++  struct objfile *objfile;
++  struct block *b;
++  /* const struct block *surrounding_static_block, *surrounding_global_block; */
++  struct dict_iterator iter;
++  struct partial_symbol **psym;
++  /* The symbol we are completing on.  Points in same buffer as text.  */
++  char *sym_text;
++  /* Length of sym_text.  */
++  int sym_text_len;
++
++  objfile = lookup_symtabs (objname);
++  if (!objfile)
++    /* No such loaded symbol file. */
++    {
++      return_val = (char **) xmalloc (sizeof (char *));
++      return_val[0] = NULL;
++      return return_val;
++    }
++
++  /* Now look for the symbol we are supposed to complete on.  */
++  {
++    char *p;
++    char quote_found;
++    char *quote_pos = NULL;
++
++    /* First see if this is a quoted string.  */
++    quote_found = '\0';
++    for (p = text; *p != '\0'; ++p)
++      {
++	if (quote_found != '\0')
++	  {
++	    if (*p == quote_found)
++	      /* Found close quote.  */
++	      quote_found = '\0';
++	    else if (*p == '\\' && p[1] == quote_found)
++	      /* A backslash followed by the quote character
++	         doesn't end the string.  */
++	      ++p;
++	  }
++	else if (*p == '\'' || *p == '"')
++	  {
++	    quote_found = *p;
++	    quote_pos = p;
++	  }
++      }
++    if (quote_found == '\'')
++      /* A string within single quotes can be a symbol, so complete on it.  */
++      sym_text = quote_pos + 1;
++    else if (quote_found == '"')
++      /* A double-quoted string is never a symbol, nor does it make sense
++         to complete it any other way.  */
++      {
++	return_val = (char **) xmalloc (sizeof (char *));
++	return_val[0] = NULL;
++	return return_val;
++      }
++    else
++      {
++	/* It is not a quoted string.  Break it based on the characters
++	   which are in symbols.  */
++	while (p > text)
++	  {
++	    if (isalnum (p[-1]) || p[-1] == '_' || p[-1] == '\0'
++		|| p[-1] == ':')
++	      --p;
++	    else
++	      break;
++	  }
++	sym_text = p;
++      }
++  }
++
++  sym_text_len = strlen (sym_text);
++
++  return_val_size = 100;
++  return_val_index = 0;
++  return_val = (char **) xmalloc ((return_val_size + 1) * sizeof (char *));
++  return_val[0] = NULL;
++
++  /* Look through the partial symtabs for all symbols which begin
++     by matching SYM_TEXT.  Add each one that you find to the list.  */
++
++  ALL_OBJFILE_PSYMTABS (objfile, ps)
++  {
++    /* If the psymtab's been read in we'll get it when we search
++       through the blockvector.  */
++    if (ps->readin)
++      continue;
++
++    for (psym = objfile->global_psymbols.list + ps->globals_offset;
++	 psym < (objfile->global_psymbols.list + ps->globals_offset
++		 + ps->n_global_syms);
++	 psym++)
++      {
++	/* If interrupted, then quit. */
++	QUIT;
++	COMPLETION_LIST_ADD_SYMBOL (*psym, sym_text, sym_text_len, text, word);
++      }
++
++    for (psym = objfile->static_psymbols.list + ps->statics_offset;
++	 psym < (objfile->static_psymbols.list + ps->statics_offset
++		 + ps->n_static_syms);
++	 psym++)
++      {
++	QUIT;
++	COMPLETION_LIST_ADD_SYMBOL (*psym, sym_text, sym_text_len, text, word);
++      }
++  }
++
++  /* At this point scan through the misc symbol vectors and add each
++     symbol you find to the list.  Eventually we want to ignore
++     anything that isn't a text symbol (everything else will be
++     handled by the psymtab code above).  */
++
++  ALL_OBJFILE_MSYMBOLS (objfile, msymbol)
++  {
++    QUIT;
++    COMPLETION_LIST_ADD_SYMBOL (msymbol, sym_text, sym_text_len, text, word);
++
++    completion_list_objc_symbol (msymbol, sym_text, sym_text_len, text, word);
++  }
++
++  /* Go through the symtabs and check the externs and statics for
++     symbols which match.  */
++
++  ALL_OBJFILE_SYMTABS (objfile, s)
++    if ((s)->primary)
++      {
++        QUIT;
++        b = BLOCKVECTOR_BLOCK (BLOCKVECTOR (s), GLOBAL_BLOCK);
++        ALL_BLOCK_SYMBOLS (b, iter, sym)
++        {
++          COMPLETION_LIST_ADD_SYMBOL (sym, sym_text, sym_text_len, text, word);
++        }
++      }
++
++  ALL_OBJFILE_SYMTABS (objfile, s)
++    if ((s)->primary)
++      {
++        QUIT;
++        b = BLOCKVECTOR_BLOCK (BLOCKVECTOR (s), STATIC_BLOCK);
++        ALL_BLOCK_SYMBOLS (b, iter, sym)
++        {
++          COMPLETION_LIST_ADD_SYMBOL (sym, sym_text, sym_text_len, text, word);
++        }
++      }
++
++  return (return_val);
++}
++
+ /* Return a NULL terminated array of all symbols (regardless of class)
+    which begin by matching TEXT.  If the answer is no symbols, then
+    the return value is an array which contains only a NULL pointer.  */
+diff --git a/gdb/symtab.h b/gdb/symtab.h
+index 167dfe8..e8b15b9 100644
+--- a/gdb/symtab.h
++++ b/gdb/symtab.h
+@@ -972,6 +972,10 @@ int symbol_matches_domain (enum language symbol_language,
+ 			   domain_enum symbol_domain,
+ 			   domain_enum domain);
+ 
++/* lookup symbol tables by symbol file name */
++
++extern struct objfile *lookup_symtabs (const char *);
++
+ /* lookup a symbol table by source file name */
+ 
+ extern struct symtab *lookup_symtab (const char *);
+@@ -1292,6 +1296,8 @@ extern char **make_symbol_completion_list (char *, char *);
+ extern char **make_symbol_completion_list_fn (struct cmd_list_element *,
+ 					      char *, char *);
+ 
++extern char **make_objfile_symbol_completion_list (char *, char *, char *);
++
+ extern char **make_file_symbol_completion_list (char *, char *, char *);
+ 
+ extern char **make_source_files_completion_list (char *, char *);
+-- 
+1.7.0.4
+
