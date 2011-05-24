@@ -1,4 +1,4 @@
-From 28e833f0f1c78f848db96a4a109235b7dcb0c91c Mon Sep 17 00:00:00 2001
+From 0821f0e989036b4ffdad540e85e7420a87b282a8 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Sat, 16 Apr 2011 04:32:42 -0500
 Subject: [PATCH 5/5] MMC: SDHCI AutoCMD23 support.
@@ -19,16 +19,16 @@ Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
  3 files changed, 19 insertions(+), 1 deletions(-)
 
 diff --git a/drivers/mmc/host/sdhci.c b/drivers/mmc/host/sdhci.c
-index 1138b55..d79b2d0 100644
+index 3a53512..fbb1842 100644
 --- a/drivers/mmc/host/sdhci.c
 +++ b/drivers/mmc/host/sdhci.c
 @@ -860,7 +860,13 @@ static void sdhci_set_transfer_mode(struct sdhci_host *host,
  		if (!host->mrq->sbc &&
- 		    host->flags & SDHCI_ACMD12)
- 			mode |= SDHCI_TRNS_ACMD12;
+ 		    host->flags & SDHCI_AUTO_CMD12)
+ 			mode |= SDHCI_TRNS_AUTO_CMD12;
 +		else if (host->mrq->sbc &&
-+			 host->flags & SDHCI_ACMD23) {
-+			mode |= SDHCI_TRNS_ACMD23;
++			 host->flags & SDHCI_AUTO_CMD23) {
++			mode |= SDHCI_TRNS_AUTO_CMD23;
 +			sdhci_writel(host, host->mrq->sbc->arg, SDHCI_ARGUMENT2);
 +		}
  	}
@@ -41,19 +41,19 @@ index 1138b55..d79b2d0 100644
  		}
  
 -		if (mrq->sbc)
-+		if (mrq->sbc && !(host->flags & SDHCI_ACMD23))
++		if (mrq->sbc && !(host->flags & SDHCI_AUTO_CMD23))
  			sdhci_send_command(host, mrq->sbc);
  		else
  			sdhci_send_command(host, mrq->cmd);
 @@ -2491,6 +2497,15 @@ int sdhci_add_host(struct sdhci_host *host)
  	if (host->quirks & SDHCI_QUIRK_MULTIBLOCK_READ_ACMD12)
- 		host->flags |= SDHCI_ACMD12;
+ 		host->flags |= SDHCI_AUTO_CMD12;
  
 +	/* Auto-CMD23 stuff only works in ADMA or PIO. */
 +	if ((host->version == SDHCI_SPEC_300) &&
 +	    ((host->flags & SDHCI_USE_ADMA) ||
 +	     !(host->flags & SDHCI_REQ_USE_DMA))) {
-+		host->flags |= SDHCI_ACMD23;
++		host->flags |= SDHCI_AUTO_CMD23;
 +		printk(KERN_INFO "%s: Auto-CMD23 available\n", mmc_hostname(mmc));
 +	} else
 +		printk(KERN_INFO "%s: Auto-CMD23 unavailable\n", mmc_hostname(mmc));
@@ -62,34 +62,34 @@ index 1138b55..d79b2d0 100644
  	 * A controller may support 8-bit width, but the board itself
  	 * might not have the pins brought out.  Boards that support
 diff --git a/drivers/mmc/host/sdhci.h b/drivers/mmc/host/sdhci.h
-index 7e28eec..713caf0 100644
+index 2c3fbc5..745c42f 100644
 --- a/drivers/mmc/host/sdhci.h
 +++ b/drivers/mmc/host/sdhci.h
 @@ -25,6 +25,7 @@
   */
  
  #define SDHCI_DMA_ADDRESS	0x00
-+#define SDHCI_ARGUMENT2		0x00
++#define SDHCI_ARGUMENT2		SDHCI_DMA_ADDRESS
  
  #define SDHCI_BLOCK_SIZE	0x04
  #define  SDHCI_MAKE_BLKSZ(dma, blksz) (((dma & 0x7) << 12) | (blksz & 0xFFF))
 @@ -37,6 +38,7 @@
  #define  SDHCI_TRNS_DMA		0x01
  #define  SDHCI_TRNS_BLK_CNT_EN	0x02
- #define  SDHCI_TRNS_ACMD12	0x04
-+#define  SDHCI_TRNS_ACMD23	0x08
+ #define  SDHCI_TRNS_AUTO_CMD12	0x04
++#define  SDHCI_TRNS_AUTO_CMD23	0x08
  #define  SDHCI_TRNS_READ	0x10
  #define  SDHCI_TRNS_MULTI	0x20
  
 diff --git a/include/linux/mmc/sdhci.h b/include/linux/mmc/sdhci.h
-index d70de9d..d0db8ae 100644
+index 73e27ba..6a68c4e 100644
 --- a/include/linux/mmc/sdhci.h
 +++ b/include/linux/mmc/sdhci.h
 @@ -114,6 +114,7 @@ struct sdhci_host {
  #define SDHCI_SDR50_NEEDS_TUNING (1<<4)	/* SDR50 needs tuning */
  #define SDHCI_NEEDS_RETUNING	(1<<5)	/* Host needs retuning */
- #define SDHCI_ACMD12		(1<<6)	/* Auto CMD12 support */
-+#define SDHCI_ACMD23		(1<<7)	/* Auto CMD23 support */
+ #define SDHCI_AUTO_CMD12	(1<<6)	/* Auto CMD12 support */
++#define SDHCI_AUTO_CMD23	(1<<7)	/* Auto CMD23 support */
  
  	unsigned int version;	/* SDHCI spec. version */
  

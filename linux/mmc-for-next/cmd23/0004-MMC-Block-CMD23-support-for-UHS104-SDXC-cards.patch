@@ -1,4 +1,4 @@
-From c867840e682b28dee0429d98408c8b1e671336f0 Mon Sep 17 00:00:00 2001
+From 0e4c2795ac01184b930056688be2c9d0feaa711d Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 13 Apr 2011 18:08:51 -0500
 Subject: [PATCH 4/5] MMC: Block CMD23 support for UHS104/SDXC cards.
@@ -12,10 +12,10 @@ Cc: malchev@google.com
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
  drivers/mmc/card/block.c |    9 ++++++---
- drivers/mmc/core/sd.c    |    7 +++++++
+ drivers/mmc/core/sd.c    |    2 ++
  include/linux/mmc/card.h |    3 +++
  include/linux/mmc/sd.h   |    2 +-
- 4 files changed, 17 insertions(+), 4 deletions(-)
+ 4 files changed, 12 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
 index a380acc..71da564 100755
@@ -38,20 +38,15 @@ index a380acc..71da564 100755
  	if (mmc_card_mmc(card) &&
  	    md->flags & MMC_BLK_CMD23 &&
 diff --git a/drivers/mmc/core/sd.c b/drivers/mmc/core/sd.c
-index 596d0b9..efff41d 100644
+index 596d0b9..ff27741 100644
 --- a/drivers/mmc/core/sd.c
 +++ b/drivers/mmc/core/sd.c
-@@ -203,6 +203,13 @@ static int mmc_decode_scr(struct mmc_card *card)
+@@ -203,6 +203,8 @@ static int mmc_decode_scr(struct mmc_card *card)
  	else
  		card->erased_byte = 0x0;
  
-+	if (scr->sda_vsn == SCR_SPEC_VER_2) {
-+
-+		/* Check if Physical Layer Spec v3.0X is supported. */
-+		scr->sda_spec3 = UNSTUFF_BITS(resp, 47, 1);
-+		if (scr->sda_spec3)
-+			scr->cmds = UNSTUFF_BITS(resp, 32, 2);
-+	}
++	if (scr->sda_spec3)
++		scr->cmds = UNSTUFF_BITS(resp, 32, 2);
  	return 0;
  }
  

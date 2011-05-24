@@ -1,4 +1,4 @@
-From dc9fff50920375b77f04256815f27e9ea8726ad4 Mon Sep 17 00:00:00 2001
+From 0f0a5d66c202cadda890e01e89637ce6dbe5dfe0 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 13 Apr 2011 17:22:20 -0500
 Subject: [PATCH 2/5] MMC: Use CMD23 for multiblock transfers when we can.

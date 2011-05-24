@@ -1,4 +1,4 @@
-From d67a7a2fce2a7d4cf5e890bc7bd507e21fc5dc0e Mon Sep 17 00:00:00 2001
+From 5cb7673abbb4d758dbf3cf8d374a9dc99ba091f2 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Sat, 16 Apr 2011 05:31:47 -0500
 Subject: [PATCH 1/5] MMC: Add/remove quirks conditional support.
