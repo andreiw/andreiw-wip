@@ -1,0 +1,649 @@
+From bb231aa249d0429f55b291c1442f66b9f363da42 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Tue, 30 Nov 2010 21:45:58 -0600
+Subject: [PATCH] FIQ debugger: Add KDB/KGDB support.
+
+Control can be passed to kdb/kgdb through the 'break' command.
+FIQ debugger can be enterred while KDB/KGDB is active. KGDB
+may be disabled/enabled through 'kgdb'/'nokgdb' commands and
+debugfs. Interactive control over KGDB from FIQ prompt can
+be disabled at compile-time.
+
+Change-Id: Id2fef81fcb87e46e08642d3ebbf638798aff810c
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ arch/arm/common/Kconfig        |   24 +++
+ arch/arm/common/fiq_debugger.c |  390 ++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 379 insertions(+), 35 deletions(-)
+
+diff --git a/arch/arm/common/Kconfig b/arch/arm/common/Kconfig
+index 2dbc36b..37f05ea 100644
+--- a/arch/arm/common/Kconfig
++++ b/arch/arm/common/Kconfig
+@@ -57,6 +57,12 @@ config FIQ_DEBUGGER
+ 	  kernel is unresponsive due to being stuck with interrupts
+ 	  disabled.  Depends on the kernel debugger core in drivers/misc.
+ 
++config FIQ_DEBUGGER_KGDB
++	bool "Support for KDB/KGDB through the FIQ Mode Serial Debugger"
++	depends on FIQ_DEBUGGER && KGDB
++	default n
++	help
++	  Enables access to KDB/KGDB through the same serial port as the FIQ Mode Serial Debugger
+ 
+ config FIQ_DEBUGGER_NO_SLEEP
+ 	bool "Keep serial debugger active"
+@@ -92,3 +98,21 @@ config FIQ_DEBUGGER_CONSOLE_DEFAULT_ENABLE
+ 	help
+ 	  If enabled, this puts the fiq debugger into console mode by default.
+ 	  Otherwise, the fiq debugger will start out in debug mode.
++
++config FIQ_DEBUGGER_KGDB_DEFAULT_ENABLE
++	bool "Enables KGDB debugger by default"
++	depends on FIQ_DEBUGGER_KGDB
++	default n
++	help
++	  If enabled, this enables KGDB mode by default. Note that panics
++	  will enter KGDB by default.
++
++config FIQ_DEBUGGER_KGDB_INSECURE
++	bool "Allows enabling/disabling kgdb from FIQ prompt"
++	depends on FIQ_DEBUGGER_KGDB
++	default n
++	help
++	  If enabled, this will allow anyone to enable KGDB from FIQ
++	  prompt, giving read-write access to all memory through the
++	  serial port.
++
+diff --git a/arch/arm/common/fiq_debugger.c b/arch/arm/common/fiq_debugger.c
+index f172c15..46766f1 100644
+--- a/arch/arm/common/fiq_debugger.c
++++ b/arch/arm/common/fiq_debugger.c
+@@ -4,6 +4,7 @@
+  * Serial Debugger Interface accessed through an FIQ interrupt.
+  *
+  * Copyright (C) 2008 Google, Inc.
++ * Andrei Warkentin <andreiw@motorola.com> - kgdb support
+  *
+  * This software is licensed under the terms of the GNU General Public
+  * License version 2, as published by the Free Software Foundation, and
+@@ -43,12 +44,32 @@
+ 
+ #include "fiq_debugger_ringbuf.h"
+ 
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++#include <linux/kgdb.h>
++#include <linux/workqueue.h>
++#include <linux/semaphore.h>
++
++enum kgdb_wq_task {
++	KGDB_NONE,
++	KGDB_BREAK,
++	KGDB_ENABLE,
++	KGDB_DISABLE
++};
++
++#endif
++
+ #define DEBUG_MAX 64
+ #define MAX_UNHANDLED_FIQ_COUNT 1000000
+ 
+ #define THREAD_INFO(sp) ((struct thread_info *) \
+ 		((unsigned long)(sp) & ~(THREAD_SIZE - 1)))
+ 
++enum fiq_io_direction {
++	FIQ_IO_FIQ,
++	FIQ_IO_CONSOLE,
++	FIQ_IO_KGDB,
++};
++
+ struct fiq_debugger_state {
+ 	struct fiq_glue_handler handler;
+ 
+@@ -73,7 +94,18 @@ struct fiq_debugger_state {
+ 	struct timer_list sleep_timer;
+ 	bool uart_clk_enabled;
+ 	struct wake_lock debugger_wake_lock;
+-	bool console_enable;
++	enum fiq_io_direction io_dir;
++
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++	bool kgdb_enabled;
++	bool kgdb_broken_in;
++	struct semaphore kgdb_sem;
++	struct work_struct kgdb_wq;
++	enum kgdb_wq_task kgdb_task;
++	struct kobj_attribute kgdb_attr;
++	struct fiq_debugger_ringbuf *kgdb_rbuf;
++#endif
++
+ 	int current_cpu;
+ 	atomic_t unhandled_fiq_count;
+ 	bool in_fiq;
+@@ -104,9 +136,20 @@ static bool initial_debug_enable;
+ static bool initial_console_enable;
+ #endif
+ 
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB_DEFAULT_ENABLE
++static bool initial_kgdb_enable = true;
++#else
++static bool initial_kgdb_enable;
++#endif
++#endif
++
+ module_param_named(no_sleep, initial_no_sleep, bool, 0644);
+ module_param_named(debug_enable, initial_debug_enable, bool, 0644);
+ module_param_named(console_enable, initial_console_enable, bool, 0644);
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++module_param_named(kgdb_enable, initial_kgdb_enable, bool, 0644);
++#endif
+ 
+ #ifdef CONFIG_FIQ_DEBUGGER_WAKEUP_IRQ_ALWAYS_ON
+ static inline void enable_wakeup_irq(struct fiq_debugger_state *state) {}
+@@ -447,6 +490,179 @@ void dump_stacktrace(struct fiq_debugger_state *state,
+ 		tail = user_backtrace(state, tail);
+ }
+ 
++static bool fiq_wakeup(struct fiq_debugger_state *state)
++{
++	if (!state->uart_clk_enabled) {
++		wake_lock(&state->debugger_wake_lock);
++		if (state->clk)
++			clk_enable(state->clk);
++		state->uart_clk_enabled = true;
++		mod_timer(&state->sleep_timer, jiffies + HZ / 2);
++		return true;
++	}
++	return false;
++}
++
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++static struct fiq_debugger_state *kgdb_ref = NULL;
++
++static int kgdb_fiq_get_char(void)
++{
++	int c;
++	struct fiq_debugger_state *state = kgdb_ref;
++	if (!fiq_debugger_ringbuf_level(state->kgdb_rbuf))
++		return NO_POLL_CHAR;
++	c = fiq_debugger_ringbuf_peek(state->kgdb_rbuf, 0);
++	fiq_debugger_ringbuf_consume(state->kgdb_rbuf, 1);
++	return c;
++}
++
++static void kgdb_fiq_put_char(u8 c)
++{
++	struct fiq_debugger_state *state = kgdb_ref;
++	if (c == '\n')
++		state->pdata->uart_putc(state->pdev, '\r');
++	state->pdata->uart_putc(state->pdev, c);
++}
++
++static void kgdb_fiq_pre_exp_handler(void)
++{
++	struct fiq_debugger_state *state = kgdb_ref;
++	state->kgdb_broken_in = true;
++	state->io_dir = FIQ_IO_KGDB;
++
++	fiq_wakeup(state);
++}
++
++static void kgdb_fiq_post_exp_handler(void)
++{
++	struct fiq_debugger_state *state = kgdb_ref;
++	if (!kgdb_connected) {
++		state->kgdb_broken_in = false;
++
++		/* Necessary. We might have returned
++		 from KGDB because we're stepping/continuing,
++		and any stray output from console or such
++		will confuse the debugger. */
++		state->io_dir = FIQ_IO_FIQ;
++
++		/* poke sleep timer if necessary */
++		if (!state->no_sleep)
++			debug_force_irq(state);
++	}
++}
++
++static struct kgdb_io kgdb_fiq_io_ops = {
++	.name			= "kgdb_fiq",
++	.read_char		= kgdb_fiq_get_char,
++	.write_char		= kgdb_fiq_put_char,
++	.pre_exception		= kgdb_fiq_pre_exp_handler,
++	.post_exception		= kgdb_fiq_post_exp_handler,
++};
++
++static bool kgdb_enable(struct fiq_debugger_state *state)
++{
++	if (state->kgdb_enabled)
++		return true;
++
++	if(kgdb_register_io_module(&kgdb_fiq_io_ops))  {
++		debug_printf_nfiq(state,
++				  "failed to enable kgdb\n");
++		return false;
++	}
++
++	state->kgdb_enabled = true;
++	return true;
++}
++
++static void kgdb_disable(struct fiq_debugger_state *state)
++{
++	if (!state->kgdb_enabled)
++		return;
++
++	if (state->kgdb_broken_in) {
++		debug_printf_nfiq(state,
++				  "can't disable kgdb in use\n");
++		return;
++	}
++
++	kgdb_unregister_io_module(&kgdb_fiq_io_ops);
++	state->kgdb_enabled = false;
++}
++
++static void kgdb_bp(struct fiq_debugger_state *state)
++{
++	if (state->kgdb_broken_in)
++		return;
++	if (!kgdb_enable(state))
++		return;
++
++	state->kgdb_broken_in = true;
++	kgdb_breakpoint();
++}
++
++static void kgdb_wq(struct work_struct *work)
++{
++	struct fiq_debugger_state *state =
++		container_of(work, struct fiq_debugger_state, kgdb_wq);
++
++	down(&state->kgdb_sem);
++	switch (state->kgdb_task) {
++	case KGDB_BREAK:
++		kgdb_bp(state);
++		break;
++	case KGDB_ENABLE:
++		kgdb_enable(state);
++		break;
++	case KGDB_DISABLE:
++		kgdb_disable(state);
++		break;
++	default:
++		break;
++	}
++	state->kgdb_task = KGDB_NONE;
++	up(&state->kgdb_sem);
++}
++
++static ssize_t kgdb_sysfs_show(struct kobject *kobj,
++			       struct kobj_attribute *attr,
++			       char *buf)
++{
++	ssize_t ret;
++	struct fiq_debugger_state *state =
++		container_of(attr, struct fiq_debugger_state, kgdb_attr);
++
++	down(&state->kgdb_sem);
++	ret = sprintf(buf, "%s [on off break]\n",
++		      state->kgdb_enabled ? "on" : "off");
++	up(&state->kgdb_sem);
++
++	return ret;
++}
++
++static ssize_t kgdb_sysfs_store(struct kobject *kobj,
++				struct kobj_attribute *attr,
++				const char *buf, size_t n)
++{
++	char cbuf[sizeof("break")];
++	struct fiq_debugger_state *state =
++		container_of(attr, struct fiq_debugger_state, kgdb_attr);
++
++	down(&state->kgdb_sem);
++	memset(cbuf, 0, sizeof(cbuf));
++	strncpy(cbuf, buf, sizeof(cbuf) - 1);
++	if (!strnicmp(cbuf, "on", sizeof("on") - 1))
++		kgdb_enable(state);
++	else if (!strnicmp(cbuf, "off", sizeof("off") - 1))
++		kgdb_disable(state);
++	else if (!strnicmp(cbuf, "break", sizeof("break") - 1))
++		kgdb_bp(state);
++	up(&state->kgdb_sem);
++
++	return n;
++}
++#endif
++
+ static void debug_help(struct fiq_debugger_state *state)
+ {
+ 	debug_printf(state,	"FIQ Debugger commands:\n"
+@@ -463,6 +679,15 @@ static void debug_help(struct fiq_debugger_state *state)
+ 				" console       Switch terminal to console\n"
+ 				" cpu           Current CPU\n"
+ 				" cpu <number>  Switch to CPU<number>\n");
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++	debug_printf(state, 	" kgdb          Break into or return to KGDB\n"
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB_INSECURE
++				" kgdbon        Enable KGDB\n"
++				" kgdboff       Disable KGDB\n"
++#endif
++		);
++#endif
++
+ 	if (!state->debug_busy) {
+ 		strcpy(state->debug_cmd, "help");
+ 		state->debug_busy = 1;
+@@ -470,11 +695,13 @@ static void debug_help(struct fiq_debugger_state *state)
+ 	}
+ }
+ 
+-static void debug_exec(struct fiq_debugger_state *state,
++static bool debug_exec(struct fiq_debugger_state *state,
+ 			const char *cmd, unsigned *regs, void *svc_sp)
+ {
++	bool show_prompt = true;
+ 	if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) {
+ 		debug_help(state);
++		show_prompt = false;
+ 	} else if (!strcmp(cmd, "pc")) {
+ 		debug_printf(state, " pc %08x cpsr %08x mode %s\n",
+ 			regs[15], regs[16], mode_name(regs[16]));
+@@ -497,7 +724,8 @@ static void debug_exec(struct fiq_debugger_state *state,
+ 	} else if (!strcmp(cmd, "nosleep")) {
+ 		state->no_sleep = true;
+ 	} else if (!strcmp(cmd, "console")) {
+-		state->console_enable = true;
++		show_prompt = false;
++		state->io_dir = FIQ_IO_CONSOLE;
+ 		debug_printf(state, "console mode\n");
+ 	} else if (!strcmp(cmd, "cpu")) {
+ 		debug_printf(state, "cpu %d\n", state->current_cpu);
+@@ -508,29 +736,44 @@ static void debug_exec(struct fiq_debugger_state *state,
+ 		else
+ 			debug_printf(state, "invalid cpu\n");
+ 		debug_printf(state, "cpu %d\n", state->current_cpu);
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++	} else if (!strcmp(cmd, "kgdb") && state->kgdb_broken_in) {
++
++		/* The non-nested case is handled inside debug_irq. */
++		debug_printf(state, "<you're now in kgdb/kdb>\n");
++		state->io_dir = FIQ_IO_KGDB;
++		show_prompt = false;
++#endif
+ 	} else {
+ 		if (state->debug_busy) {
+ 			debug_printf(state,
+-				"command processor busy. trying to abort.\n");
++				     "command processor busy. trying to abort\n");
+ 			state->debug_abort = -1;
+ 		} else {
++			show_prompt = false;
+ 			strcpy(state->debug_cmd, cmd);
+ 			state->debug_busy = 1;
+ 		}
+ 
+ 		debug_force_irq(state);
+-
+-		return;
+ 	}
+-	if (!state->console_enable)
+-		debug_prompt(state);
++
++	return show_prompt;
+ }
+ 
+ static void sleep_timer_expired(unsigned long data)
+ {
+ 	struct fiq_debugger_state *state = (struct fiq_debugger_state *)data;
+ 
+-	if (state->uart_clk_enabled && !state->no_sleep) {
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++	if (state->kgdb_broken_in) {
++		wake_unlock(&state->debugger_wake_lock);
++		return;
++	}
++#endif
++
++	if (state->uart_clk_enabled &&
++	    !state->no_sleep) {
+ 		if (state->debug_enable) {
+ 			state->debug_enable = false;
+ 			debug_printf_nfiq(state, "suspending fiq debugger\n");
+@@ -547,18 +790,13 @@ static void sleep_timer_expired(unsigned long data)
+ static irqreturn_t wakeup_irq_handler(int irq, void *dev)
+ {
+ 	struct fiq_debugger_state *state = dev;
+-
+ 	if (!state->no_sleep)
+ 		debug_puts(state, "WAKEUP\n");
+ 	if (state->ignore_next_wakeup_irq)
+ 		state->ignore_next_wakeup_irq = false;
+-	else if (!state->uart_clk_enabled) {
+-		wake_lock(&state->debugger_wake_lock);
+-		if (state->clk)
+-			clk_enable(state->clk);
+-		state->uart_clk_enabled = true;
+-		disable_wakeup_irq(state);
+-		mod_timer(&state->sleep_timer, jiffies + HZ / 2);
++	else {
++		if (fiq_wakeup(state))
++			disable_wakeup_irq(state);
+ 	}
+ 	return IRQ_HANDLED;
+ }
+@@ -586,16 +824,44 @@ static irqreturn_t debug_irq(int irq, void *dev)
+ 		tty_flip_buffer_push(state->tty);
+ 	}
+ #endif
+-	if (state->debug_busy) {
+-		struct kdbg_ctxt ctxt;
+-
+-		ctxt.printf = debug_printf_nfiq;
+-		ctxt.cookie = state;
+-		kernel_debugger(&ctxt, state->debug_cmd);
+-		debug_prompt(state);
+-
+-		state->debug_busy = 0;
++	if (state->debug_busy &&
++	    !state->debug_abort) {
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB_INSECURE
++		if (!strcmp(state->debug_cmd, "kgdbon")) {
++			state->kgdb_task = KGDB_ENABLE;
++			schedule_work(&state->kgdb_wq);
++			debug_prompt(state);
++		} else if (!strcmp(state->debug_cmd, "kgdboff")) {
++			state->kgdb_task = KGDB_DISABLE;
++			schedule_work(&state->kgdb_wq);
++			debug_prompt(state);
++		} else
++#endif
++		if (!strcmp(state->debug_cmd, "kgdb")) {
++#ifndef CONFIG_FIQ_DEBUGGER_KGDB_INSECURE
++			if (state->kgdb_enabled) {
++#endif
++				state->kgdb_task = KGDB_BREAK;
++				schedule_work(&state->kgdb_wq);
++#ifndef CONFIG_FIQ_DEBUGGER_KGDB_INSECURE
++			} else {
++				debug_prompt(state);
++			}
++#endif
++		} else {
++#endif
++			struct kdbg_ctxt ctxt;
++			ctxt.printf = debug_printf_nfiq;
++			ctxt.cookie = state;
++			kernel_debugger(&ctxt, state->debug_cmd);
++			debug_prompt(state);
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++		}
++#endif
+ 	}
++	state->debug_abort = 0;
++	state->debug_busy = 0;
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -611,6 +877,7 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
+ 	int c;
+ 	static int last_c;
+ 	int count = 0;
++	bool show_prompt = false;
+ 	unsigned int this_cpu = THREAD_INFO(svc_sp)->cpu;
+ 
+ 	if (this_cpu != state->current_cpu) {
+@@ -641,12 +908,17 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
+ 				debug_prompt(state);
+ 			}
+ 		} else if (c == FIQ_DEBUGGER_BREAK) {
+-			state->console_enable = false;
++			state->io_dir = FIQ_IO_FIQ;
+ 			debug_puts(state, "fiq debugger mode\n");
+ 			state->debug_count = 0;
+ 			debug_prompt(state);
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++		} else if (state->io_dir == FIQ_IO_KGDB) {
++			fiq_debugger_ringbuf_push(state->kgdb_rbuf, c);
++#endif
+ #ifdef CONFIG_FIQ_DEBUGGER_CONSOLE
+-		} else if (state->console_enable && state->tty_rbuf) {
++		} else if (state->io_dir == FIQ_IO_CONSOLE &&
++			   state->tty_rbuf) {
+ 			fiq_debugger_ringbuf_push(state->tty_rbuf, c);
+ 			debug_force_irq(state);
+ #endif
+@@ -670,20 +942,25 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
+ 			if (state->debug_count) {
+ 				state->debug_buf[state->debug_count] = 0;
+ 				state->debug_count = 0;
+-				debug_exec(state, state->debug_buf,
++				show_prompt = debug_exec(state, state->debug_buf,
+ 					regs, svc_sp);
+ 			} else {
+-				debug_prompt(state);
++				show_prompt = true;
+ 			}
+ 		}
+ 		last_c = c;
++
++		if (show_prompt)
++			debug_prompt(state);
+ 	}
++
+ 	debug_uart_flush(state);
+ 	if (state->pdata->fiq_ack)
+ 		state->pdata->fiq_ack(state->pdev, state->fiq);
+ 
+ 	/* poke sleep timer if necessary */
+-	if (state->debug_enable && !state->no_sleep)
++	if (state->debug_enable &&
++	    !state->no_sleep)
+ 		debug_force_irq(state);
+ 
+ 	atomic_set(&state->unhandled_fiq_count, 0);
+@@ -714,7 +991,7 @@ static void debug_console_write(struct console *co,
+ 
+ 	state = container_of(co, struct fiq_debugger_state, console);
+ 
+-	if (!state->console_enable)
++	if (state->io_dir != FIQ_IO_CONSOLE)
+ 		return;
+ 
+ 	while (count--) {
+@@ -756,7 +1033,7 @@ int  fiq_tty_write(struct tty_struct *tty, const unsigned char *buf, int count)
+ 	int i;
+ 	struct fiq_debugger_state *state = tty->driver_data;
+ 
+-	if (!state->console_enable)
++	if (state->io_dir != FIQ_IO_CONSOLE)
+ 		return count;
+ 
+ 	if (state->clk)
+@@ -813,7 +1090,7 @@ static int fiq_debugger_tty_init(struct fiq_debugger_state *state)
+ 
+ 	state->tty_rbuf = fiq_debugger_ringbuf_alloc(1024);
+ 	if (!state->tty_rbuf) {
+-		pr_err("Failed to allocate fiq debugger ringbuf\n");
++		pr_err("Failed to allocate fiq debugger tty ringbuf\n");
+ 		ret = -ENOMEM;
+ 		goto err;
+ 	}
+@@ -847,7 +1124,9 @@ static int fiq_debugger_probe(struct platform_device *pdev)
+ 	state->pdev = pdev;
+ 	state->no_sleep = initial_no_sleep;
+ 	state->debug_enable = initial_debug_enable;
+-	state->console_enable = initial_console_enable;
++	state->io_dir = initial_console_enable ?
++		FIQ_IO_CONSOLE :
++		FIQ_IO_FIQ;
+ 
+ 	state->fiq = platform_get_irq_byname(pdev, "fiq");
+ 	state->signal_irq = platform_get_irq_byname(pdev, "signal");
+@@ -873,6 +1152,28 @@ static int fiq_debugger_probe(struct platform_device *pdev)
+ 			goto err_uart_init;
+ 	}
+ 
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++	kgdb_ref = state;
++
++	init_MUTEX(&state->kgdb_sem);
++	INIT_WORK(&state->kgdb_wq, kgdb_wq);
++	state->kgdb_rbuf = fiq_debugger_ringbuf_alloc(1024);
++	if (!state->kgdb_rbuf) {
++		pr_err("Failed to allocate fiq debugger kgdb ringbuf\n");
++		ret = -ENOMEM;
++		goto err_kgdb_alloc;
++	}
++
++	sysfs_attr_init(&state->kgdb_attr);
++	state->kgdb_attr.attr.name = "fiq_kgdb";
++	state->kgdb_attr.attr.mode = 0644;
++	state->kgdb_attr.show = kgdb_sysfs_show;
++	state->kgdb_attr.store = kgdb_sysfs_store;
++	if (sysfs_create_file(&pdev->dev.kobj,
++			      &state->kgdb_attr.attr))
++		goto err_kgdb_sysfs;
++#endif
++
+ 	debug_printf_nfiq(state, "<hit enter %sto activate fiq debugger>\n",
+ 				state->no_sleep ? "" : "twice ");
+ 
+@@ -917,11 +1218,30 @@ static int fiq_debugger_probe(struct platform_device *pdev)
+ 	register_console(&state->console);
+ 	fiq_debugger_tty_init(state);
+ #endif
++
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++	if (initial_kgdb_enable) {
++		state->kgdb_task = KGDB_ENABLE;
++		schedule_work(&state->kgdb_wq);
++	}
++#endif
+ 	return 0;
+ 
+ err_register_fiq:
++#ifdef CONFIG_FIQ_DEBUGGER_KGDB
++	sysfs_remove_file(&pdev->dev.kobj, &state->kgdb_attr.attr);
++
++err_kgdb_sysfs:
++	fiq_debugger_ringbuf_free(state->kgdb_rbuf);
++	state->kgdb_rbuf = NULL;
++
++err_kgdb_alloc:
++	kgdb_ref = NULL;
++
++#endif
+ 	if (pdata->uart_free)
+ 		pdata->uart_free(pdev);
++
+ err_uart_init:
+ 	kfree(state);
+ 	if (state->clk)
+-- 
+1.7.0.4
+

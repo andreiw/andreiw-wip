@@ -1,0 +1,330 @@
+From 6a7c561b54dc2f1bab7bc6eff8bd365850f70f01 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Sat, 20 Nov 2010 02:55:32 -0600
+Subject: [PATCH] ARMv7: Allow running with L1 cache disabled.
+
+Makes CONFIG_CPU_DCACHE_DISABLE work, although it requires
+!SMP (spinlocks use LDREX/STREX - fix that and you could
+get SMP).
+
+Change-Id: Iebf82f0afec0ae7474e46406d3f3ab1450e412c1
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ arch/arm/include/asm/atomic.h     |    2 +-
+ arch/arm/include/asm/cacheflush.h |    2 ++
+ arch/arm/include/asm/locks.h      |    2 +-
+ arch/arm/include/asm/mutex.h      |    2 +-
+ arch/arm/include/asm/system.h     |    8 ++++----
+ arch/arm/lib/bitops.h             |    2 +-
+ arch/arm/mm/Kconfig               |    2 +-
+ arch/arm/mm/cache-v7.S            |   22 ++++++++++++++++++++++
+ arch/arm/mm/proc-v7.S             |    8 ++++++++
+ 9 files changed, 41 insertions(+), 9 deletions(-)
+
+diff --git a/arch/arm/include/asm/atomic.h b/arch/arm/include/asm/atomic.h
+index 7e79503..16d92e8 100644
+--- a/arch/arm/include/asm/atomic.h
++++ b/arch/arm/include/asm/atomic.h
+@@ -27,7 +27,7 @@
+ #define atomic_read(v)	(*(volatile int *)&(v)->counter)
+ #define atomic_set(v,i)	(((v)->counter) = (i))
+ 
+-#if __LINUX_ARM_ARCH__ >= 6
++#if __LINUX_ARM_ARCH__ >= 6 && !defined(CONFIG_CPU_DCACHE_DISABLE)
+ 
+ /*
+  * ARMv6 UP and SMP safe atomic ops.  We use load exclusive and
+diff --git a/arch/arm/include/asm/cacheflush.h b/arch/arm/include/asm/cacheflush.h
+index 5078dc6..30c5191 100644
+--- a/arch/arm/include/asm/cacheflush.h
++++ b/arch/arm/include/asm/cacheflush.h
+@@ -368,6 +368,7 @@ extern void flush_dcache_page(struct page *);
+ 
+ static inline void __flush_icache_all(void)
+ {
++#ifndef CONFIG_CPU_ICACHE_DISABLE
+ #ifdef CONFIG_ARM_ERRATA_411920
+ 	extern void v6_icache_inval_all(void);
+ 	v6_icache_inval_all();
+@@ -380,6 +381,7 @@ static inline void __flush_icache_all(void)
+ 	    :
+ 	    : "r" (0));
+ #endif
++#endif /* CONFIG_CPU_ICACHE_DISABLE  */
+ }
+ static inline void flush_kernel_vmap_range(void *addr, int size)
+ {
+diff --git a/arch/arm/include/asm/locks.h b/arch/arm/include/asm/locks.h
+index ef4c897..82df166 100644
+--- a/arch/arm/include/asm/locks.h
++++ b/arch/arm/include/asm/locks.h
+@@ -12,7 +12,7 @@
+ #ifndef __ASM_PROC_LOCKS_H
+ #define __ASM_PROC_LOCKS_H
+ 
+-#if __LINUX_ARM_ARCH__ >= 6
++#if __LINUX_ARM_ARCH__ >= 6 && !defined(CONFIG_CPU_DCACHE_DISABLE)
+ 
+ #define __down_op(ptr,fail)			\
+ 	({					\
+diff --git a/arch/arm/include/asm/mutex.h b/arch/arm/include/asm/mutex.h
+index 93226cf..bcbca2c 100644
+--- a/arch/arm/include/asm/mutex.h
++++ b/arch/arm/include/asm/mutex.h
+@@ -8,7 +8,7 @@
+ #ifndef _ASM_MUTEX_H
+ #define _ASM_MUTEX_H
+ 
+-#if __LINUX_ARM_ARCH__ < 6
++#if __LINUX_ARM_ARCH__ < 6 || defined(CONFIG_CPU_DCACHE_DISABLE)
+ /* On pre-ARMv6 hardware the swp based implementation is the most efficient. */
+ # include <asm-generic/mutex-xchg.h>
+ #else
+diff --git a/arch/arm/include/asm/system.h b/arch/arm/include/asm/system.h
+index 549c978..dc8a127 100644
+--- a/arch/arm/include/asm/system.h
++++ b/arch/arm/include/asm/system.h
+@@ -254,14 +254,14 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
+ #ifdef swp_is_buggy
+ 	unsigned long flags;
+ #endif
+-#if __LINUX_ARM_ARCH__ >= 6
++#if __LINUX_ARM_ARCH__ >= 6 && !defined(CONFIG_CPU_DCACHE_DISABLE)
+ 	unsigned int tmp;
+ #endif
+ 
+ 	smp_mb();
+ 
+ 	switch (size) {
+-#if __LINUX_ARM_ARCH__ >= 6
++#if __LINUX_ARM_ARCH__ >= 6 && !defined(CONFIG_CPU_DCACHE_DISABLE)
+ 	case 1:
+ 		asm volatile("@	__xchg1\n"
+ 		"1:	ldrexb	%0, [%3]\n"
+@@ -329,7 +329,7 @@ extern void enable_hlt(void);
+ 
+ #include <asm-generic/cmpxchg-local.h>
+ 
+-#if __LINUX_ARM_ARCH__ < 6
++#if __LINUX_ARM_ARCH__ < 6 || defined(CONFIG_CPU_DCACHE_DISABLE)
+ 
+ #ifdef CONFIG_SMP
+ #error "SMP is not supported on this platform"
+@@ -348,7 +348,7 @@ extern void enable_hlt(void);
+ #include <asm-generic/cmpxchg.h>
+ #endif
+ 
+-#else	/* __LINUX_ARM_ARCH__ >= 6 */
++#else	/* __LINUX_ARM_ARCH__ >= 6  && !CONFIG_CPU_DCACHE_DISABLE */
+ 
+ extern void __bad_cmpxchg(volatile void *ptr, int size);
+ 
+diff --git a/arch/arm/lib/bitops.h b/arch/arm/lib/bitops.h
+index d422529..271a452 100644
+--- a/arch/arm/lib/bitops.h
++++ b/arch/arm/lib/bitops.h
+@@ -1,5 +1,5 @@
+ 
+-#if __LINUX_ARM_ARCH__ >= 6 && defined(CONFIG_CPU_32v6K)
++#if __LINUX_ARM_ARCH__ >= 6 && defined(CONFIG_CPU_32v6K) && !CONFIG_CPU_DCACHE_DISABLE
+ 	.macro	bitop, instr
+ 	mov	r2, #1
+ 	and	r3, r0, #7		@ Get bit offset
+diff --git a/arch/arm/mm/Kconfig b/arch/arm/mm/Kconfig
+index cc6f9d6..6aad450 100644
+--- a/arch/arm/mm/Kconfig
++++ b/arch/arm/mm/Kconfig
+@@ -671,7 +671,7 @@ config CPU_ICACHE_DISABLE
+ 
+ config CPU_DCACHE_DISABLE
+ 	bool "Disable D-Cache (C-bit)"
+-	depends on CPU_CP15
++	depends on CPU_CP15 && !SMP
+ 	help
+ 	  Say Y here to disable the processor data cache. Unless
+ 	  you have a reason not to or are unsure, say N.
+diff --git a/arch/arm/mm/cache-v7.S b/arch/arm/mm/cache-v7.S
+index 37c8157..9b3f6a7 100644
+--- a/arch/arm/mm/cache-v7.S
++++ b/arch/arm/mm/cache-v7.S
+@@ -28,6 +28,7 @@
+  */
+ ENTRY(v7_flush_dcache_all)
+ 	dmb					@ ensure ordering with previous memory accesses
++#ifndef CONFIG_CPU_DCACHE_DISABLE
+ 	mrc	p15, 1, r0, c0, c0, 1		@ read clidr
+ 	ands	r3, r0, #0x7000000		@ extract loc from clidr
+ 	mov	r3, r3, lsr #23			@ left align loc bit field
+@@ -72,6 +73,7 @@ finished:
+ 	mcr	p15, 2, r10, c0, c0, 0		@ select current cache level in cssr
+ 	dsb
+ 	isb
++#endif /* CONFIG_CPU_DCACHE_DISABLE */
+ 	mov	pc, lr
+ ENDPROC(v7_flush_dcache_all)
+ 
+@@ -91,11 +93,13 @@ ENTRY(v7_flush_kern_cache_all)
+  THUMB(	stmfd	sp!, {r4-r7, r9-r11, lr}	)
+ 	bl	v7_flush_dcache_all
+ 	mov	r0, #0
++#ifndef CONFIG_CPU_ICACHE_DISABLE
+ #ifdef CONFIG_SMP
+ 	mcr	p15, 0, r0, c7, c1, 0		@ invalidate I-cache inner shareable
+ #else
+ 	mcr	p15, 0, r0, c7, c5, 0		@ I+BTB cache invalidate
+ #endif
++#endif /* CONFIG_CPU_ICACHE_DISABLE */
+  ARM(	ldmfd	sp!, {r4-r5, r7, r9-r11, lr}	)
+  THUMB(	ldmfd	sp!, {r4-r7, r9-r11, lr}	)
+ 	mov	pc, lr
+@@ -163,21 +167,31 @@ ENTRY(v7_coherent_user_range)
+ 	sub	r3, r2, #1
+ 	bic	r0, r0, r3
+ 1:
++#ifndef CONFIG_CPU_DCACHE_DISABLE
+  USER(	mcr	p15, 0, r0, c7, c11, 1	)	@ clean D line to the point of unification
+ 	dsb
++#endif /* CONFIG_CPU_DCACHE_DISABLE */
++#ifndef CONFIG_CPU_ICACHE_DISABLE
+  USER(	mcr	p15, 0, r0, c7, c5, 1	)	@ invalidate I line
++#endif /* CONFIG_CPU_ICACHE_DISABLE */
+ 	add	r0, r0, r2
+ 2:
+ 	cmp	r0, r1
+ 	blo	1b
+ 	mov	r0, #0
++#ifndef CONFIG_CPU_BPREDICT_DISABLE
+ #ifdef CONFIG_SMP
+ 	mcr	p15, 0, r0, c7, c1, 6		@ invalidate BTB Inner Shareable
+ #else
+ 	mcr	p15, 0, r0, c7, c5, 6		@ invalidate BTB
+ #endif
++#endif /* CONFIG_CPU_BPREDICT_DISABLE */
++#if !defined(CONFIG_CPU_DCACHE_DISABLE) || \
++    !defined(CONFIG_CPU_ICACHE_DISABLE) || \
++    !defined(CONFIG_CPU_BPREDICT_DISABLE)
+ 	dsb
+ 	isb
++#endif
+ 	mov	pc, lr
+ 
+ /*
+@@ -203,6 +217,7 @@ ENDPROC(v7_coherent_user_range)
+  *	- size	- region size
+  */
+ ENTRY(v7_flush_kern_dcache_area)
++#ifndef CONFIG_CPU_DCACHE_DISABLE
+ 	dcache_line_size r2, r3
+ 	add	r1, r0, r1
+ 1:
+@@ -211,6 +226,7 @@ ENTRY(v7_flush_kern_dcache_area)
+ 	cmp	r0, r1
+ 	blo	1b
+ 	dsb
++#endif 	/* CONFIG_CPU_DCACHE_DISABLE */
+ 	mov	pc, lr
+ ENDPROC(v7_flush_kern_dcache_area)
+ 
+@@ -225,6 +241,7 @@ ENDPROC(v7_flush_kern_dcache_area)
+  *	- end     - virtual end address of region
+  */
+ v7_dma_inv_range:
++#ifndef CONFIG_CPU_DCACHE_DISABLE
+ 	dcache_line_size r2, r3
+ 	sub	r3, r2, #1
+ 	tst	r0, r3
+@@ -240,6 +257,7 @@ v7_dma_inv_range:
+ 	cmp	r0, r1
+ 	blo	1b
+ 	dsb
++#endif /* CONFIG_CPU_DCACHE_DISABLE */
+ 	mov	pc, lr
+ ENDPROC(v7_dma_inv_range)
+ 
+@@ -249,6 +267,7 @@ ENDPROC(v7_dma_inv_range)
+  *	- end     - virtual end address of region
+  */
+ v7_dma_clean_range:
++#ifndef CONFIG_CPU_DCACHE_DISABLE
+ 	dcache_line_size r2, r3
+ 	sub	r3, r2, #1
+ 	bic	r0, r0, r3
+@@ -258,6 +277,7 @@ v7_dma_clean_range:
+ 	cmp	r0, r1
+ 	blo	1b
+ 	dsb
++#endif /* CONFIG_CPU_DCACHE_DISABLE */
+ 	mov	pc, lr
+ ENDPROC(v7_dma_clean_range)
+ 
+@@ -267,6 +287,7 @@ ENDPROC(v7_dma_clean_range)
+  *	- end     - virtual end address of region
+  */
+ ENTRY(v7_dma_flush_range)
++#ifndef CONFIG_CPU_DCACHE_DISABLE
+ 	dcache_line_size r2, r3
+ 	sub	r3, r2, #1
+ 	bic	r0, r0, r3
+@@ -276,6 +297,7 @@ ENTRY(v7_dma_flush_range)
+ 	cmp	r0, r1
+ 	blo	1b
+ 	dsb
++#endif /* CONFIG_CPU_DCACHE_DISABLE */
+ 	mov	pc, lr
+ ENDPROC(v7_dma_flush_range)
+ 
+diff --git a/arch/arm/mm/proc-v7.S b/arch/arm/mm/proc-v7.S
+index 8cdf3bf..b24ffef 100644
+--- a/arch/arm/mm/proc-v7.S
++++ b/arch/arm/mm/proc-v7.S
+@@ -80,6 +80,7 @@ ENTRY(cpu_v7_do_idle)
+ ENDPROC(cpu_v7_do_idle)
+ 
+ ENTRY(cpu_v7_dcache_clean_area)
++#ifndef CONFIG_CPU_DCACHE_DISABLE
+ #ifndef TLB_CAN_READ_FROM_L1_CACHE
+ 	dcache_line_size r2, r3
+ 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+@@ -88,6 +89,7 @@ ENTRY(cpu_v7_dcache_clean_area)
+ 	bhi	1b
+ 	dsb
+ #endif
++#endif /* CONFIG_CPU_DCACHE_DISABLE */
+ 	mov	pc, lr
+ ENDPROC(cpu_v7_dcache_clean_area)
+ 
+@@ -106,9 +108,11 @@ ENTRY(cpu_v7_switch_mm)
+ 	mov	r2, #0
+ 	ldr	r1, [r1, #MM_CONTEXT_ID]	@ get mm->context.id
+ 	orr	r0, r0, #TTB_FLAGS
++#ifndef CONFIG_CPU_BPREDICT_DISABLE
+ #ifdef CONFIG_ARM_ERRATA_430973
+ 	mcr	p15, 0, r2, c7, c5, 6		@ flush BTAC/BTB
+ #endif
++#endif /* CONFIG_CPU_BPREDICT_DISABLE */
+ 	mcr	p15, 0, r2, c13, c0, 1		@ set reserved context ID
+ 	isb
+ 1:	mcr	p15, 0, r0, c2, c0, 0		@ set TTB 0
+@@ -160,7 +164,9 @@ ENTRY(cpu_v7_set_pte_ext)
+ 	moveq	r3, #0
+ 
+ 	str	r3, [r0]
++#ifndef CONFIG_CPU_DCACHE_DISABLE
+ 	mcr	p15, 0, r0, c7, c10, 1		@ flush_pte
++#endif /* CONFIG_CPU_DCACHE_DISABLE */
+ #endif
+ 	mov	pc, lr
+ ENDPROC(cpu_v7_set_pte_ext)
+@@ -264,7 +270,9 @@ __v7_setup:
+ 
+ 3:	mov	r10, #0
+ #ifdef HARVARD_CACHE
++#ifndef CONFIG_CPU_ICACHE_DISABLE
+ 	mcr	p15, 0, r10, c7, c5, 0		@ I+BTB cache invalidate
++#endif /* CONFIG_CPU_ICACHE_DISABLE */
+ #endif
+ 	dsb
+ #ifdef CONFIG_MMU
+-- 
+1.7.0.4
+
