@@ -1,0 +1,42 @@
+From d8c38570b40d582a1f170217ca456bf71f2cadce Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Wed, 25 May 2011 02:05:59 -0500
+Subject: [PATCH] MMC: SDHCI Auto-CMD23 fixes.
+
+Fixes bugs in Auto-CMD23 feature enable decision. Auto-CMD23
+shoud be enabled if host is >= v3, and SDMA is not in use.
+
+USE_ADMA | USE_SDMA | Auto-CMD23
+---------+----------+-----------
+    0    |    0     |     1
+---------+----------+-----------
+    0    |    1     |     0
+---------+----------+-----------
+    1    |    0     |     1
+---------+----------+-----------
+    1    |    1     |     1
+
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/mmc/host/sdhci.c |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/mmc/host/sdhci.c b/drivers/mmc/host/sdhci.c
+index fbb1842..a4e64b0 100644
+--- a/drivers/mmc/host/sdhci.c
++++ b/drivers/mmc/host/sdhci.c
+@@ -2498,9 +2498,9 @@ int sdhci_add_host(struct sdhci_host *host)
+ 		host->flags |= SDHCI_AUTO_CMD12;
+ 
+ 	/* Auto-CMD23 stuff only works in ADMA or PIO. */
+-	if ((host->version == SDHCI_SPEC_300) &&
++	if ((host->version >= SDHCI_SPEC_300) &&
+ 	    ((host->flags & SDHCI_USE_ADMA) ||
+-	     !(host->flags & SDHCI_REQ_USE_DMA))) {
++	     !(host->flags & SDHCI_USE_SDMA))) {
+ 		host->flags |= SDHCI_AUTO_CMD23;
+ 		printk(KERN_INFO "%s: Auto-CMD23 available\n", mmc_hostname(mmc));
+ 	} else
+-- 
+1.7.0.4
+
