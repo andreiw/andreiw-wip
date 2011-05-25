@@ -1,7 +1,7 @@
-From 5f5f12497881d83ca245198968ea0e389fb15ec0 Mon Sep 17 00:00:00 2001
+From 9fb090fab09604d8280a49c6fcf7c93f52012181 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Tue, 24 May 2011 17:31:10 -0500
-Subject: [PATCH] GDB: Third prototype of symbol file scope ("module scope" in other debuggers).
+Subject: [PATCH] GDB: Fourth prototype of symbol file scope ("module scope" in other debuggers).
 
 Works, you can do stuff like -
 Print &'DxeCore.dll'::gST
@@ -11,25 +11,54 @@ command in a deeper stack frame from a different EFI module would
 result in the expected resulted (gST from that module).
 
 Added list-symbol-files command, which shows currently loaded
-modules. File completion will soon be added to that, and you will
-be able to list modules containing sources.
+modules. It can take optional arguments, which are either object
+names or source files, in the later case modules containing this
+source are show.
 
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
- gdb/completer.c |   60 +++++++----
+ gdb/completer.c |   80 ++++++++++----
+ gdb/completer.h |    2 +
  gdb/linespec.c  |    3 +-
  gdb/objfiles.c  |   52 +++++++++
  gdb/objfiles.h  |    2 +
- gdb/symfile.c   |   55 +++++++++
+ gdb/symfile.c   |  135 +++++++++++++++++++++++
  gdb/symtab.c    |  328 ++++++++++++++++++++++++++++++++++++++++++++-----------
  gdb/symtab.h    |    4 +-
- 7 files changed, 418 insertions(+), 86 deletions(-)
+ 8 files changed, 520 insertions(+), 86 deletions(-)
 
 diff --git a/gdb/completer.c b/gdb/completer.c
-index 53275c0..7220746 100644
+index 53275c0..efe5797 100644
 --- a/gdb/completer.c
 +++ b/gdb/completer.c
-@@ -199,9 +199,10 @@ filename_completer (struct cmd_list_element *ignore, char *text, char *word)
+@@ -189,6 +189,26 @@ filename_completer (struct cmd_list_element *ignore, char *text, char *word)
+   return return_val;
+ }
+ 
++/* Complete on (multiple) symbol or source files. */
++char **
++files_completer (struct cmd_list_element *ignore, char *text, char *word)
++{
++  char *text_start;
++
++  text_start = word;
++  while (text_start != text)
++    {
++      if (*text_start == ' ')
++        break;
++      text_start--;
++    }
++
++  if (text_start != text)
++    text_start++;
++
++  return make_files_completion_list (text_start, word);
++}
++
+ /* Complete on locations, which might be of two possible forms:
+ 
+        file:line
+@@ -199,9 +219,10 @@ filename_completer (struct cmd_list_element *ignore, char *text, char *word)
  char **
  location_completer (struct cmd_list_element *ignore, char *text, char *word)
  {
@@ -43,7 +72,7 @@ index 53275c0..7220746 100644
    char *p;
    int quote_found = 0;
    int quoted = *text == '\'' || *text == '"';
-@@ -272,6 +273,10 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
+@@ -272,6 +293,10 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
       symbols as well as on files.  */
    if (colon)
      {
@@ -54,7 +83,7 @@ index 53275c0..7220746 100644
        list = make_file_symbol_completion_list (symbol_start, word,
  					       file_to_match);
        xfree (file_to_match);
-@@ -283,17 +288,30 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
+@@ -283,17 +308,30 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
  	 name, they cannot be asking for completion on files.  */
        if (strcspn (text, 
  		   gdb_completer_file_name_break_characters) == text_len)
@@ -89,7 +118,7 @@ index 53275c0..7220746 100644
    /* Make list[] large enough to hold both lists, then catenate
       fn_list[] onto the end of list[].  */
    if (n_syms && n_files)
-@@ -305,20 +323,20 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
+@@ -305,20 +343,20 @@ location_completer (struct cmd_list_element *ignore, char *text, char *word)
    else if (n_files)
      {
        /* If we only have file names as possible completion, we should
@@ -124,6 +153,19 @@ index 53275c0..7220746 100644
        for (n_files = 0; fn_list[n_files]; n_files++)
  	{
  	  memmove (fn_list[n_files], fn_list[n_files] + (word - text),
+diff --git a/gdb/completer.h b/gdb/completer.h
+index 8175304..ae3c98d 100644
+--- a/gdb/completer.h
++++ b/gdb/completer.h
+@@ -27,6 +27,8 @@ extern char **filename_completer (struct cmd_list_element *, char *, char *);
+ 
+ extern char **expression_completer (struct cmd_list_element *, char *, char *);
+ 
++extern char **files_completer (struct cmd_list_element *, char *, char *);
++
+ extern char **location_completer (struct cmd_list_element *, char *, char *);
+ 
+ extern char **command_completer (struct cmd_list_element *, char *, char *);
 diff --git a/gdb/linespec.c b/gdb/linespec.c
 index 75a74e2..e5b689e 100644
 --- a/gdb/linespec.c
@@ -229,10 +271,10 @@ index c689622..354f5d8 100644
  
  /* Traverse all object files in the current program space.
 diff --git a/gdb/symfile.c b/gdb/symfile.c
-index 9c28fb0..ebe9edc 100644
+index 9c28fb0..8a874e8 100644
 --- a/gdb/symfile.c
 +++ b/gdb/symfile.c
-@@ -2012,6 +2012,58 @@ print_transfer_performance (struct ui_file *stream,
+@@ -2012,6 +2012,137 @@ print_transfer_performance (struct ui_file *stream,
    ui_out_text (uiout, ".\n");
  }
  
@@ -261,9 +303,12 @@ index 9c28fb0..ebe9edc 100644
 +static void
 +list_symbol_files (char *args, int from_tty)
 +{
++  struct partial_symtab *ps;
 +  struct objfile *objfile;
 +  char *arg, **argv;
 +  int argcnt = 0;
++  char *real_path = NULL;
++  char *full_path = NULL;
 +
 +  argv = gdb_buildargv (args);
 +  make_cleanup_freeargv (argv);
@@ -274,11 +319,87 @@ index 9c28fb0..ebe9edc 100644
 +    {
 +      objfile = lookup_objfile (arg);
 +      if (objfile)
++      {
 +        list_symbol_file (objfile);
-+      else
-+        error ("No file matching %s.", arg);
++        continue;
++      }
 +
-+      /* TBD. Match all sources as well, and add completion. */
++      if (IS_ABSOLUTE_PATH (arg))
++        {
++          full_path = xfullpath (arg);
++          make_cleanup (xfree, full_path);
++          real_path = gdb_realpath (arg);
++          make_cleanup (xfree, real_path);
++        }
++
++      ALL_OBJFILES (objfile)
++        {
++          ALL_OBJFILE_PSYMTABS (objfile, ps)
++            {
++              if (FILENAME_CMP (arg, ps->filename) == 0)
++                {
++                  list_symbol_file (ps->objfile);
++                  break;
++                }
++
++              if (full_path != NULL)
++                {
++                  psymtab_to_fullname (ps);
++                  if (ps->fullname != NULL
++                      && FILENAME_CMP (full_path, ps->fullname) == 0)
++                    {
++                      list_symbol_file (ps->objfile);
++                      break;
++                    }
++                }
++
++              if (real_path != NULL)
++                {
++                  char *rp = NULL;
++                  psymtab_to_fullname (ps);
++                  if (ps->fullname != NULL)
++                    {
++                      rp = gdb_realpath (ps->fullname);
++                      make_cleanup (xfree, rp);
++                    }
++                  if (rp != NULL
++                      && FILENAME_CMP (real_path, rp) == 0)
++                    {
++                      list_symbol_file (ps->objfile);
++                      break;
++                    }
++                }
++            }
++
++          if (ps != NULL)
++            break;
++        }
++
++      if (objfile)
++        continue;
++
++      ALL_OBJFILES (objfile)
++        {
++          ALL_OBJFILE_PSYMTABS (objfile, ps)
++            {
++              if (lbasename (arg) == arg)
++                {
++                  if (FILENAME_CMP (lbasename (ps->filename), arg) == 0)
++                    {
++                      list_symbol_file (ps->objfile);
++                      break;
++                    }
++                }
++            }
++
++          if (ps != NULL)
++            break;
++        }
++
++      if (objfile != NULL)
++        continue;
++
++        error ("No file matching %s.", arg);
 +    }
 +  }
 +  else
@@ -291,12 +412,13 @@ index 9c28fb0..ebe9edc 100644
  /* This function allows the addition of incrementally linked object files.
     It does not modify any state in the target, only in the debugger.  */
  /* Note: ezannoni 2000-04-13 This function/command used to have a
-@@ -3803,6 +3855,9 @@ _initialize_symfile (void)
+@@ -3803,6 +3934,10 @@ _initialize_symfile (void)
  {
    struct cmd_list_element *c;
  
 +  c = add_cmd ("list-symbol-files", class_files, list_symbol_files, _("\
 +List loaded symbol files\n."), &cmdlist);
++  set_cmd_completer (c, files_completer);
 +
    c = add_cmd ("symbol-file", class_files, symbol_file_command, _("\
  Load symbol table from executable file FILE.\n\
