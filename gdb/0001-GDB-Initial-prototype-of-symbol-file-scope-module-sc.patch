@@ -1,4 +1,4 @@
-From 9fb090fab09604d8280a49c6fcf7c93f52012181 Mon Sep 17 00:00:00 2001
+From 26ab3460862e21669d1ddd90bdf3f10dcad80cd0 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Tue, 24 May 2011 17:31:10 -0500
 Subject: [PATCH] GDB: Fourth prototype of symbol file scope ("module scope" in other debuggers).
@@ -22,10 +22,10 @@ Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
  gdb/linespec.c  |    3 +-
  gdb/objfiles.c  |   52 +++++++++
  gdb/objfiles.h  |    2 +
- gdb/symfile.c   |  135 +++++++++++++++++++++++
+ gdb/symfile.c   |  136 +++++++++++++++++++++++
  gdb/symtab.c    |  328 ++++++++++++++++++++++++++++++++++++++++++++-----------
  gdb/symtab.h    |    4 +-
- 8 files changed, 520 insertions(+), 86 deletions(-)
+ 8 files changed, 521 insertions(+), 86 deletions(-)
 
 diff --git a/gdb/completer.c b/gdb/completer.c
 index 53275c0..efe5797 100644
@@ -271,10 +271,10 @@ index c689622..354f5d8 100644
  
  /* Traverse all object files in the current program space.
 diff --git a/gdb/symfile.c b/gdb/symfile.c
-index 9c28fb0..8a874e8 100644
+index 9c28fb0..c184328 100644
 --- a/gdb/symfile.c
 +++ b/gdb/symfile.c
-@@ -2012,6 +2012,137 @@ print_transfer_performance (struct ui_file *stream,
+@@ -2012,6 +2012,138 @@ print_transfer_performance (struct ui_file *stream,
    ui_out_text (uiout, ".\n");
  }
  
@@ -287,11 +287,11 @@ index 9c28fb0..8a874e8 100644
 +  struct obj_section *osect;
 +
 +  gdbarch = get_objfile_arch (objfile);
-+  printf_filtered("%s\n", objfile->name);
++  printf_filtered("\t%s\n", objfile->name);
 +  ALL_OBJFILE_OSECTIONS (objfile, osect)
 +  {
 +    name = bfd_section_name (objfile->obfd, osect->the_bfd_section);
-+    printf_filtered ("\t%s, [", name);
++    printf_filtered ("\t\t%s, [", name);
 +    puts_filtered (paddress (gdbarch, obj_section_addr (osect)));
 +    puts_filtered ("-");
 +    puts_filtered (paddress (gdbarch, obj_section_endaddr (osect)));
@@ -317,6 +317,7 @@ index 9c28fb0..8a874e8 100644
 +  {
 +    for (arg = argv[0], argcnt = 0; arg != NULL; arg = argv[++argcnt])
 +    {
++      printf_filtered ("%s:\n", arg);
 +      objfile = lookup_objfile (arg);
 +      if (objfile)
 +      {
@@ -412,7 +413,7 @@ index 9c28fb0..8a874e8 100644
  /* This function allows the addition of incrementally linked object files.
     It does not modify any state in the target, only in the debugger.  */
  /* Note: ezannoni 2000-04-13 This function/command used to have a
-@@ -3803,6 +3934,10 @@ _initialize_symfile (void)
+@@ -3803,6 +3935,10 @@ _initialize_symfile (void)
  {
    struct cmd_list_element *c;
  
