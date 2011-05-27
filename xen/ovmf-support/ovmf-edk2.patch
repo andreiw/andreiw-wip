@@ -77,7 +77,7 @@ Index: PlatformPei/Platform.c
 -    0xF000
 -    );
 +      0xC000,
-+      0x10000
++      0x4000
 +      );
 +  } else {
 +    BuildResourceDescriptorHob (
