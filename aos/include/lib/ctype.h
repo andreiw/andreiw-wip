@@ -1,5 +1,5 @@
-#ifndef AOS_CTYPE_H
-#define AOS_CTYPE_H
+#ifndef AOS_LIB_CTYPE_H
+#define AOS_LIB_CTYPE_H
 
 /*
  * NOTE! This ctype does not handle EOF like the standard C
@@ -52,4 +52,4 @@ static inline unsigned char __toupper(unsigned char c)
 #define tolower(c) __tolower(c)
 #define toupper(c) __toupper(c)
 
-#endif
+#endif /* AOS_LIB_CTYPE_H */

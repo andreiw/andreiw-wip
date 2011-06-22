@@ -2,13 +2,16 @@
 #define AOS_ARM_TYPES_H
 
 typedef signed char s8;
-typedef unsigned signed char u8;
+typedef unsigned char u8;
 
 typedef signed short s16;
-typedef unsigned signed short u16;
+typedef unsigned short u16;
 
 typedef signed short s32;
-typedef unsigned signed short u32;
+typedef unsigned short u32;
+
+typedef s32 sN;
+typedef u32 uN;
 
 typedef u8 bool;
 

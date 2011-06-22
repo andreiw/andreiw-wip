@@ -3,4 +3,6 @@
 
 #include <asm/types.h>
 
+typedef u32 size_t;
+
 #endif /* AOS_TYPES_H */
