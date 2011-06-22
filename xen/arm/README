@@ -41,6 +41,13 @@ internal stuff from "publics" to make at least other people's lives
 a bit easier ;-). Old Xen 3.0 uses DACR to protect kernel from userspace,
 probably going to go with a split TTBR0/TTBR1 model instead.
 
+June 22 2011
+------------
+
+At the point where it builds but fails to link. It should be as easy now as
+filling in the missing bits, but need to change Xen code to make stuff like
+the cpufreq, pci, iommu and other bits optional.
+
 Contact Info
 ============
 

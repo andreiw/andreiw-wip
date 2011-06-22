@@ -1,7 +1,7 @@
 # HG changeset patch
 # User Andrei Warkentin <andreiw@motorola.com>
 # Date 1304464411 18000
-# Node ID 0d31b8debaf8a656bfb7a29dd8ae66c3103cf09e
+# Node ID 85377876ea8d0b33aff3cf6ea840250377f5d7bd
 # Parent  476b0d68e7d5405babc1182da3b345b1e4cc1bca
 ARM: ARMv7 support patch.
 
@@ -12,9 +12,9 @@ This doesn't build yet. Partially based on Samsung Xen 3.0 code.
 
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 Makefile
---- a/Makefile	Sat Apr 30 09:48:16 2011 +0100
-+++ b/Makefile	Tue May 03 18:13:31 2011 -0500
+diff --git a/Makefile b/Makefile
+--- a/Makefile
++++ b/Makefile
 @@ -10,7 +10,7 @@
  include Config.mk
  
@@ -24,18 +24,20 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 Makefile
  include buildconfigs/Rules.mk
  
  # build and install everything into the standard system directories
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 config/arm.mk
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/config/arm.mk	Tue May 03 18:13:31 2011 -0500
+diff --git a/config/arm.mk b/config/arm.mk
+new file mode 100644
+--- /dev/null
++++ b/config/arm.mk
 @@ -0,0 +1,4 @@
 +CONFIG_ARM := y
 +CONFIG_ARM_$(XEN_OS) := y
 +
 +CONFIG_IOEMU := n
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/Makefile
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/arch/arm/Makefile	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,74 @@
+diff --git a/xen/arch/arm/Makefile b/xen/arch/arm/Makefile
+new file mode 100644
+--- /dev/null
++++ b/xen/arch/arm/Makefile
+@@ -0,0 +1,72 @@
 +#
 +# xen/arch/arm/Makefile
 +#
@@ -55,8 +57,6 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/Makefile
 +subdir-y += $(XEN_TARGET_PLAT)
 +
 +obj-$(crash_debug) += gdbstub.o
-+
-+ALL_OBJS := $(BASEDIR)/include/asm-arm/asm-offsets.h $(ALL_OBJS)
 +
 +$(TARGET): $(TARGET)-syms
 +	@cp $(TARGET)-syms $@
@@ -103,17 +103,18 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/Makefile
 +
 +xen.lds.s: xen.lds.S
 +	$(CC) -E $(CPPFLAGS) -P -DXEN $(AFLAGS) \
-+		-o xen.lds.s xen/xen.lds.S
++		-o xen.lds.s xen.lds.S
 +
 +.PHONY: clean
 +clean::
 +	rm -f *.o *~ core xen.lds.s $(BASEDIR)/include/asm-arm/.offsets.h.stamp
 +	rm -f asm-offsets.s $(BASEDIR)/include/asm-arm/asm-offsets.h
 +	rm -f $(BASEDIR)/.xen-syms.[0-9]*
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/Rules.mk
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/arch/arm/Rules.mk	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,24 @@
+diff --git a/xen/arch/arm/Rules.mk b/xen/arch/arm/Rules.mk
+new file mode 100644
+--- /dev/null
++++ b/xen/arch/arm/Rules.mk
+@@ -0,0 +1,28 @@
 +########################################
 +# arm-specific definitions
 +
@@ -124,23 +125,28 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/Rules.mk
 +no_warns ?= n
 +
 +CFLAGS += -march=armv7-a -mlittle-endian -mabi=aapcs -mapcs -mpoke-function-name
-+CFLAGS += -fno-builtin -fno-common -Wredundant-decls
-+CFLAGS += -iwithprefix include -Werror -Wno-pointer-arith -pipe
-+CFLAGS += -I$(BASEDIR)/include 
++CFLAGS += -fno-builtin -fno-common
++CFLAGS += -iwithprefix include -pipe
++CFLAGS += -I$(BASEDIR)/include
 +CFLAGS += -I$(BASEDIR)/include/asm-arm/mach-generic
 +CFLAGS += -I$(BASEDIR)/include/asm-arm/mach-default
 +
 +# Prevent floating-point variables from creeping into Xen.
 +CFLAGS += -msoft-float
 +
++ifeq ($(no_warns),y)
++CFLAGS	+= -Wa,--fatal-warnings -Werror -Wno-uninitialized
++endif
++
 +$(call cc-options-add,CFLAGS,CC,$(EMBEDDED_EXTRA_CFLAGS))
 +
 +# Require GCC v3.4+ (to avoid issues with alignment constraints in Xen headers)
 +check-$(gcc) = $(call cc-ver-check,CC,0x030400,"Xen requires at least gcc-3.4")
 +$(eval $(check-y))
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.c
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/arch/arm/asm-offsets.c	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/arch/arm/asm-offsets.c b/xen/arch/arm/asm-offsets.c
+new file mode 100644
+--- /dev/null
++++ b/xen/arch/arm/asm-offsets.c
 @@ -0,0 +1,21 @@
 +/*
 + * Generate definitions needed by assembly language modules.
@@ -163,10 +169,11 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.c
 +void foo(void)
 +{
 +}
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/arch/arm/asm-offsets.s	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,1482 @@
+diff --git a/xen/arch/arm/asm-offsets.s b/xen/arch/arm/asm-offsets.s
+new file mode 100644
+--- /dev/null
++++ b/xen/arch/arm/asm-offsets.s
+@@ -0,0 +1,1396 @@
 +	.arch armv7-a
 +	.fpu softvfp
 +	.eabi_attribute 20, 1
@@ -193,7 +200,7 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.word	4278190084
 +	.type	foo, %function
 +foo:
-+.LFB177:
++.LFB182:
 +	.file 1 "asm-offsets.c"
 +	.loc 1 20 0
 +	@ args = 0, pretend = 0, frame = 0
@@ -206,38 +213,8 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +.LCFI2:
 +	.loc 1 21 0
 +	ldmfd	sp, {fp, sp, pc}
-+.LFE177:
++.LFE182:
 +	.size	foo, .-foo
-+	.align	2
-+	.global	get_s_time
-+	.ascii	"get_s_time\000"
-+	.align	2
-+	.word	4278190092
-+	.type	get_s_time, %function
-+get_s_time:
-+.LFB92:
-+	.file 2 "/home/fjnh84/src/xen-unstable.hg/xen/include/asm/time.h"
-+	.loc 2 14 0
-+	@ args = 0, pretend = 0, frame = 0
-+	@ frame_needed = 1, uses_anonymous_args = 0
-+	mov	ip, sp
-+.LCFI3:
-+	stmfd	sp!, {fp, ip, lr, pc}
-+.LCFI4:
-+	sub	fp, ip, #4
-+.LCFI5:
-+	.loc 2 15 0
-+	movw	r0, #:lower16:.LC0
-+	movt	r0, #:upper16:.LC0
-+	mov	r1, #15
-+	bl	__bug
-+.LFE92:
-+	.size	get_s_time, .-get_s_time
-+	.section	.rodata.str1.4,"aMS",%progbits,1
-+	.align	2
-+.LC0:
-+	.ascii	"/home/fjnh84/src/xen-unstable.hg/xen/include/asm/ti"
-+	.ascii	"me.h\000"
 +	.section	.debug_frame,"",%progbits
 +.Lframe0:
 +	.4byte	.LECIE0-.LSCIE0
@@ -257,10 +234,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.4byte	.LEFDE0-.LASFDE0
 +.LASFDE0:
 +	.4byte	.Lframe0
-+	.4byte	.LFB177
-+	.4byte	.LFE177-.LFB177
++	.4byte	.LFB182
++	.4byte	.LFE182-.LFB182
 +	.byte	0x4
-+	.4byte	.LCFI0-.LFB177
++	.4byte	.LCFI0-.LFB182
 +	.byte	0xd
 +	.uleb128 0xc
 +	.byte	0x4
@@ -281,40 +258,12 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0x4
 +	.align	2
 +.LEFDE0:
-+.LSFDE2:
-+	.4byte	.LEFDE2-.LASFDE2
-+.LASFDE2:
-+	.4byte	.Lframe0
-+	.4byte	.LFB92
-+	.4byte	.LFE92-.LFB92
-+	.byte	0x4
-+	.4byte	.LCFI3-.LFB92
-+	.byte	0xd
-+	.uleb128 0xc
-+	.byte	0x4
-+	.4byte	.LCFI4-.LCFI3
-+	.byte	0x11
-+	.uleb128 0xe
-+	.sleb128 2
-+	.byte	0x11
-+	.uleb128 0xd
-+	.sleb128 3
-+	.byte	0x11
-+	.uleb128 0xb
-+	.sleb128 4
-+	.byte	0x4
-+	.4byte	.LCFI5-.LCFI4
-+	.byte	0xc
-+	.uleb128 0xb
-+	.uleb128 0x4
-+	.align	2
-+.LEFDE2:
 +	.text
 +.Letext0:
 +	.section	.debug_loc,"",%progbits
 +.Ldebug_loc0:
 +.LLST0:
-+	.4byte	.LFB177-.Ltext0
++	.4byte	.LFB182-.Ltext0
 +	.4byte	.LCFI0-.Ltext0
 +	.2byte	0x2
 +	.byte	0x7d
@@ -325,53 +274,36 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.byte	0x7c
 +	.sleb128 0
 +	.4byte	.LCFI2-.Ltext0
-+	.4byte	.LFE177-.Ltext0
++	.4byte	.LFE182-.Ltext0
 +	.2byte	0x2
 +	.byte	0x7b
 +	.sleb128 4
 +	.4byte	0x0
 +	.4byte	0x0
-+.LLST1:
-+	.4byte	.LFB92-.Ltext0
-+	.4byte	.LCFI3-.Ltext0
-+	.2byte	0x2
-+	.byte	0x7d
-+	.sleb128 0
-+	.4byte	.LCFI3-.Ltext0
-+	.4byte	.LCFI5-.Ltext0
-+	.2byte	0x2
-+	.byte	0x7c
-+	.sleb128 0
-+	.4byte	.LCFI5-.Ltext0
-+	.4byte	.LFE92-.Ltext0
-+	.2byte	0x2
-+	.byte	0x7b
-+	.sleb128 4
-+	.4byte	0x0
-+	.4byte	0x0
-+	.file 3 "/home/fjnh84/src/xen-unstable.hg/xen/include/asm/types.h"
-+	.file 4 "/home/fjnh84/src/xen-unstable.hg/xen/include/asm/spinlock.h"
-+	.file 5 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/spinlock.h"
-+	.file 6 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/cpumask.h"
-+	.file 7 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/lib.h"
-+	.file 8 "/home/fjnh84/src/xen-unstable.hg/xen/include/public/arch-arm.h"
-+	.file 9 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/time.h"
-+	.file 10 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/list.h"
-+	.file 11 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/irq.h"
-+	.file 12 "/home/fjnh84/src/xen-unstable.hg/xen/include/asm/irq.h"
-+	.file 13 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/rcupdate.h"
-+	.file 14 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/preempt.h"
++	.file 2 "/home/fjnh84/src/xen-unstable.hg/xen/include/asm/types.h"
++	.file 3 "/home/fjnh84/src/xen-unstable.hg/xen/include/asm/spinlock.h"
++	.file 4 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/spinlock.h"
++	.file 5 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/cpumask.h"
++	.file 6 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/lib.h"
++	.file 7 "/home/fjnh84/src/xen-unstable.hg/xen/include/public/arch-arm.h"
++	.file 8 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/time.h"
++	.file 9 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/list.h"
++	.file 10 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/irq.h"
++	.file 11 "/home/fjnh84/src/xen-unstable.hg/xen/include/asm/irq.h"
++	.file 12 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/rcupdate.h"
++	.file 13 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/preempt.h"
++	.file 14 "/home/fjnh84/src/xen-unstable.hg/xen/include/asm/numa.h"
 +	.file 15 "/home/fjnh84/src/xen-unstable.hg/xen/include/xen/sched.h"
 +	.section	.debug_info
-+	.4byte	0x5a9
++	.4byte	0x5ba
 +	.2byte	0x2
 +	.4byte	.Ldebug_abbrev0
 +	.byte	0x4
 +	.uleb128 0x1
-+	.4byte	.LASF62
-+	.byte	0x1
-+	.4byte	.LASF63
 +	.4byte	.LASF64
++	.byte	0x1
++	.4byte	.LASF65
++	.4byte	.LASF66
 +	.4byte	.Ltext0
 +	.4byte	.Letext0
 +	.4byte	.Ldebug_line0
@@ -408,13 +340,18 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.byte	0x7
 +	.4byte	.LASF6
 +	.uleb128 0x4
++	.ascii	"u8\000"
++	.byte	0x2
++	.byte	0x17
++	.4byte	0x2c
++	.uleb128 0x4
 +	.ascii	"u16\000"
-+	.byte	0x3
++	.byte	0x2
 +	.byte	0x1a
 +	.4byte	0x3a
 +	.uleb128 0x4
 +	.ascii	"s64\000"
-+	.byte	0x3
++	.byte	0x2
 +	.byte	0x1f
 +	.4byte	0x4f
 +	.uleb128 0x2
@@ -423,9 +360,9 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.4byte	.LASF7
 +	.uleb128 0x5
 +	.4byte	.LASF8
-+	.byte	0x3
++	.byte	0x2
 +	.byte	0x27
-+	.4byte	0x85
++	.4byte	0x8f
 +	.uleb128 0x2
 +	.byte	0x1
 +	.byte	0x8
@@ -434,14 +371,14 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.byte	0x4
 +	.uleb128 0x7
 +	.byte	0x4
-+	.byte	0x4
++	.byte	0x3
 +	.byte	0x8
-+	.4byte	0xa5
++	.4byte	0xaf
 +	.uleb128 0x8
 +	.4byte	.LASF11
-+	.byte	0x4
++	.byte	0x3
 +	.byte	0x9
-+	.4byte	0xa5
++	.4byte	0xaf
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x0
@@ -450,18 +387,18 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.4byte	0x48
 +	.uleb128 0x5
 +	.4byte	.LASF10
-+	.byte	0x4
++	.byte	0x3
 +	.byte	0xa
-+	.4byte	0x8e
++	.4byte	0x98
 +	.uleb128 0xa
 +	.4byte	.LASF18
 +	.byte	0x4
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x9
-+	.4byte	0xd0
++	.4byte	0xda
 +	.uleb128 0x8
 +	.4byte	.LASF12
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0xa
 +	.4byte	0x41
 +	.byte	0x2
@@ -471,26 +408,26 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0xb
 +	.4byte	.LASF55
 +	.byte	0x0
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x67
 +	.uleb128 0x7
 +	.byte	0xc
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x74
-+	.4byte	0x12d
++	.4byte	0x137
 +	.uleb128 0xc
 +	.ascii	"raw\000"
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x75
-+	.4byte	0xaa
++	.4byte	0xb4
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x0
 +	.uleb128 0xd
 +	.4byte	.LASF13
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x76
-+	.4byte	0x5d
++	.4byte	0x67
 +	.byte	0x2
 +	.byte	0xc
 +	.byte	0x4
@@ -499,9 +436,9 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0x4
 +	.uleb128 0xd
 +	.4byte	.LASF14
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x77
-+	.4byte	0x5d
++	.4byte	0x67
 +	.byte	0x2
 +	.byte	0x4
 +	.byte	0x0
@@ -510,46 +447,46 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0x4
 +	.uleb128 0x8
 +	.4byte	.LASF15
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x78
-+	.4byte	0xb5
++	.4byte	0xbf
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x8
 +	.uleb128 0x8
 +	.4byte	.LASF16
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x79
-+	.4byte	0xd0
++	.4byte	0xda
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0xc
 +	.byte	0x0
 +	.uleb128 0x5
 +	.4byte	.LASF17
-+	.byte	0x5
++	.byte	0x4
 +	.byte	0x7a
-+	.4byte	0xd8
++	.4byte	0xe2
 +	.uleb128 0xa
 +	.4byte	.LASF19
 +	.byte	0x4
-+	.byte	0x6
++	.byte	0x5
 +	.byte	0x52
-+	.4byte	0x153
++	.4byte	0x15d
 +	.uleb128 0x8
 +	.4byte	.LASF20
-+	.byte	0x6
++	.byte	0x5
 +	.byte	0x52
-+	.4byte	0x153
++	.4byte	0x15d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x0
 +	.byte	0x0
 +	.uleb128 0xe
-+	.4byte	0x73
-+	.4byte	0x163
++	.4byte	0x7d
++	.4byte	0x16d
 +	.uleb128 0xf
-+	.4byte	0x163
++	.4byte	0x16d
 +	.byte	0x0
 +	.byte	0x0
 +	.uleb128 0x10
@@ -557,354 +494,354 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.byte	0x7
 +	.uleb128 0x5
 +	.4byte	.LASF21
-+	.byte	0x6
++	.byte	0x5
 +	.byte	0x52
-+	.4byte	0x138
++	.4byte	0x142
 +	.uleb128 0xa
 +	.4byte	.LASF22
 +	.byte	0x58
-+	.byte	0x7
++	.byte	0x6
 +	.byte	0x78
-+	.4byte	0x2a7
++	.4byte	0x2b1
 +	.uleb128 0xc
 +	.ascii	"r0\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x4b
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x0
 +	.uleb128 0xc
 +	.ascii	"r1\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x4c
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x4
 +	.uleb128 0xc
 +	.ascii	"r2\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x4d
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x8
 +	.uleb128 0xc
 +	.ascii	"r3\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x4e
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0xc
 +	.uleb128 0xc
 +	.ascii	"r4\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x4f
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x10
 +	.uleb128 0xc
 +	.ascii	"r5\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x50
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x14
 +	.uleb128 0xc
 +	.ascii	"r6\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x51
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x18
 +	.uleb128 0xc
 +	.ascii	"r7\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x52
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x1c
 +	.uleb128 0xc
 +	.ascii	"r8\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x53
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x20
 +	.uleb128 0xc
 +	.ascii	"r9\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x54
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x24
 +	.uleb128 0xc
 +	.ascii	"r10\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x55
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x28
 +	.uleb128 0xc
 +	.ascii	"r11\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x56
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x2c
 +	.uleb128 0xc
 +	.ascii	"r12\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x57
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x30
 +	.uleb128 0xc
 +	.ascii	"r13\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x58
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x34
 +	.uleb128 0xc
 +	.ascii	"r14\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x59
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x38
 +	.uleb128 0xc
 +	.ascii	"r15\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x5a
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x3c
 +	.uleb128 0xc
 +	.ascii	"psr\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x5b
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x40
 +	.uleb128 0xc
 +	.ascii	"ctx\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x5c
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x44
 +	.uleb128 0x8
 +	.4byte	.LASF23
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x5f
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x48
 +	.uleb128 0xc
 +	.ascii	"cr\000"
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x60
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x4c
 +	.uleb128 0x8
 +	.4byte	.LASF24
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x61
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x50
 +	.uleb128 0x8
 +	.4byte	.LASF25
-+	.byte	0x8
++	.byte	0x7
 +	.byte	0x62
-+	.4byte	0x73
++	.4byte	0x7d
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x54
 +	.byte	0x0
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x2ad
++	.4byte	0x2b7
 +	.uleb128 0x12
-+	.4byte	0x85
++	.4byte	0x8f
 +	.uleb128 0x2
 +	.byte	0x4
 +	.byte	0x5
 +	.4byte	.LASF26
 +	.uleb128 0x5
 +	.4byte	.LASF27
-+	.byte	0x9
++	.byte	0x8
 +	.byte	0x1f
-+	.4byte	0x68
++	.4byte	0x72
 +	.uleb128 0xa
 +	.4byte	.LASF28
 +	.byte	0x8
-+	.byte	0xa
++	.byte	0x9
 +	.byte	0x1e
-+	.4byte	0x2ed
++	.4byte	0x2f7
 +	.uleb128 0x8
 +	.4byte	.LASF29
-+	.byte	0xa
++	.byte	0x9
 +	.byte	0x1f
-+	.4byte	0x2ed
++	.4byte	0x2f7
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x0
 +	.uleb128 0x8
 +	.4byte	.LASF30
-+	.byte	0xa
++	.byte	0x9
 +	.byte	0x1f
-+	.4byte	0x2ed
++	.4byte	0x2f7
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x4
 +	.byte	0x0
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x2c4
++	.4byte	0x2ce
 +	.uleb128 0xa
 +	.4byte	.LASF31
 +	.byte	0x10
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0xc
-+	.4byte	0x338
++	.4byte	0x342
 +	.uleb128 0x8
 +	.4byte	.LASF32
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0xd
-+	.4byte	0x354
++	.4byte	0x35e
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x0
 +	.uleb128 0x8
 +	.4byte	.LASF33
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0xe
-+	.4byte	0x2a7
++	.4byte	0x2b1
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x4
 +	.uleb128 0x8
 +	.4byte	.LASF34
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0xf
-+	.4byte	0x8c
++	.4byte	0x96
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x8
 +	.uleb128 0x8
 +	.4byte	.LASF35
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x10
-+	.4byte	0x7a
++	.4byte	0x84
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0xc
 +	.byte	0x0
 +	.uleb128 0x13
 +	.byte	0x1
-+	.4byte	0x34e
++	.4byte	0x358
 +	.uleb128 0x14
 +	.4byte	0x41
 +	.uleb128 0x14
-+	.4byte	0x8c
++	.4byte	0x96
 +	.uleb128 0x14
-+	.4byte	0x34e
++	.4byte	0x358
 +	.byte	0x0
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x171
++	.4byte	0x17b
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x338
++	.4byte	0x342
 +	.uleb128 0xa
 +	.4byte	.LASF36
 +	.byte	0x20
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x28
-+	.4byte	0x3d7
++	.4byte	0x3e1
 +	.uleb128 0x8
 +	.4byte	.LASF37
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x29
-+	.4byte	0x2a7
++	.4byte	0x2b1
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x0
 +	.uleb128 0x8
 +	.4byte	.LASF38
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x2a
-+	.4byte	0x3e7
++	.4byte	0x3f1
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x4
 +	.uleb128 0x8
 +	.4byte	.LASF39
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x2b
-+	.4byte	0x3f9
++	.4byte	0x403
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x8
 +	.uleb128 0x8
 +	.4byte	.LASF40
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x2c
-+	.4byte	0x3f9
++	.4byte	0x403
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0xc
 +	.uleb128 0x8
 +	.4byte	.LASF41
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x2d
-+	.4byte	0x3f9
++	.4byte	0x403
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x10
 +	.uleb128 0xc
 +	.ascii	"ack\000"
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x2e
-+	.4byte	0x3f9
++	.4byte	0x403
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x14
 +	.uleb128 0xc
 +	.ascii	"end\000"
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x2f
-+	.4byte	0x3f9
++	.4byte	0x403
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x18
 +	.uleb128 0x8
 +	.4byte	.LASF42
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x30
-+	.4byte	0x410
++	.4byte	0x41a
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x1c
@@ -912,45 +849,45 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0x15
 +	.byte	0x1
 +	.4byte	0x48
-+	.4byte	0x3e7
++	.4byte	0x3f1
 +	.uleb128 0x14
 +	.4byte	0x48
 +	.byte	0x0
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x3d7
++	.4byte	0x3e1
 +	.uleb128 0x13
 +	.byte	0x1
-+	.4byte	0x3f9
++	.4byte	0x403
 +	.uleb128 0x14
 +	.4byte	0x48
 +	.byte	0x0
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x3ed
++	.4byte	0x3f7
 +	.uleb128 0x13
 +	.byte	0x1
-+	.4byte	0x410
++	.4byte	0x41a
 +	.uleb128 0x14
 +	.4byte	0x48
 +	.uleb128 0x14
-+	.4byte	0x166
++	.4byte	0x170
 +	.byte	0x0
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x3ff
++	.4byte	0x409
 +	.uleb128 0x16
 +	.4byte	.LASF36
-+	.4byte	0x35a
++	.4byte	0x364
 +	.uleb128 0xa
 +	.4byte	.LASF43
 +	.byte	0x80
-+	.byte	0xc
++	.byte	0xb
 +	.byte	0x4
-+	.4byte	0x4e2
++	.4byte	0x4ec
 +	.uleb128 0x8
 +	.4byte	.LASF44
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x47
 +	.4byte	0x48
 +	.byte	0x2
@@ -958,31 +895,31 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0x0
 +	.uleb128 0x8
 +	.4byte	.LASF32
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x48
-+	.4byte	0x4e2
++	.4byte	0x4ec
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x4
 +	.uleb128 0x8
 +	.4byte	.LASF45
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x49
-+	.4byte	0x4ee
++	.4byte	0x4f8
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x8
 +	.uleb128 0x8
 +	.4byte	.LASF46
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x4a
-+	.4byte	0x4f4
++	.4byte	0x4fe
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0xc
 +	.uleb128 0x8
 +	.4byte	.LASF47
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x4b
 +	.4byte	0x48
 +	.byte	0x2
@@ -990,15 +927,15 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0x10
 +	.uleb128 0x8
 +	.4byte	.LASF48
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x4c
-+	.4byte	0x500
++	.4byte	0x50a
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x14
 +	.uleb128 0xc
 +	.ascii	"irq\000"
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x4d
 +	.4byte	0x41
 +	.byte	0x2
@@ -1006,39 +943,39 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0x18
 +	.uleb128 0x8
 +	.4byte	.LASF11
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x4e
-+	.4byte	0x12d
++	.4byte	0x137
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x1c
 +	.uleb128 0x8
 +	.4byte	.LASF49
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x4f
-+	.4byte	0x166
++	.4byte	0x170
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x28
 +	.uleb128 0x8
 +	.4byte	.LASF50
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x50
-+	.4byte	0x166
++	.4byte	0x170
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x2c
 +	.uleb128 0x8
 +	.4byte	.LASF51
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x53
-+	.4byte	0x2b9
++	.4byte	0x2c3
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x30
 +	.uleb128 0x8
 +	.4byte	.LASF52
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x54
 +	.4byte	0x48
 +	.byte	0x2
@@ -1046,108 +983,115 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0x38
 +	.uleb128 0x8
 +	.4byte	.LASF53
-+	.byte	0xb
++	.byte	0xa
 +	.byte	0x55
-+	.4byte	0x2c4
++	.4byte	0x2ce
 +	.byte	0x2
 +	.byte	0x23
 +	.uleb128 0x3c
 +	.byte	0x0
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x416
++	.4byte	0x420
 +	.uleb128 0x17
 +	.4byte	.LASF45
 +	.byte	0x1
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x4e8
++	.4byte	0x4f2
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x2f3
++	.4byte	0x2fd
 +	.uleb128 0x17
 +	.4byte	.LASF54
 +	.byte	0x1
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x4fa
++	.4byte	0x504
 +	.uleb128 0xb
 +	.4byte	.LASF56
 +	.byte	0x0
-+	.byte	0xd
++	.byte	0xc
 +	.byte	0x77
 +	.uleb128 0x5
 +	.4byte	.LASF57
-+	.byte	0xd
++	.byte	0xc
 +	.byte	0x78
-+	.4byte	0x506
++	.4byte	0x510
 +	.uleb128 0x18
 +	.byte	0x1
 +	.ascii	"foo\000"
 +	.byte	0x1
 +	.byte	0x13
 +	.byte	0x1
-+	.4byte	.LFB177
-+	.4byte	.LFE177
++	.4byte	.LFB182
++	.4byte	.LFE182
 +	.4byte	.LLST0
-+	.uleb128 0x19
-+	.byte	0x1
-+	.4byte	.LASF65
-+	.byte	0x2
-+	.byte	0xd
-+	.byte	0x1
-+	.4byte	0x2b9
-+	.4byte	.LFB92
-+	.4byte	.LFE92
-+	.4byte	.LLST1
 +	.uleb128 0xe
-+	.4byte	0x73
-+	.4byte	0x55d
++	.4byte	0x7d
++	.4byte	0x54e
 +	.uleb128 0xf
-+	.4byte	0x163
++	.4byte	0x16d
 +	.byte	0x20
 +	.uleb128 0xf
-+	.4byte	0x163
++	.4byte	0x16d
 +	.byte	0x0
 +	.byte	0x0
-+	.uleb128 0x1a
++	.uleb128 0x19
 +	.4byte	.LASF58
-+	.byte	0x6
++	.byte	0x5
 +	.2byte	0x116
-+	.4byte	0x56b
++	.4byte	0x55c
 +	.byte	0x1
 +	.byte	0x1
 +	.uleb128 0x12
-+	.4byte	0x547
-+	.uleb128 0x1a
++	.4byte	0x538
++	.uleb128 0x19
 +	.4byte	.LASF59
-+	.byte	0x6
-+	.2byte	0x1c4
-+	.4byte	0x166
-+	.byte	0x1
-+	.byte	0x1
-+	.uleb128 0x1b
-+	.4byte	.LASF43
-+	.byte	0xc
 +	.byte	0x5
-+	.4byte	0x58b
++	.2byte	0x1c4
++	.4byte	0x170
++	.byte	0x1
++	.byte	0x1
++	.uleb128 0x1a
++	.4byte	.LASF43
++	.byte	0xb
++	.byte	0x5
++	.4byte	0x57c
 +	.byte	0x1
 +	.byte	0x1
 +	.uleb128 0x11
 +	.byte	0x4
-+	.4byte	0x41f
-+	.uleb128 0x1b
++	.4byte	0x429
++	.uleb128 0x1a
 +	.4byte	.LASF60
-+	.byte	0xe
++	.byte	0xd
 +	.byte	0x11
 +	.4byte	0x48
 +	.byte	0x1
 +	.byte	0x1
 +	.uleb128 0x1a
 +	.4byte	.LASF61
++	.byte	0xe
++	.byte	0xf
++	.4byte	0x41
++	.byte	0x1
++	.byte	0x1
++	.uleb128 0x1a
++	.4byte	.LASF62
++	.byte	0xe
++	.byte	0x11
++	.4byte	0x5a9
++	.byte	0x1
++	.byte	0x1
++	.uleb128 0x11
++	.byte	0x4
++	.4byte	0x5d
++	.uleb128 0x19
++	.4byte	.LASF63
 +	.byte	0xf
 +	.2byte	0x169
-+	.4byte	0x50e
++	.4byte	0x518
 +	.byte	0x1
 +	.byte	0x1
 +	.byte	0x0
@@ -1435,29 +1379,6 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.byte	0x0
 +	.byte	0x0
 +	.uleb128 0x19
-+	.uleb128 0x2e
-+	.byte	0x0
-+	.uleb128 0x3f
-+	.uleb128 0xc
-+	.uleb128 0x3
-+	.uleb128 0xe
-+	.uleb128 0x3a
-+	.uleb128 0xb
-+	.uleb128 0x3b
-+	.uleb128 0xb
-+	.uleb128 0x27
-+	.uleb128 0xc
-+	.uleb128 0x49
-+	.uleb128 0x13
-+	.uleb128 0x11
-+	.uleb128 0x1
-+	.uleb128 0x12
-+	.uleb128 0x1
-+	.uleb128 0x40
-+	.uleb128 0x6
-+	.byte	0x0
-+	.byte	0x0
-+	.uleb128 0x1a
 +	.uleb128 0x34
 +	.byte	0x0
 +	.uleb128 0x3
@@ -1474,7 +1395,7 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.uleb128 0xc
 +	.byte	0x0
 +	.byte	0x0
-+	.uleb128 0x1b
++	.uleb128 0x1a
 +	.uleb128 0x34
 +	.byte	0x0
 +	.uleb128 0x3
@@ -1493,14 +1414,12 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.byte	0x0
 +	.byte	0x0
 +	.section	.debug_pubnames,"",%progbits
-+	.4byte	0x25
++	.4byte	0x16
 +	.2byte	0x2
 +	.4byte	.Ldebug_info0
-+	.4byte	0x5ad
-+	.4byte	0x519
++	.4byte	0x5be
++	.4byte	0x523
 +	.ascii	"foo\000"
-+	.4byte	0x52e
-+	.ascii	"get_s_time\000"
 +	.4byte	0x0
 +	.section	.debug_aranges,"",%progbits
 +	.4byte	0x1c
@@ -1521,15 +1440,13 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.ascii	"dev_id\000"
 +.LASF18:
 +	.ascii	"lock_debug\000"
-+.LASF65:
-+	.ascii	"get_s_time\000"
 +.LASF29:
 +	.ascii	"next\000"
 +.LASF30:
 +	.ascii	"prev\000"
 +.LASF2:
 +	.ascii	"short int\000"
-+.LASF61:
++.LASF63:
 +	.ascii	"domlist_read_lock\000"
 +.LASF36:
 +	.ascii	"hw_interrupt_type\000"
@@ -1605,10 +1522,14 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.ascii	"char\000"
 +.LASF11:
 +	.ascii	"lock\000"
-+.LASF63:
++.LASF17:
++	.ascii	"spinlock_t\000"
++.LASF65:
 +	.ascii	"asm-offsets.c\000"
 +.LASF25:
 +	.ascii	"pidr\000"
++.LASF61:
++	.ascii	"memnode_shift\000"
 +.LASF47:
 +	.ascii	"depth\000"
 +.LASF23:
@@ -1627,7 +1548,7 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.ascii	"rl_cnt\000"
 +.LASF31:
 +	.ascii	"irqaction\000"
-+.LASF62:
++.LASF64:
 +	.ascii	"GNU C 4.4.3\000"
 +.LASF38:
 +	.ascii	"startup\000"
@@ -1641,25 +1562,307 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/arch/arm/asm-offsets.s
 +	.ascii	"rl_quantum_start\000"
 +.LASF41:
 +	.ascii	"disable\000"
-+.LASF64:
++.LASF66:
 +	.ascii	"/home/fjnh84/src/xen-unstable.hg/xen/arch/arm\000"
 +.LASF13:
 +	.ascii	"recurse_cpu\000"
-+.LASF17:
-+	.ascii	"spinlock_t\000"
++.LASF62:
++	.ascii	"memnodemap\000"
 +	.ident	"GCC: (GNU) 4.4.3"
 +	.section	.note.GNU-stack,"",%progbits
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/asm-macros.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/asm-macros.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,148 @@
+diff --git a/xen/arch/arm/tegra/Makefile b/xen/arch/arm/tegra/Makefile
+new file mode 100644
+--- /dev/null
++++ b/xen/arch/arm/tegra/Makefile
+@@ -0,0 +1,1 @@
++obj-y += dummy.o
+\ No newline at end of file
+diff --git a/xen/arch/arm/tegra/dummy.c b/xen/arch/arm/tegra/dummy.c
+new file mode 100644
+diff --git a/xen/arch/arm/xen.lds.S b/xen/arch/arm/xen.lds.S
+new file mode 100644
+--- /dev/null
++++ b/xen/arch/arm/xen.lds.S
+@@ -0,0 +1,133 @@
++#include <xen/config.h>
++#include <xen/cache.h>
++#include <asm/page.h>
++#include <asm/percpu.h>
++#undef ENTRY
++#undef ALIGN
++
++OUTPUT_FORMAT("elf32-littlearm")
++OUTPUT_ARCH(arm)
++
++ENTRY(start)
++PHDRS
++{
++  text PT_LOAD ;
++}
++SECTIONS
++{
++  . = HYPERVISOR_VIRT_START;
++  _start = .;
++  .text : {
++        _stext = .;            /* Text and read-only data */
++       *(.text)
++       *(.fixup)
++       *(.gnu.warning)
++       _etext = .;             /* End of text section */
++  } :text = 0x9090
++
++  .rodata : {
++       *(.rodata)
++       *(.rodata.*)
++  } :text
++
++  . = ALIGN(SMP_CACHE_BYTES);
++  .data.read_mostly : {
++       /* Exception table */
++       __start___ex_table = .;
++       *(.ex_table)
++       __stop___ex_table = .;
++
++       /* Pre-exception table */
++       __start___pre_ex_table = .;
++       *(.ex_table.pre)
++       __stop___pre_ex_table = .;
++
++       *(.data.read_mostly)
++       *(.data.rel.ro)
++       *(.data.rel.ro.*)
++  } :text
++
++  .data : {                    /* Data */
++       . = ALIGN(PAGE_SIZE);
++       *(.data.page_aligned)
++       *(.data)
++       *(.data.rel)
++       *(.data.rel.*)
++       CONSTRUCTORS
++  } :text
++
++#ifdef LOCK_PROFILE
++  . = ALIGN(32);
++  __lock_profile_start = .;
++  .lockprofile.data : { *(.lockprofile.data) } :text
++  __lock_profile_end = .;
++#endif
++
++  . = ALIGN(PAGE_SIZE);             /* Init code and data */
++  __init_begin = .;
++  .init.text : {
++       _sinittext = .;
++       *(.init.text)
++       _einittext = .;
++  } :text
++  .init.data : {
++       *(.init.rodata)
++       *(.init.rodata.str*)
++       *(.init.data)
++       *(.init.data.rel)
++       *(.init.data.rel.*)
++  } :text
++  . = ALIGN(32);
++  .init.setup : {
++       __setup_start = .;
++       *(.init.setup)
++       __setup_end = .;
++  } :text
++  .initcall.init : {
++       __initcall_start = .;
++       *(.initcallpresmp.init)
++       __presmp_initcall_end = .;
++       *(.initcall1.init)
++       __initcall_end = .;
++  } :text
++  .xsm_initcall.init : {
++       __xsm_initcall_start = .;
++       *(.xsm_initcall.init)
++       __xsm_initcall_end = .;
++  } :text
++  . = ALIGN(STACK_SIZE);
++  __init_end = .;
++
++  .bss : {                     /* BSS */
++       __bss_start = .;
++       *(.bss.stack_aligned)
++       . = ALIGN(PAGE_SIZE);
++       *(.bss.page_aligned)
++       *(.bss)
++       . = ALIGN(SMP_CACHE_BYTES);
++       __per_cpu_start = .;
++       *(.bss.percpu)
++       . = ALIGN(SMP_CACHE_BYTES);
++       *(.bss.percpu.read_mostly)
++       . = ALIGN(SMP_CACHE_BYTES);
++       __per_cpu_data_end = .;
++  } :text
++  _end = . ;
++
++  /* Sections to be discarded */
++  /DISCARD/ : {
++       *(.exit.text)
++       *(.exit.data)
++       *(.exitcall.exit)
++       *(.eh_frame)
++  }
++
++  /* Stabs debugging sections.  */
++  .stab 0 : { *(.stab) }
++  .stabstr 0 : { *(.stabstr) }
++  .stab.excl 0 : { *(.stab.excl) }
++  .stab.exclstr 0 : { *(.stab.exclstr) }
++  .stab.index 0 : { *(.stab.index) }
++  .stab.indexstr 0 : { *(.stab.indexstr) }
++  .comment 0 : { *(.comment) }
++}
+diff --git a/xen/common/kexec.c b/xen/common/kexec.c
+--- a/xen/common/kexec.c
++++ b/xen/common/kexec.c
+@@ -465,7 +465,7 @@
+     VMCOREINFO_STRUCT_SIZE(domain);
+ 
+     VMCOREINFO_OFFSET(page_info, count_info);
+-#ifdef __ia64__
++#if defined(__ia64__) || defined(__arm__)
+     VMCOREINFO_OFFSET_SUB(page_info, u.inuse, _domain);
+ #else
+     VMCOREINFO_OFFSET_SUB(page_info, v.inuse, _domain);
+diff --git a/xen/common/timer.c b/xen/common/timer.c
+--- a/xen/common/timer.c
++++ b/xen/common/timer.c
+@@ -239,7 +239,7 @@
+ 
+     for ( ; ; )
+     {
+-        cpu = atomic_read16(&timer->cpu);
++        cpu = atomic_read32(&timer->cpu);
+         if ( unlikely(cpu == TIMER_CPU_status_killed) )
+         {
+             rcu_read_unlock(&timer_cpu_read_lock);
+@@ -292,7 +292,7 @@
+     memset(timer, 0, sizeof(*timer));
+     timer->function = function;
+     timer->data = data;
+-    atomic_write16(&timer->cpu, cpu);
++    atomic_write32(&timer->cpu, cpu);
+     timer->status = TIMER_STATUS_inactive;
+     if ( !timer_lock_irqsave(timer, flags) )
+         BUG();
+@@ -343,7 +343,7 @@
+ 
+     for ( ; ; )
+     {
+-        old_cpu = atomic_read16(&timer->cpu);
++        old_cpu = atomic_read32(&timer->cpu);
+         if ( (old_cpu == new_cpu) || (old_cpu == TIMER_CPU_status_killed) )
+         {
+             rcu_read_unlock(&timer_cpu_read_lock);
+@@ -375,7 +375,7 @@
+         deactivate_timer(timer);
+ 
+     list_del(&timer->inactive);
+-    atomic_write16(&timer->cpu, new_cpu);
++    atomic_write32(&timer->cpu, new_cpu);
+     list_add(&timer->inactive, &per_cpu(timers, new_cpu).inactive);
+ 
+     if ( active )
+@@ -402,7 +402,7 @@
+     list_del(&timer->inactive);
+     timer->status = TIMER_STATUS_killed;
+     old_cpu = timer->cpu;
+-    atomic_write16(&timer->cpu, TIMER_CPU_status_killed);
++    atomic_write32(&timer->cpu, TIMER_CPU_status_killed);
+ 
+     spin_unlock_irqrestore(&per_cpu(timers, old_cpu).lock, flags);
+ 
+@@ -573,7 +573,7 @@
+              ? old_ts->heap[1] : old_ts->list) != NULL )
+     {
+         remove_entry(t);
+-        atomic_write16(&t->cpu, new_cpu);
++        atomic_write32(&t->cpu, new_cpu);
+         notify |= add_entry(t);
+     }
+ 
+@@ -581,7 +581,7 @@
+     {
+         t = list_entry(old_ts->inactive.next, struct timer, inactive);
+         list_del(&t->inactive);
+-        atomic_write16(&t->cpu, new_cpu);
++        atomic_write32(&t->cpu, new_cpu);
+         list_add(&t->inactive, &new_ts->inactive);
+     }
+ 
+diff --git a/xen/common/tmem.c b/xen/common/tmem.c
+--- a/xen/common/tmem.c
++++ b/xen/common/tmem.c
+@@ -49,7 +49,7 @@
+ #define INVERT_SENTINEL(_x,_y) _x->sentinel = ~_y##_SENTINEL
+ #define ASSERT_SENTINEL(_x,_y) \
+     ASSERT(_x->sentinel != ~_y##_SENTINEL);ASSERT(_x->sentinel == _y##_SENTINEL)
+-#ifdef __i386__
++#if defined (__i386__) || defined (__arm__)
+ #define POOL_SENTINEL 0x87658765
+ #define OBJ_SENTINEL 0x12345678
+ #define OBJNODE_SENTINEL 0xfedcba09
+diff --git a/xen/common/tmem_xen.c b/xen/common/tmem_xen.c
+--- a/xen/common/tmem_xen.c
++++ b/xen/common/tmem_xen.c
+@@ -87,7 +87,7 @@
+ #endif
+ }
+ 
+-#ifdef __ia64__
++#if defined (__ia64__) || defined (__arm__)
+ static inline void *cli_get_page(tmem_cli_mfn_t cmfn, unsigned long *pcli_mfn,
+                                  pfp_t **pcli_pfp, bool_t cli_write)
+ {
+diff --git a/xen/drivers/Makefile b/xen/drivers/Makefile
+--- a/xen/drivers/Makefile
++++ b/xen/drivers/Makefile
+@@ -1,6 +1,6 @@
+ subdir-y += char
+ subdir-y += cpufreq
+ subdir-y += pci
+-subdir-y += passthrough
++subdir-$(HASS_PASSTHROUGH) += passthrough
+ subdir-$(HAS_ACPI) += acpi
+ subdir-$(HAS_VGA) += video
+diff --git a/xen/include/asm-arm/.offsets.h.stamp b/xen/include/asm-arm/.offsets.h.stamp
+new file mode 100644
+diff --git a/xen/include/asm-arm/acpi.h b/xen/include/asm-arm/acpi.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/acpi.h
+@@ -0,0 +1,11 @@
++#ifndef _ASM_ARM_ACPI_H
++#define _ASM_ARM_ACPI_H
++
++#include <xen/config.h>
++
++typedef long long COMPILER_DEPENDENT_INT64;
++typedef unsigned long long COMPILER_DEPENDENT_UINT64;
++
++#define acpi_disabled (1)
++
++#endif /*__ARM_ASM_ACPI_H*/
+diff --git a/xen/include/asm-arm/asm-macros.h b/xen/include/asm-arm/asm-macros.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/asm-macros.h
+@@ -0,0 +1,151 @@
 +#ifndef __ASM_ARM_ASM_MACROS_H
 +#define __ASM_ARM_ASM_MACROS_H
 +
 +#include <asm/plat/config.h>
 +#include <asm/system.h>
 +
++#define __asmeq(x, y)  ".ifnc " x "," y " ; .err ; .endif\n\t"
++
 +#ifdef __ASSEMBLY__
++
 +/*
 + * Endian independent macros for shifting bytes within registers.
 + */
@@ -1801,10 +2004,11 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/asm-macros.h
 +
 +#endif
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/atomic.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/atomic.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,90 @@
+diff --git a/xen/include/asm-arm/atomic.h b/xen/include/asm-arm/atomic.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/atomic.h
+@@ -0,0 +1,93 @@
 +#ifndef __ARM_ATOMIC__
 +#define __ARM_ATOMIC__
 +
@@ -1823,6 +2027,9 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/atomic.h
 +
 +#define _atomic_read(v)		atomic_read(&v)
 +#define _atomic_set(v,i)	atomic_set(&v,i)
++
++#define atomic_read32(v) atomic_read ((atomic_t *) v)
++#define atomic_write32(v,i) atomic_set ((atomic_t *)v, i)
 +
 +static inline int atomic_add_return(int i, atomic_t *v)
 +{
@@ -1895,9 +2102,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/atomic.h
 +#define atomic_add_negative(i,v) (atomic_add_return(i, v) < 0)
 +
 +#endif /* __ARM_ATOMIC__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/bitops.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/bitops.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/bitops.h b/xen/include/asm-arm/bitops.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/bitops.h
 @@ -0,0 +1,291 @@
 +#ifndef __ARM_BITOPS_H
 +#define __ARM_BITOPS_H
@@ -2190,12 +2398,15 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/bitops.h
 +#define hweight8(x) generic_hweight8(x)
 +
 +#endif /* __ARM_BITOPS_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/bug.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/bug.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,18 @@
+diff --git a/xen/include/asm-arm/bug.h b/xen/include/asm-arm/bug.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/bug.h
+@@ -0,0 +1,20 @@
 +#ifndef __ARM_BUG_H__
 +#define __ARM_BUG_H__
++
++#include <xen/lib.h>
 +
 +#define BUG() __bug(__FILE__, __LINE__)
 +#define WARN() __warn(__FILE__, __LINE__)
@@ -2212,9 +2423,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/bug.h
 +	} while (0)
 +
 +#endif /* __ARM_BUG_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/byteorder.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/byteorder.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/byteorder.h b/xen/include/asm-arm/byteorder.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/byteorder.h
 @@ -0,0 +1,22 @@
 +#ifndef __ARM_BYTEORDER_H__
 +#define __ARM_BYTEORDER_H__
@@ -2238,9 +2450,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/byteorder.h
 +#include <xen/byteorder/little_endian.h>
 +
 +#endif /* __ARM_BYTEORDER_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/cache.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/cache.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/cache.h b/xen/include/asm-arm/cache.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/cache.h
 @@ -0,0 +1,15 @@
 +/*
 + * include/asm-arm/cache.h
@@ -2257,9 +2470,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/cache.h
 +#define __read_mostly __attribute__((__section__(".data.read_mostly")))
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/capability.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/capability.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/capability.h b/xen/include/asm-arm/capability.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/capability.h
 @@ -0,0 +1,7 @@
 +#ifndef __ASM_CAPABILITY_H__
 +#define __ASM_CAPABILITY_H__
@@ -2268,10 +2482,11 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/capability.h
 +
 +#endif /* __ASM_CAPABILITY_H__ */
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/config.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/config.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,79 @@
+diff --git a/xen/include/asm-arm/config.h b/xen/include/asm-arm/config.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/config.h
+@@ -0,0 +1,85 @@
 +#ifndef __ARM_CONFIG_H_
 +#define __ARM_CONFIG_H_
 +
@@ -2290,10 +2505,14 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/config.h
 +#endif
 +#define STACK_SIZE	(PAGE_SIZE << STACK_ORDER)
 +
++#define CONFIG_SMP
 +#define NR_CPUS	1
 +#define MAX_VIRT_CPUS  1
 +#define MAX_HVM_VCPUS  1
 +#define CONFIG_ARM_L1_CACHE_SHIFT  7
++#define PADDR_BITS 32
++
++#define OPT_CONSOLE_STR "com1"
 +
 +/* Maybe do this...maybe not */
 +#define supervisor_mode_kernel (0)
@@ -2342,18 +2561,21 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/config.h
 +#define GUEST_SEGMENT_MAX_ADDR	RO_MPT_VIRT_END
 +
 +/* Hypervisor owns > RO_MPT_VIRT_END */
-+#define HYPERVISOR_VIRT_START	RO_MPT_VIRT_START
++/* #define HYPERVISOR_VIRT_START	RO_MPT_VIRT_START */
++#define HYPERVISOR_VIRT_START	0xFC000000
 +
 +#define ELFSIZE	32
 +#define asmlinkage
 +
-+extern unsigned long xenheap_phys_end;
++#define watchdog_disable() ((void)0)
++#define watchdog_enable()  ((void)0)
 +
 +#endif /* __ARM_CONFIG_H_ */
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/cp15.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/cp15.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/cp15.h b/xen/include/asm-arm/cp15.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/cp15.h
 @@ -0,0 +1,43 @@
 +/*
 + * cp15.h
@@ -2398,9 +2620,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/cp15.h
 +
 +#endif /* __ASM_CP15_H__ */
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/cpu-domain.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/cpu-domain.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/cpu-domain.h b/xen/include/asm-arm/cpu-domain.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/cpu-domain.h
 @@ -0,0 +1,51 @@
 +#ifndef __ASM_CPU_DOMAIN_H
 +#define __ASM_CPU_DOMAIN_H
@@ -2453,9 +2676,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/cpu-domain.h
 +	} while (0)
 +#endif
 +#endif /* !__ASSEMBLY__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/cpu-ops.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/cpu-ops.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/cpu-ops.h b/xen/include/asm-arm/cpu-ops.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/cpu-ops.h
 @@ -0,0 +1,77 @@
 +/*
 + * cpu-ops.h
@@ -2534,9 +2758,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/cpu-ops.h
 +
 +#endif
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/current.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/current.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/current.h b/xen/include/asm-arm/current.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/current.h
 @@ -0,0 +1,56 @@
 +/*
 + *  current.h
@@ -2594,36 +2819,82 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/current.h
 +#endif
 +
 +#endif /* __ASM_CURRENT_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/debugger.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/debugger.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,8 @@
+diff --git a/xen/include/asm-arm/debugger.h b/xen/include/asm-arm/debugger.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/debugger.h
+@@ -0,0 +1,37 @@
++/******************************************************************************
++ * asm/debugger.h
++ *
++ * Generic hooks into arch-dependent Xen.
++ *
++ * Each debugger should define two functions here:
++ *
++ * 1. debugger_trap_entry():
++ *  Called at start of any synchronous fault or trap, before any other work
++ *  is done. The idea is that if your debugger deliberately caused the trap
++ *  (e.g. to implement breakpoints or data watchpoints) then you can take
++ *  appropriate action and return a non-zero value to cause early exit from
++ *  the trap function.
++ *
++ * 2. debugger_trap_fatal():
++ *  Called when Xen is about to give up and crash. Typically you will use this
++ *  hook to drop into a debug session. It can also be used to hook off
++ *  deliberately caused traps (which you then handle and return non-zero).
++ *
++ * 3. debugger_trap_immediate():
++ *  Called if we want to drop into a debugger now.  This is essentially the
++ *  same as debugger_trap_fatal, except that we use the current register state
++ *  rather than the state which was in effect when we took the trap.
++ *  For example: if we're dying because of an unhandled exception, we call
++ *  debugger_trap_fatal; if we're dying because of a panic() we call
++ *  debugger_trap_immediate().
++ */
++
 +#ifndef __ASM_ARM_DEBUGGER_H__
 +#define __ASM_ARM_DEBUGGER_H__
 +
-+#define debugger_trap_immediate() {;}
-+void show_execution_state(struct cpu_user_regs *regs);
++#define debugger_trap_fatal(v, r) (0)
++#define debugger_trap_immediate() ((void)0)
++#define debugger_trap_entry(v, r) (0)
 +
 +#endif
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/delay.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/delay.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,6 @@
+diff --git a/xen/include/asm-arm/delay.h b/xen/include/asm-arm/delay.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/delay.h
+@@ -0,0 +1,13 @@
 +#ifndef __ASM_DELAY_H__
 +#define __ASM_DELAY_H__
 +
++#include <asm/bug.h>
++
++static __inline__ void
++udelay (unsigned long usecs)
++{
++	BUG();
++}
 +
 +#endif
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/div64.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/div64.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,48 @@
+diff --git a/xen/include/asm-arm/desc.h b/xen/include/asm-arm/desc.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/desc.h
+@@ -0,0 +1,1 @@
++/* This file is intentionally left empty. */
+diff --git a/xen/include/asm-arm/div64.h b/xen/include/asm-arm/div64.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/div64.h
+@@ -0,0 +1,49 @@
 +#ifndef __ASM_ARM_DIV64
 +#define __ASM_ARM_DIV64
 +
 +#include <asm/system.h>
++#include <asm/asm-macros.h>
 +
 +/*
 + * The semantics of do_div() are:
@@ -2668,9 +2939,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/div64.h
 +})
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/dma.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/dma.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/dma.h b/xen/include/asm-arm/dma.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/dma.h
 @@ -0,0 +1,11 @@
 +#ifndef __ARCH_DMA_H__
 +#define __ARCH_DMA_H__
@@ -2683,10 +2955,11 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/dma.h
 +extern dma_channel_info_t dma_channel_map[];
 +
 +#endif /* _ARCH_DMA_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/domain.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/domain.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,88 @@
+diff --git a/xen/include/asm-arm/domain.h b/xen/include/asm-arm/domain.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/domain.h
+@@ -0,0 +1,92 @@
 +#ifndef __ARM_DOMAIN_H__
 +#define __ARM_DOMAIN_H__
 +
@@ -2694,6 +2967,7 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/domain.h
 +#include <xen/mm.h>
 +#include <public/vcpu.h>
 +#include <xen/cache.h>
++#include <xen/init.h>
 +
 +#define TRAP_TABLE_ENTRIES			8
 +
@@ -2744,11 +3018,14 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/domain.h
 +void mapcache_domain_init(struct domain *);
 +void mapcache_vcpu_init(struct vcpu *);
 +
++struct p2m_domain;
++
 +struct arch_domain
 +{
 +	/* I/O-port admin-specified access capabilities. */
 +	struct rangeset *ioport_caps;
 +	struct mapcache_domain mapcache;
++    struct p2m_domain *p2m;
 +} __cacheline_aligned;
 +
 +struct arch_vcpu
@@ -2775,10 +3052,35 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/domain.h
 + * indent-tabs-mode: nil
 + * End:
 + */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/event.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/event.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,32 @@
+diff --git a/xen/include/asm-arm/elf.h b/xen/include/asm-arm/elf.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/elf.h
+@@ -0,0 +1,19 @@
++#ifndef __ARM_ELF_H__
++#define __ARM_ELF_H__
++
++typedef struct {
++    void *dummy;
++} crash_xen_core_t;
++
++typedef struct {
++    void *dummy;
++} ELF_Gregset;
++
++static inline void elf_core_save_regs(ELF_Gregset *core_regs,
++                                      crash_xen_core_t *xen_core_regs)
++{
++    BUG();
++}
++
++
++#endif /* __ARM_ELF_H__ */
+diff --git a/xen/include/asm-arm/event.h b/xen/include/asm-arm/event.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/event.h
+@@ -0,0 +1,42 @@
 +/******************************************************************************
 + * event.h
 + *
@@ -2810,10 +3112,21 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/event.h
 +    return event_pending(current);
 +}
 +
++static inline void local_event_delivery_disable(void)
++{
++    current->vcpu_info->evtchn_upcall_mask = 1;
++}
++
++static inline void local_event_delivery_enable(void)
++{
++    current->vcpu_info->evtchn_upcall_mask = 0;
++}
++
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/fault.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/fault.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/fault.h b/xen/include/asm-arm/fault.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/fault.h
 @@ -0,0 +1,7 @@
 +#ifndef __ASM_FAULT_H__
 +#define __ASM_FAULT_H__
@@ -2822,17 +3135,68 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/fault.h
 +#define FAULT_DOMAIN_MASK		(0x000000F0)
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/fcse.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/fcse.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/fcse.h b/xen/include/asm-arm/fcse.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/fcse.h
 @@ -0,0 +1,4 @@
 +#ifndef __ASM_ASID_H__
 +#define __ASM_ASID_H__
 +
 +#endif /* __ASM_ASID_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/grant_table.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/grant_table.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/flushtlb.h b/xen/include/asm-arm/flushtlb.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/flushtlb.h
+@@ -0,0 +1,44 @@
++/******************************************************************************
++ * flushtlb.c
++ * based on x86 flushtlb.h
++ *
++ * Copyright (c) 2006 Isaku Yamahata <yamahata at valinux co jp>
++ *                    VA Linux Systems Japan K.K.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ *
++ */
++
++#ifndef __ASM_FLUSHTLB_H__
++#define __ASM_FLUSHTLB_H__
++
++#define tlbflush_current_time()                 (0)
++#define tlbflush_clock_inc_and_return()         (0)
++#define tlbflush_update_time(time, timestamp)   do {(void)timestamp;} while (0)
++#define NEED_FLUSH(obj_stamp, lastuse_stamp)    (1)
++
++#define tlbflush_filter(x,y) ((void)0)
++
++#endif /* __ASM_FLUSHTLB_H__ */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff --git a/xen/include/asm-arm/grant_table.h b/xen/include/asm-arm/grant_table.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/grant_table.h
 @@ -0,0 +1,72 @@
 +/******************************************************************************
 + * include/asm-arm/grant_table.h
@@ -2906,10 +3270,11 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/grant_table.h
 +}
 +
 +#endif /* __ASM_GRANT_TABLE_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/guest_access.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/guest_access.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,128 @@
+diff --git a/xen/include/asm-arm/guest_access.h b/xen/include/asm-arm/guest_access.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/guest_access.h
+@@ -0,0 +1,129 @@
 +/*
 + * Copyright (C) 2006 Hollis Blanchard <hollisb@us.ibm.com>, IBM Corporation
 + *
@@ -2933,6 +3298,7 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/guest_access.h
 +#define __ARM_GUEST_ACCESS_H__
 +
 +#include <asm/uaccess.h>
++#include <xen/paging.h>
 +
 +/* Raw access functions: no type checking. */
 +#define raw_copy_to_guest(dst, src, len)        \
@@ -3038,9 +3404,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/guest_access.h
 +})
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/hardirq.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/hardirq.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/hardirq.h b/xen/include/asm-arm/hardirq.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/hardirq.h
 @@ -0,0 +1,20 @@
 +#ifndef __ASM_HARDIRQ_H__
 +#define __ASM_HARDIRQ_H__
@@ -3062,9 +3429,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/hardirq.h
 +#define irq_exit()      (local_irq_count(smp_processor_id())--)
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/hypercall.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/hypercall.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/hypercall.h b/xen/include/asm-arm/hypercall.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/hypercall.h
 @@ -0,0 +1,100 @@
 +#ifndef __ASM_ARM_HYPERCALL_H__
 +#define __ASM_ARM_HYPERCALL_H__
@@ -3166,30 +3534,19 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/hypercall.h
 +    unsigned long failsafe_address);
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/init.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/init.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,17 @@
+diff --git a/xen/include/asm-arm/init.h b/xen/include/asm-arm/init.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/init.h
+@@ -0,0 +1,4 @@
 +#ifndef __ARM_INIT_H__
 +#define __ARM_INIT_H__
 +
-+#ifndef __ASSEMBLY__
-+/*
-+ * Mark functions and data as being only used at initialization
-+ * or exit time.
-+ */
-+#define __init       \
-+    __attribute__ ((__section__ (".init.text")))
-+#define __initdata   \
-+    __attribute__ ((__section__ (".init.data")))
-+#define __initsetup  \
-+    __attribute_used__ __attribute__ ((__section__ (".init.setup")))
-+#endif
-+
 +#endif /* _XEN_ASM_INIT_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/io.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/io.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/io.h b/xen/include/asm-arm/io.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/io.h
 @@ -0,0 +1,92 @@
 +#ifndef __ASM_ARM_IO_H
 +#define __ASM_ARM_IO_H
@@ -3283,9 +3640,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/io.h
 +#define page_to_phys(page)  (page_to_pfn(page) << PAGE_SHIFT)
 +
 +#endif	/* __ASM_ARM_IO_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/iocap.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/iocap.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/iocap.h b/xen/include/asm-arm/iocap.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/iocap.h
 @@ -0,0 +1,26 @@
 +/******************************************************************************
 + * iocap.h
@@ -3313,9 +3671,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/iocap.h
 +	 !rangeset_is_empty((d)->arch.ioport_caps))
 +
 +#endif /* __ARM_IOCAP_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/irq.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/irq.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/irq.h b/xen/include/asm-arm/irq.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/irq.h
 @@ -0,0 +1,7 @@
 +#ifndef _ARM_HW_IRQ_H
 +#define _ARM_HW_IRQ_H
@@ -3324,9 +3683,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/irq.h
 +extern struct irq_desc *irq_desc;
 +
 +#endif /* _ASM_HW_IRQ_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/linkage.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/linkage.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/linkage.h b/xen/include/asm-arm/linkage.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/linkage.h
 @@ -0,0 +1,12 @@
 +#ifndef __ASM_ARM_LINKAGE_H__
 +#define __ASM_ARM_LINKAGE_H__
@@ -3340,9 +3700,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/linkage.h
 +#define INTERRUPT_HANDLER	__attribute__((interrupt("IRQ")))
 +#define NAKED				__attribute__((naked))
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/memmap.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/memmap.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/memmap.h b/xen/include/asm-arm/memmap.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/memmap.h
 @@ -0,0 +1,130 @@
 +/***************************************************************************
 + * include/xen-arm/memmap.h 
@@ -3474,9 +3835,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/memmap.h
 +#endif /* !__XEN_ASM_MEMMAP_HEADER */
 +
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/memory.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/memory.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/memory.h b/xen/include/asm-arm/memory.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/memory.h
 @@ -0,0 +1,41 @@
 +#ifndef __ASM_MEMORY_H__
 +#define __ASM_MEMORY_H__
@@ -3519,10 +3881,11 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/memory.h
 +
 +#endif
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/mm.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/mm.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,232 @@
+diff --git a/xen/include/asm-arm/mm.h b/xen/include/asm-arm/mm.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/mm.h
+@@ -0,0 +1,300 @@
 +/*
 + * mm.h
 + *
@@ -3562,6 +3925,8 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/mm.h
 +#include <asm/domain.h>
 +#include <public/xen.h>
 +
++extern unsigned long xenheap_phys_end;
++
 +#undef  machine_to_phys_mapping
 +#define machine_to_phys_mapping  ((unsigned long *)RDWR_MPT_VIRT_START)
 +#define INVALID_MFN             (~0UL)
@@ -3584,31 +3949,6 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/mm.h
 +
 +#define XENSHARE_writable 		0
 +#define XENSHARE_readonly 		1
-+
-+ /* The following page types are MUTUALLY EXCLUSIVE. */
-+#define PGT_none            	(0U<<30) /* no special uses of this page */
-+#define PGT_page_table			(1U<<30) /* using this page as an leaf table */
-+#define PGT_page_directory		(2U<<30) /* using this page as an root table */
-+#define PGT_writable_page		(3U<<30) /* has writable mappings of this page? */
-+#define PGT_type_mask			(3U<<30) /* Bits 29-31. */
-+
-+ /* Has this page been validated for use as its current type? */
-+#define _PGT_validated			29
-+#define PGT_validated			(1U<<_PGT_validated)
-+ /* Owning guest has pinned this page to its current type? */
-+#define _PGT_pinned				28
-+#define PGT_pinned				(1U<<_PGT_pinned)
-+
-+ /* 16-bit count of uses of this frame as its current type. */
-+#define PGT_count_mask			((1U<<16)-1)
-+
-+ /* Cleared when the owning guest 'frees' this page. */
-+#define _PGC_allocated			31
-+#define PGC_allocated			(1U<<_PGC_allocated)
-+
-+ /* 29-bit count of references to this frame. */
-+#define PGC_count_mask			((1U<<29)-1)
-+
 +
 +#define set_gpfn_from_mfn(mfn, pfn) do { } while(0)
 +#define get_gpfn_from_mfn(mfn)      ((mfn))
@@ -3654,22 +3994,82 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/mm.h
 +        struct {
 +            /* Order-size of the free chunk this page is the head of. */
 +            u32 order;
-+        } free;
 +
++            /* Do TLBs need flushing for safety before next page use? */
++	    bool_t need_tlbflush;
++        } free;
 +    } u;
++
++    /* Timestamp from 'TLB clock', used to reduce need for safety flushes. */
++    u32 tlbflush_timestamp;
 +};
 +
++#define set_page_count(p,v) 	atomic_set(&(p)->_count, v - 1)
++
++/*
++ * Still small set of flags defined by far on ARM.
++ */
++#define PG_shift(idx)   (BITS_PER_LONG - (idx))
++#define PG_mask(x, idx) (x ## UL << PG_shift(idx))
++
++/* The following page types are MUTUALLY EXCLUSIVE. */
++#define PGT_none          PG_mask(0, 3) /* no special uses of this page */
++#define PGT_l1_page_table PG_mask(1, 3) /* using as an L1 page table? */
++#define PGT_l2_page_table PG_mask(2, 3) /* using as an L2 page table? */
++#define PGT_l3_page_table PG_mask(3, 3) /* using as an L3 page table? */
++#define PGT_l4_page_table PG_mask(4, 3) /* using as an L4 page table? */
++ /* Value 5 reserved. See asm-x86/mm.h */
++ /* Value 6 reserved. See asm-x86/mm.h */
++#define PGT_writable_page PG_mask(7, 3) /* has writable mappings? */
++#define PGT_type_mask     PG_mask(7, 3) /* Bits 29-31. */
++
++ /* Owning guest has pinned this page to its current type? */
++#define _PGT_pinned       PG_shift(4)
++#define PGT_pinned        PG_mask(1, 4)
++ /* Has this page been validated for use as its current type? */
++#define _PGT_validated    PG_shift(5)
++#define PGT_validated     PG_mask(1, 5)
++
++ /* Count of uses of this frame as its current type. */
++#define PGT_count_width   PG_shift(7)
++#define PGT_count_mask    ((1UL<<PGT_count_width)-1)
++
++ /* Cleared when the owning guest 'frees' this page. */
++#define _PGC_allocated    PG_shift(1)
++#define PGC_allocated     PG_mask(1, 1)
++ /* Page is Xen heap? */
++# define _PGC_xen_heap    PG_shift(2)
++# define PGC_xen_heap     PG_mask(1, 2)
++ /* bit PG_shift(3) reserved. See asm-x86/mm.h */
++ /* PG_mask(7, 6) reserved. See asm-x86/mm.h*/
++
++ /* Page is broken? */
++#define _PGC_broken       PG_shift(7)
++#define PGC_broken        PG_mask(1, 7)
++
++ /* Mutually-exclusive page states: { inuse, offlining, offlined, free }. */
++#define PGC_state         PG_mask(3, 9)
++#define PGC_state_inuse   PG_mask(0, 9)
++#define PGC_state_offlining PG_mask(1, 9)
++#define PGC_state_offlined PG_mask(2, 9)
++#define PGC_state_free    PG_mask(3, 9)
++#define page_state_is(pg, st) (((pg)->count_info&PGC_state) == PGC_state_##st)
++
++ /* Count of references to this frame. */
++#define PGC_count_width   PG_shift(9)
++#define PGC_count_mask    ((1UL<<PGC_count_width)-1)
++
 +#ifdef MEMORY_GUARD
-+void memguard_init(void);
++void *memguard_init(void *heap_start);
++void memguard_guard_stack(void *p);
 +void memguard_guard_range(void *p, unsigned long l);
 +void memguard_unguard_range(void *p, unsigned long l);
 +#else
-+#define memguard_init()                ((void)0)
++#define memguard_init(_s)              (_s)
++#define memguard_guard_stack(_p)       ((void)0)
 +#define memguard_guard_range(_p,_l)    ((void)0)
 +#define memguard_unguard_range(_p,_l)  ((void)0)
 +#endif /* MEMORY_GUARD */
-+
-+void memguard_guard_stack(void *p);
 +
 +#define frame_table ((struct page_info *) FRAMETABLE_VIRT_START)
 +
@@ -3742,6 +4142,27 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/mm.h
 +    return rc;
 +}
 +
++#ifndef NDEBUG
++#define TYPE_SAFETY 1
++#endif
++
++#ifdef TYPE_SAFETY
++#define TYPE_SAFE(_type,_name)                                  \
++typedef struct { _type _name; } _name##_t;                      \
++static inline _name##_t _##_name(_type n) { return (_name##_t) { n }; } \
++static inline _type _name##_x(_name##_t n) { return n._name; }
++#else
++#define TYPE_SAFE(_type,_name)                                          \
++typedef _type _name##_t;                                                \
++static inline _name##_t _##_name(_type n) { return n; }                 \
++static inline _type _name##_x(_name##_t n) { return n; }
++#endif
++
++TYPE_SAFE(unsigned long,mfn);
++
++/* Macro for printk formats: use as printk("%"PRI_mfn"\n", mfn_x(foo)); */
++#define PRI_mfn "05lx"
++
 +extern struct domain *dom_xen, *dom_io, *dom_cow;	/* for vmcoreinfo */
 +int is_iomem_page(unsigned long mfn);
 +
@@ -3754,10 +4175,21 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/mm.h
 +
 +unsigned long domain_get_maximum_gpfn(struct domain *d);
 +
++int guest_physmap_mark_populate_on_demand(struct domain *d, unsigned long gfn,
++                                          unsigned int order);
++
++int
++p2m_pod_decrease_reservation(struct domain *d,
++                             xen_pfn_t gpfn, unsigned int order);
++
++/* Arch-specific portion of memory_op hypercall. */
++long arch_memory_op(int op, XEN_GUEST_HANDLE(void) arg);
++
 +#endif /* __ASM_MM_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/multicall.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/multicall.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/multicall.h b/xen/include/asm-arm/multicall.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/multicall.h
 @@ -0,0 +1,6 @@
 +#ifndef __ASM_ARM_MULTICALL_H__
 +#define __ASM_ARM_MULTICALL_H__
@@ -3765,9 +4197,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/multicall.h
 +#define do_multicall_call(_call)
 +
 +#endif /* __ASM_ARM_MULTICALL_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/nmi.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/nmi.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/nmi.h b/xen/include/asm-arm/nmi.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/nmi.h
 @@ -0,0 +1,7 @@
 +#ifndef ASM_NMI_H
 +#define ASM_NMI_H
@@ -3776,23 +4209,121 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/nmi.h
 +#define unregister_guest_nmi_callback() (-ENOSYS)
 +
 +#endif /* ASM_NMI_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/numa.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/numa.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,9 @@
+diff --git a/xen/include/asm-arm/numa.h b/xen/include/asm-arm/numa.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/numa.h
+@@ -0,0 +1,45 @@
 +#ifndef _ASM_ARM_NUMA_H
 +#define _ASM_ARM_NUMA_H
 +
 +#include <xen/cpumask.h>
 +
 +extern cpumask_t node_to_cpumask[];
-+#define node_to_cpumask(node) (node_to_cpumask[node])
++extern unsigned char cpu_to_node[];
++
++#define cpu_to_node(cpu)		(cpu_to_node[cpu])
++#define parent_node(node)		(node)
++#define node_to_first_cpu(node)  (__ffs(node_to_cpumask[node]))
++#define node_to_cpumask(node)    (node_to_cpumask[node])
++
++/* Simple perfect hash to map pdx to node numbers */
++extern int memnode_shift;
++extern unsigned long memnodemapsize;
++extern u8 *memnodemap;
++
++struct node_data {
++    unsigned long node_start_pfn;
++    unsigned long node_spanned_pages;
++    unsigned int  node_id;
++};
++
++extern struct node_data node_data[];
++
++#define VIRTUAL_BUG_ON(x)
++
++static inline __attribute__((pure)) int phys_to_nid(paddr_t addr)
++{
++	unsigned nid;
++	VIRTUAL_BUG_ON((paddr_to_pdx(addr) >> memnode_shift) >= memnodemapsize);
++	nid = memnodemap[paddr_to_pdx(addr) >> memnode_shift];
++	VIRTUAL_BUG_ON(nid >= MAX_NUMNODES || !node_data[nid]);
++	return nid;
++}
++
++#define NODE_DATA(nid)		(&(node_data[nid]))
++
++#define node_start_pfn(nid)	(NODE_DATA(nid)->node_start_pfn)
++#define node_spanned_pages(nid)	(NODE_DATA(nid)->node_spanned_pages)
++#define node_end_pfn(nid)       (NODE_DATA(nid)->node_start_pfn + \
++				 NODE_DATA(nid)->node_spanned_pages)
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/page.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/page.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,86 @@
+diff --git a/xen/include/asm-arm/p2m.h b/xen/include/asm-arm/p2m.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/p2m.h
+@@ -0,0 +1,55 @@
++/******************************************************************************
++ * include/asm-x86/paging.h
++ *
++ * physical-to-machine mappings for automatically-translated domains.
++ *
++ * Copyright (c) 2007 Advanced Micro Devices (Wei Huang)
++ * Parts of this code are Copyright (c) 2006-2007 by XenSource Inc.
++ * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
++ * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++#ifndef _XEN_P2M_H
++#define _XEN_P2M_H
++
++#include <xen/config.h>
++#include <xen/paging.h>
++#include <asm/page.h>    /* for pagetable_t */
++
++/* Scan pod cache when offline/broken page triggered */
++static inline int
++p2m_pod_offline_or_broken_hit(struct page_info *p)
++{
++    return 0;
++}
++
++/* Replace pod cache when offline/broken page triggered */
++static inline void
++p2m_pod_offline_or_broken_replace(struct page_info *p)
++{
++}
++
++#endif /* _XEN_P2M_H */
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff --git a/xen/include/asm-arm/page.h b/xen/include/asm-arm/page.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/page.h
+@@ -0,0 +1,114 @@
 +#ifndef __ARM_PAGE_H__
 +#define __ARM_PAGE_H__
 +
@@ -3876,12 +4407,41 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/page.h
 +#define virt_to_pdx(va)         virt_to_mfn(va)
 +#define pdx_to_virt(pdx)        mfn_to_virt(pdx)
 +
++static inline int get_order_from_bytes(paddr_t size)
++{
++    int order;
++    size = (size-1) >> PAGE_SHIFT;
++    for ( order = 0; size; order++ )
++        size >>= 1;
++    return order;
++}
++
++static inline int get_order_from_pages(unsigned long nr_pages)
++{
++    int order;
++    nr_pages--;
++    for ( order = 0; nr_pages; order++ )
++        nr_pages >>= 1;
++    return order;
++}
++
++typedef struct { u32 pfn; } pagetable_t;
++
++typedef u64 intpte_t;
++#define PRIpte "016llx"
++
++typedef struct { intpte_t l1; } l1_pgentry_t;
++typedef struct { intpte_t l2; } l2_pgentry_t;
++typedef struct { intpte_t l3; } l3_pgentry_t;
++typedef l3_pgentry_t root_pgentry_t;
++
 +#endif /* !defined(__ASSEMBLY__) */
 +
 +#endif /* __ARM_PAGE_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/percpu.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/percpu.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/percpu.h b/xen/include/asm-arm/percpu.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/percpu.h
 @@ -0,0 +1,23 @@
 +#ifndef __ARM_PERCPU_H__
 +#define __ARM_PERCPU_H__
@@ -3906,9 +4466,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/percpu.h
 +#define DECLARE_PER_CPU(type, name) extern __typeof__(type) per_cpu__##name
 +
 +#endif /* __ARM_PERCPU_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/pgtable.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/pgtable.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/pgtable.h b/xen/include/asm-arm/pgtable.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/pgtable.h
 @@ -0,0 +1,135 @@
 +#ifndef __ARM_PGTABLE_H__
 +#define __ARM_PGTABLE_H__
@@ -4045,16 +4606,18 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/pgtable.h
 +#endif /* __ASSEMBLY__ */
 +
 +#endif /* _ASMARM_PGTABLE_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/plat
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/plat	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/plat b/xen/include/asm-arm/plat
+new file mode 120000
+--- /dev/null
++++ b/xen/include/asm-arm/plat
 @@ -0,0 +1,1 @@
 +/home/fjnh84/src/xen-unstable.hg/xen/include/asm/tegra
 \ No newline at end of file
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/processor.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/processor.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,43 @@
+diff --git a/xen/include/asm-arm/processor.h b/xen/include/asm-arm/processor.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/processor.h
+@@ -0,0 +1,57 @@
 +/*
 + *  processor.h
 + *
@@ -4096,11 +4659,26 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/processor.h
 +	((regs)->spsr & (PSR_V_BIT | PSR_C_BIT | PSR_Z_BIT | PSR_N_BIT))
 +
 +void show_execution_state(struct cpu_user_regs *regs);
++void dump_stack(void);
++
++#define ARCH_HAS_PREFETCH
++static inline void prefetch(const void *ptr)
++{
++        __asm__ __volatile__(
++                "pld\t%a0"
++                :
++                : "p" (ptr)
++                : "cc");
++}
++
++#define cpu_to_core(cpu)    0
++#define cpu_to_socket(cpu)  0
 +
 +#endif /* __ASM_PROCESSOR_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/profile.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/profile.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/profile.h b/xen/include/asm-arm/profile.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/profile.h
 @@ -0,0 +1,45 @@
 +#ifndef __PROFILER_H__
 +#define __PROFILER_H__
@@ -4147,20 +4725,76 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/profile.h
 +
 +#endif
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/regs.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/regs.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,6 @@
+diff --git a/xen/include/asm-arm/regs.h b/xen/include/asm-arm/regs.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/regs.h
+@@ -0,0 +1,15 @@
 +#ifndef __ASM_ARM_REGS_H__
 +#define __ASM_ARM_REGS_H__
 +
++#include <xen/types.h>
++#include <public/xen.h>
++
 +#define return_reg(v) ((v)->arch.user_regs.r0)
 +
++#define guest_mode(r)				\
++	({					\
++		BUG();				\
++		0;				\
++	})
++
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/smp.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/smp.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,22 @@
+diff --git a/xen/include/asm-arm/shadow.h b/xen/include/asm-arm/shadow.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/shadow.h
+@@ -0,0 +1,40 @@
++/******************************************************************************
++ * include/asm-ia64/shadow.h
++ *
++ * Copyright (c) 2006 Isaku Yamahata <yamahata at valinux co jp>
++ *                    VA Linux Systems Japan K.K.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ *
++ */
++
++#ifndef _XEN_SHADOW_H
++#define _XEN_SHADOW_H
++
++#include <xen/config.h>
++#include <xen/paging.h>
++
++#endif // _XEN_SHADOW_H
++
++/*
++ * Local variables:
++ * mode: C
++ * c-set-style: "BSD"
++ * c-basic-offset: 4
++ * tab-width: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
++
+diff --git a/xen/include/asm-arm/smp.h b/xen/include/asm-arm/smp.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/smp.h
+@@ -0,0 +1,25 @@
 +#ifndef __ARM_SMP_H__
 +#define __ARM_SMP_H__
 +
@@ -4180,12 +4814,16 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/smp.h
 +#define NO_PROC_ID 0xFF /* No processor magic marker */
 +
 +DECLARE_PER_CPU(cpumask_t, cpu_sibling_map);
-+//DECLARE_PER_CPU(cpumask_t, cpu_core_map);
++DECLARE_PER_CPU(cpumask_t, cpu_core_map);
++
++#define cpu_is_offline(cpu) unlikely(!cpu_online(cpu))
++
 +
 +#endif /* __ARM_SMP_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/softirq.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/softirq.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/softirq.h b/xen/include/asm-arm/softirq.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/softirq.h
 @@ -0,0 +1,6 @@
 +#ifndef __ARM_SOFTIRQ_H__
 +#define __ARM_SOFTIRQ_H__
@@ -4193,9 +4831,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/softirq.h
 +#define NR_ARCH_SOFTIRQS       0
 +
 +#endif /* __ASM_SOFTIRQ_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/spinlock.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/spinlock.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/spinlock.h b/xen/include/asm-arm/spinlock.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/spinlock.h
 @@ -0,0 +1,152 @@
 +#ifndef __ASM_SPINLOCK_H
 +#define __ASM_SPINLOCK_H
@@ -4231,7 +4870,7 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/spinlock.h
 +
 +#define _RAW_SPIN_LOCK_UNLOCKED /*(raw_spinlock_t)*/ { 1 }
 +
-+#define raw_spin_is_locked(x)		((x)->lock != 0)
++#define _raw_spin_is_locked(x)		((x)->lock != 0)
 +
 +static inline void _raw_spin_unlock(raw_spinlock_t *lock)
 +{
@@ -4349,9 +4988,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/spinlock.h
 +#define _raw_rw_is_write_locked(x) ((x)->lock == 0x80000000)
 +
 +#endif /* __ASM_SPINLOCK_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/string.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/string.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/string.h b/xen/include/asm-arm/string.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/string.h
 @@ -0,0 +1,15 @@
 +#ifndef __ASM_STRING_H__
 +#define __ASM_STRING_H__
@@ -4368,17 +5008,22 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/string.h
 +#define memset(s,c,n) (__builtin_memset((s),(c),(n)))
 +
 +#endif /* __ASM_STRING_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/system.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/system.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,258 @@
+diff --git a/xen/include/asm-arm/system.h b/xen/include/asm-arm/system.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/system.h
+@@ -0,0 +1,262 @@
 +#ifndef __ASM_SYSTEM_H
 +#define __ASM_SYSTEM_H
 +
 +#include <xen/lib.h>
 +#include <asm/types.h>
 +#include <asm/percpu.h>
++#include <asm/processor.h>
 +#include <asm/plat/cache.h>
++
++#define nop() \
++    asm volatile ( "nop" )
 +
 +/*
 + * PSR bits
@@ -4630,9 +5275,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/system.h
 +
 +#endif /* __ASSEMBLY__ */
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/cache.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/cache.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/cache.h b/xen/include/asm-arm/tegra/cache.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/cache.h
 @@ -0,0 +1,7 @@
 +#ifndef __ARM_TEGRA_CACHE_H__
 +#define __ARM_TEGRA_CACHE_H__
@@ -4641,9 +5287,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/cache.h
 +#define outer_sync()
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/config.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/config.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/config.h b/xen/include/asm-arm/tegra/config.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/config.h
 @@ -0,0 +1,18 @@
 +#ifndef __IMX21ADS_CONFIG_H__
 +#define __IMX21ADS_CONFIG_H__
@@ -4663,9 +5310,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/config.h
 +#define MEMMAP_NOR_SIZE		0x02000000
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/dma.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/dma.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/dma.h b/xen/include/asm-arm/tegra/dma.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/dma.h
 @@ -0,0 +1,350 @@
 +#ifndef __IMX21ADS_DMA_H
 +#define __IMX21ADS_DMA_H
@@ -5017,9 +5665,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/dma.h
 +#define arch_get_dma_residue	imx21ads_get_dma_residue
 +#define arch_get_dma_config	imx21ads_get_dma_config
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/entry-macro.S
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/entry-macro.S	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/entry-macro.S b/xen/include/asm-arm/tegra/entry-macro.S
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/entry-macro.S
 @@ -0,0 +1,32 @@
 +/*
 + * include/asm-arm/arch-imx/entry-macro.S
@@ -5053,9 +5702,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/entry-macro.S
 +		tst	\irqstat, #1	@ to make the condition code = TRUE
 +		.endm
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/hardware.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/hardware.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/hardware.h b/xen/include/asm-arm/tegra/hardware.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/hardware.h
 @@ -0,0 +1,88 @@
 +/*
 + *  linux/include/asm-arm/arch-imx/hardware.h
@@ -5145,9 +5795,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/hardware.h
 +#define MEM_SIZE		0x01000000
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/imx-dma.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/imx-dma.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/imx-dma.h b/xen/include/asm-arm/tegra/imx-dma.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/imx-dma.h
 @@ -0,0 +1,157 @@
 +/*
 + *  linux/include/asm-arm/imxads/dma.h
@@ -5306,9 +5957,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/imx-dma.h
 +
 +
 +#endif				/* _ASM_ARCH_IMX_DMA_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/imx-regs.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/imx-regs.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/imx-regs.h b/xen/include/asm-arm/tegra/imx-regs.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/imx-regs.h
 @@ -0,0 +1,630 @@
 +#ifndef _IMX_REGS_H
 +#define _IMX_REGS_H
@@ -5940,9 +6592,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/imx-regs.h
 +
 +
 +#endif				// _IMX_REGS_H
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/io.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/io.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/io.h b/xen/include/asm-arm/tegra/io.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/io.h
 @@ -0,0 +1,28 @@
 +/*
 + *  linux/include/asm-arm/arch-imxads/io.h
@@ -5972,9 +6625,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/io.h
 +#define __mem_pci(a)	(a)
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/irqs.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/irqs.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/irqs.h b/xen/include/asm-arm/tegra/irqs.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/irqs.h
 @@ -0,0 +1,139 @@
 +/*
 + *  linux/include/asm-arm/arch-imxads/irqs.h
@@ -6115,9 +6769,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/irqs.h
 +#define IRQT_PROBE      (1 << 4)
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/mx1ads.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/mx1ads.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/mx1ads.h b/xen/include/asm-arm/tegra/mx1ads.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/mx1ads.h
 @@ -0,0 +1,36 @@
 +/*
 + * linux/include/asm-arm/arch-imx/mx1ads.h
@@ -6155,9 +6810,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/mx1ads.h
 +#define CLK32 32000
 +
 +#endif /* __ASM_ARCH_MX1ADS_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/mx2ads.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/mx2ads.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/mx2ads.h b/xen/include/asm-arm/tegra/mx2ads.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/mx2ads.h
 @@ -0,0 +1,43 @@
 +/*
 + * linux/include/asm-arm/arch-imx/mx2ads.h
@@ -6202,9 +6858,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/mx2ads.h
 +
 +
 +#endif /* __ASM_ARCH_MX2ADS_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/param.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/param.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/param.h b/xen/include/asm-arm/tegra/param.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/param.h
 @@ -0,0 +1,19 @@
 +/*
 + *  linux/include/asm-arm/arch-imx/param.h
@@ -6225,9 +6882,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/param.h
 + * along with this program; if not, write to the Free Software
 + * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 + */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/system.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/system.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/system.h b/xen/include/asm-arm/tegra/system.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/system.h
 @@ -0,0 +1,43 @@
 +/*
 + *  linux/include/asm-arm/arch-imxads/system.h
@@ -6272,9 +6930,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/system.h
 +}
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/timex.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/timex.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/timex.h b/xen/include/asm-arm/tegra/timex.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/timex.h
 @@ -0,0 +1,37 @@
 +/*
 + *  linux/include/asm-arm/imx/timex.h
@@ -6313,9 +6972,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/timex.h
 +}
 +
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/uart.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/uart.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/uart.h b/xen/include/asm-arm/tegra/uart.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/uart.h
 @@ -0,0 +1,32 @@
 +#ifndef __IMX21ADS_UART_H__
 +#define __IMX21ADS_UART_H__
@@ -6349,9 +7009,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/uart.h
 +
 +#endif
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/vmalloc.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tegra/vmalloc.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/tegra/vmalloc.h b/xen/include/asm-arm/tegra/vmalloc.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/tegra/vmalloc.h
 @@ -0,0 +1,32 @@
 +/*
 + *  linux/include/asm-arm/arch-imx/vmalloc.h
@@ -6385,9 +7046,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tegra/vmalloc.h
 +#define VMALLOC_START	  (((unsigned long)high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
 +#define VMALLOC_VMADDR(x) ((unsigned long)(x))
 +#define VMALLOC_END       (PAGE_OFFSET + 0x10000000)
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/termbits.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/termbits.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/termbits.h b/xen/include/asm-arm/termbits.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/termbits.h
 @@ -0,0 +1,171 @@
 +#ifndef __ASM_ARM_TERMBITS_H
 +#define __ASM_ARM_TERMBITS_H
@@ -6560,32 +7222,36 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/termbits.h
 +#define	TCSAFLUSH	2
 +
 +#endif	/* __ASM_ARM_TERMBITS_H */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/time.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/time.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,18 @@
+diff --git a/xen/include/asm-arm/time.h b/xen/include/asm-arm/time.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/time.h
+@@ -0,0 +1,20 @@
 +#ifndef __ARM_TIME_H__
 +#define __ARM_TIME_H__
 +
 +#include <xen/types.h>
++#include <asm/bug.h>
 +
 +typedef u64 cycles_t;
 +
 +static inline cycles_t get_cycles(void)
 +{
 +	BUG();
++	return 0;
 +}
 +
-+inline s_time_t get_s_time(void)
-+{
-+	BUG();
-+}
++s_time_t get_s_time(void);
++
++struct tm;
++struct tm wallclock_time(void);
 +
 +#endif /* __ARM_TIME_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tlb.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/tlb.h	Tue May 03 18:13:31 2011 -0500
-@@ -0,0 +1,59 @@
+diff --git a/xen/include/asm-arm/tlb.h b/xen/include/asm-arm/tlb.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/tlb.h
+@@ -0,0 +1,58 @@
 +/*
 + * tlb.h
 + *
@@ -6643,19 +7309,20 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/tlb.h
 +
 +#define flush_tlb_mask(mask)		local_flush_tlb()
 +
-+
 +#endif /* __ASM_TLB_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/trace.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/trace.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/trace.h b/xen/include/asm-arm/trace.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/trace.h
 @@ -0,0 +1,4 @@
 +#ifndef __ARM_TRACE_H__
 +#define __ARM_TRACE_H__
 +
 +#endif /* __ARM_TRACE_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/trap.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/trap.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/trap.h b/xen/include/asm-arm/trap.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/trap.h
 @@ -0,0 +1,35 @@
 +/*
 + * trap.h
@@ -6692,9 +7359,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/trap.h
 +void trap_init(void);
 +#endif
 +#endif
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/types.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/types.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/types.h b/xen/include/asm-arm/types.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/types.h
 @@ -0,0 +1,49 @@
 +#ifndef __ARM_TYPES_H__
 +#define __ARM_TYPES_H__
@@ -6728,7 +7396,7 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/types.h
 +
 +typedef signed long long s64;
 +typedef unsigned long long u64;
-+typedef u64 paddr_t;
++typedef u32 paddr_t;
 +#define INVALID_PADDR (~0ULL)
 +#define PRIpaddr "016llx"
 +
@@ -6745,9 +7413,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/types.h
 +#define LONG_BYTEORDER 2
 +
 +#endif /* __ARM_TYPES_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/uaccess.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/uaccess.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/uaccess.h b/xen/include/asm-arm/uaccess.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/uaccess.h
 @@ -0,0 +1,398 @@
 +#ifndef __ASM_UACCESS_H__
 +#define __ASM_UACCESS_H__
@@ -7147,9 +7816,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/uaccess.h
 +unsigned long search_extable(unsigned long);
 +void sort_extables(void);
 +#endif 
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/uart.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/uart.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/uart.h b/xen/include/asm-arm/uart.h
+new file mode 100755
+--- /dev/null
++++ b/xen/include/asm-arm/uart.h
 @@ -0,0 +1,20 @@
 +#ifndef __DEVICE_UART_H__
 +#define __DEVICE_UART_H__
@@ -7171,9 +7841,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/uart.h
 +
 +#endif
 +
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/xenoprof.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/asm-arm/xenoprof.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/asm-arm/xenoprof.h b/xen/include/asm-arm/xenoprof.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/asm-arm/xenoprof.h
 @@ -0,0 +1,56 @@
 +#ifndef __ASM_ARM_XENOPROF_H__
 +#define __ASM_ARM_XENOPROF_H__
@@ -7231,9 +7902,10 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/asm-arm/xenoprof.h
 + * indent-tabs-mode: nil
 + * End:
 + */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/public/arch-arm.h
---- /dev/null	Thu Jan 01 00:00:00 1970 +0000
-+++ b/xen/include/public/arch-arm.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/public/arch-arm.h b/xen/include/public/arch-arm.h
+new file mode 100644
+--- /dev/null
++++ b/xen/include/public/arch-arm.h
 @@ -0,0 +1,153 @@
 +/*
 + * Guest OS interface to ARM Xen.
@@ -7388,9 +8060,9 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/public/arch-arm.h
 +
 +#endif
 +#endif /* __XEN_PUBLIC_ARCH_ARM_H__ */
-diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/public/xen.h
---- a/xen/include/public/xen.h	Sat Apr 30 09:48:16 2011 +0100
-+++ b/xen/include/public/xen.h	Tue May 03 18:13:31 2011 -0500
+diff --git a/xen/include/public/xen.h b/xen/include/public/xen.h
+--- a/xen/include/public/xen.h
++++ b/xen/include/public/xen.h
 @@ -33,6 +33,8 @@
  #include "arch-x86/xen.h"
  #elif defined(__ia64__)
@@ -7400,3 +8072,29 @@ diff -r 476b0d68e7d5 -r 0d31b8debaf8 xen/include/public/xen.h
  #else
  #error "Unsupported architecture"
  #endif
+diff --git a/xen/include/xen/libelf.h b/xen/include/xen/libelf.h
+--- a/xen/include/xen/libelf.h
++++ b/xen/include/xen/libelf.h
+@@ -23,7 +23,7 @@
+ #ifndef __XEN_LIBELF_H__
+ #define __XEN_LIBELF_H__
+ 
+-#if defined(__i386__) || defined(__x86_64__) || defined(__ia64__)
++#if defined(__i386__) || defined(__x86_64__) || defined(__ia64__) || defined(__arm__)
+ #define XEN_ELF_LITTLE_ENDIAN
+ #else
+ #error define architectural endianness
+diff --git a/xen/include/xen/timer.h b/xen/include/xen/timer.h
+--- a/xen/include/xen/timer.h
++++ b/xen/include/xen/timer.h
+@@ -32,8 +32,8 @@
+     void *data;
+ 
+     /* CPU on which this timer will be installed and executed. */
+-#define TIMER_CPU_status_killed 0xffffu /* Timer is TIMER_STATUS_killed */
+-    uint16_t cpu;
++#define TIMER_CPU_status_killed 0xffffffff /* Timer is TIMER_STATUS_killed */
++    uint32_t cpu;
+ 
+     /* Timer status. */
+ #define TIMER_STATUS_invalid  0 /* Should never see this.           */
