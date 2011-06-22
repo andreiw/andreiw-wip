@@ -1,0 +1,22 @@
+AOS
+===
+
+This is a simple example of how one would go about writing some stand-alone
+code, meant to be booted by a Linux-compatible ARM bootloader. This particular
+bit uses PIC-compiled code, and fixes up relocations and run-time, so there
+is no need to know where it was loaded.
+
+Building:
+$ CROSS_COMPILE=arm-eabi- make
+
+Booting (assuming Android):
+$ fastboot boot boot/aos
+
+Running (assuming Tegra 2, UARTB):
+01234
+DEAD
+
+Contact Info
+============
+
+Andrei Warkentin (andrey.warkentin@gmail.com, andreiw@motorola.com, andreiw@msalumni.com)
