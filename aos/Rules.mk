@@ -1,13 +1,4 @@
 #
-# If you change any of these configuration options then you must
-# 'make clean' before rebuilding.
-#
-
-verbose       ?= n
-debug         ?= n
-frame_pointer ?= n
-
-#
 # Configuration dependencies.
 #
 
@@ -23,6 +14,9 @@ endif
 #
 
 CFLAGS-y += -g
+CFLAGS-y += -I$(BASEDIR)/include
+CFLAGS-y += -I$(BASEDIR)/include/asm
+CFLAGS-y += -I$(BASEDIR)/include/plat
 CFLAGS-$(verbose) += -DVERBOSE
 CFLAGS-$(frame_pointer) += -fno-omit-frame-pointer
 CFLAGS-y += -MMD -MF .$(@F).d
@@ -30,17 +24,7 @@ DEPS = .*.d
 CFLAGS += $(CFLAGS-y)
 AFLAGS += $(CFLAGS) -D__ASSEMBLY__
 
-#
-# Arch.
-#
-
-CFLAGS += -march=armv7-a -mlittle-endian -mabi=aapcs -mapcs
-CLFAGS += -fpic
-CFLAGS += -fno-builtin -fno-common
-CFLAGS += -iwithprefix include -pipe
-CFLAGS += -msoft-float
-CFLAGS += -Wa,--fatal-warnings -Werror -Wno-uninitialized
-LDFLAGS += -nostdlib
+include $(BASEDIR)/arch/$(ARCH)/Rules.mk
 
 AS         = $(CROSS_COMPILE)as
 LD         = $(CROSS_COMPILE)ld
@@ -57,7 +41,9 @@ SIZEUTIL   = $(CROSS_COMPILE)size
 #
 # Ordering here is important.
 #
-ALL_OBJECTS-y += $(BASEDIR)/boot/built_in.o
+ALL_OBJECTS-y += $(BASEDIR)/arch/$(ARCH)/built_in.o
+ALL_OBJECTS-y += $(BASEDIR)/plat/$(PLAT)/built_in.o
+ALL_OBJECTS-y += $(BASEDIR)/lib/built_in.o
 
 include Makefile
 
