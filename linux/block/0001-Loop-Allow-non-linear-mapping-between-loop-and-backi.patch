@@ -1,0 +1,162 @@
+From d05bb2b2e6edd7e97b781b235a6cead4d47b0756 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Mon, 1 Aug 2011 20:09:58 -0500
+Subject: [PATCH] Loop: Allow non-linear mapping between loop and backing file.
+
+This enables development of parsers for various disk-file
+formats, such as dynamic VHD, where 512K-2MB chunks can
+be located non-sequentially and are looked up through
+an indirection table.
+
+Change-Id: I2c70f1d11ee126a305d7beb48ea8df0345db6405
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c |   71 ++++++++++++++++++++++++++++++++++++++++++++-----
+ include/linux/loop.h |    6 ++++
+ 2 files changed, 69 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index 91797bb..6167026 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -84,6 +84,27 @@ static int max_part;
+ static int part_shift;
+ 
+ /*
++ * This is the almost do-nothing transform for regular loopback
++ * images. The backing file store linearly maps block to file
++ * position, with an offset supported.
++ */
++struct bio_vec *raw_transform(struct loop_device *lo,
++			      loff_t pos, loff_t *fpos,
++			      struct bio_vec *in,
++			      struct bio_vec *out,
++			      struct bio_vec *rem)
++{
++	*fpos = pos + lo->lo_offset;
++
++	/* Ensures "remainder" bvec is never examined in
++	   lo_send and lo_receive. */
++	rem->bv_len = 0;
++
++	/* No need to split bvec as data is always contiguous. */
++	return in;
++}
++
++/*
+  * Transfer functions
+  */
+ static int transfer_none(struct loop_device *lo, int cmd,
+@@ -345,7 +366,8 @@ static int lo_send(struct loop_device *lo, struct bio *bio, loff_t pos)
+ {
+ 	int (*do_lo_send)(struct loop_device *, struct bio_vec *, loff_t,
+ 			struct page *page);
+-	struct bio_vec *bvec;
++	loff_t fpos;
++	struct bio_vec *bvec, *vec, ovec, rvec;
+ 	struct page *page = NULL;
+ 	int i, ret = 0;
+ 
+@@ -361,10 +383,26 @@ static int lo_send(struct loop_device *lo, struct bio *bio, loff_t pos)
+ 		}
+ 	}
+ 	bio_for_each_segment(bvec, bio, i) {
+-		ret = do_lo_send(lo, bvec, pos, page);
++		vec = bvec;
++
++		do {
++			vec = lo->transform(lo, pos, &fpos,
++					    vec, &ovec, &rvec);
++			if (IS_ERR(vec)) {
++				ret = PTR_ERR(vec);
++				break;
++			}
++
++			ret = do_lo_send(lo, vec, fpos, page);
++			if (ret < 0)
++				break;
++
++			pos += vec->bv_len;
++			vec = &rvec;
++		} while (vec->bv_len != 0);
++
+ 		if (ret < 0)
+ 			break;
+-		pos += bvec->bv_len;
+ 	}
+ 	if (page) {
+ 		kunmap(page);
+@@ -457,24 +495,40 @@ do_lo_receive(struct loop_device *lo,
+ static int
+ lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
+ {
+-	struct bio_vec *bvec;
++	loff_t fpos;
++	struct bio_vec *bvec, *vec, ovec, rvec;
+ 	int i, ret = 0;
+ 
+ 	bio_for_each_segment(bvec, bio, i) {
+-		ret = do_lo_receive(lo, bvec, bsize, pos);
++		vec = bvec;
++		do {
++			vec = lo->transform(lo, pos, &fpos,
++					    vec, &ovec, &rvec);
++			if (IS_ERR(vec)) {
++				ret = PTR_ERR(vec);
++				break;
++			}
++
++			ret = do_lo_receive(lo, vec, bsize, fpos);
++			if (ret < 0)
++				break;
++
++			pos += vec->bv_len;
++			vec = &rvec;
++		} while (vec->bv_len != 0);
++
+ 		if (ret < 0)
+ 			break;
+-		pos += bvec->bv_len;
+ 	}
+ 	return ret;
+ }
+ 
+ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ {
+-	loff_t pos;
+ 	int ret;
++	loff_t pos;
+ 
+-	pos = ((loff_t) bio->bi_sector << 9) + lo->lo_offset;
++	pos = ((loff_t) bio->bi_sector << 9);
+ 
+ 	if (bio_rw(bio) == WRITE) {
+ 		bool barrier = !!(bio->bi_rw & REQ_HARDBARRIER);
+@@ -819,6 +873,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	lo->ioctl = NULL;
+ 	lo->lo_sizelimit = 0;
+ 	lo->old_gfp_mask = mapping_gfp_mask(mapping);
++	lo->transform = raw_transform;
+ 	mapping_set_gfp_mask(mapping, lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS));
+ 
+ 	bio_list_init(&lo->lo_bio_list);
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index 66c194e..fa13570 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -65,6 +65,12 @@ struct loop_device {
+ 	struct request_queue	*lo_queue;
+ 	struct gendisk		*lo_disk;
+ 	struct list_head	lo_list;
++
++	struct bio_vec *(*transform)(struct loop_device *lo,
++				     loff_t pos, loff_t *fpos,
++				     struct bio_vec *in,
++				     struct bio_vec *out,
++				     struct bio_vec *rem);
+ };
+ 
+ #endif /* __KERNEL__ */
+-- 
+1.7.0.4
+
