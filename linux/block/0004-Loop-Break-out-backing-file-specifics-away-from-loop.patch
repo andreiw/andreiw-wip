@@ -1,0 +1,317 @@
+From 2dcc532d7e4b734ceeadc16e35809dceac6b7c24 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Wed, 10 Aug 2011 15:51:50 -0500
+Subject: [PATCH 4/5] Loop: Break out backing-file specifics away from loop device.
+
+This is in order to facilitate loop parser changes.
+
+Change-Id: I57a8c7a070ca949c9f2fa446b6dac11b40356d23
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c |   69 +++++++++++++++++++++++++++----------------------
+ include/linux/loop.h |   34 +++++++++++++++---------
+ 2 files changed, 59 insertions(+), 44 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index 2f304a4..a2f89a0 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -213,7 +213,7 @@ lo_do_transfer(struct loop_device *lo, int cmd,
+ static int do_lo_send_aops(struct loop_device *lo, struct bio_vec *bvec,
+ 		loff_t pos, struct page *unused)
+ {
+-	struct file *file = lo->lo_backing_file; /* kudos to NFsckingS */
++	struct file *file = lo->lo_file.file; /* kudos to NFsckingS */
+ 	struct address_space *mapping = file->f_mapping;
+ 	pgoff_t index;
+ 	unsigned offset, bv_offs;
+@@ -307,7 +307,7 @@ static int __do_lo_send_write(struct file *file,
+ static int do_lo_send_direct_write(struct loop_device *lo,
+ 		struct bio_vec *bvec, loff_t pos, struct page *page)
+ {
+-	ssize_t bw = __do_lo_send_write(lo->lo_backing_file,
++	ssize_t bw = __do_lo_send_write(lo->lo_file.file,
+ 			kmap(bvec->bv_page) + bvec->bv_offset,
+ 			bvec->bv_len, pos);
+ 	kunmap(bvec->bv_page);
+@@ -334,7 +334,7 @@ static int do_lo_send_write(struct loop_device *lo, struct bio_vec *bvec,
+ 	int ret = lo_do_transfer(lo, WRITE, page, 0, bvec->bv_page,
+ 			bvec->bv_offset, bvec->bv_len, pos >> 9);
+ 	if (likely(!ret))
+-		return __do_lo_send_write(lo->lo_backing_file,
++		return __do_lo_send_write(lo->lo_file.file,
+ 				page_address(page), bvec->bv_len,
+ 				pos);
+ 	printk(KERN_ERR "loop: Transfer error at byte offset %llu, "
+@@ -354,7 +354,7 @@ static int lo_send(struct loop_device *lo, struct bio *bio, loff_t pos)
+ 	int i, ret = 0;
+ 
+ 	do_lo_send = do_lo_send_aops;
+-	if (!(lo->lo_flags & LO_FLAGS_USE_AOPS)) {
++	if (!(lo->lo_file.flags & LO_FILE_FLAGS_USE_AOPS)) {
+ 		do_lo_send = do_lo_send_direct_write;
+ 		if (lo->transfer != transfer_none) {
+ 			page = alloc_page(GFP_NOIO | __GFP_HIGHMEM);
+@@ -469,7 +469,7 @@ do_lo_receive(struct loop_device *lo,
+ 	sd.pos = pos;
+ 	sd.u.data = &cookie;
+ 
+-	file = lo->lo_backing_file;
++	file = lo->lo_file.file;
+ 	retval = splice_direct_to_actor(file, &sd, lo_direct_splice_actor);
+ 
+ 	if (retval < 0)
+@@ -519,7 +519,7 @@ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ 
+ 	if (bio_rw(bio) == WRITE) {
+ 		bool barrier = !!(bio->bi_rw & REQ_HARDBARRIER);
+-		struct file *file = lo->lo_backing_file;
++		struct file *file = lo->lo_file.file;
+ 
+ 		if (barrier) {
+ 			if (unlikely(!file->f_op->fsync)) {
+@@ -548,7 +548,7 @@ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ 				ret = -EIO;
+ 		}
+ 	} else
+-		ret = lo_receive(lo, bio, lo->lo_blocksize, pos);
++		ret = lo_receive(lo, bio, lo->lo_file.blocksize, pos);
+ 
+ out:
+ 	return ret;
+@@ -604,7 +604,7 @@ static void loop_unplug(struct request_queue *q)
+ 	struct loop_device *lo = q->queuedata;
+ 
+ 	queue_flag_clear_unlocked(QUEUE_FLAG_PLUGGED, q);
+-	blk_run_address_space(lo->lo_backing_file->f_mapping);
++	blk_run_address_space(lo->lo_file.file->f_mapping);
+ }
+ 
+ struct switch_request {
+@@ -701,7 +701,7 @@ static int loop_flush(struct loop_device *lo)
+ static void do_loop_switch(struct loop_device *lo, struct switch_request *p)
+ {
+ 	struct file *file = p->file;
+-	struct file *old_file = lo->lo_backing_file;
++	struct file *old_file = lo->lo_file.file;
+ 	struct address_space *mapping;
+ 
+ 	/* if no new file, only flush of queued bios requested */
+@@ -709,12 +709,13 @@ static void do_loop_switch(struct loop_device *lo, struct switch_request *p)
+ 		goto out;
+ 
+ 	mapping = file->f_mapping;
+-	mapping_set_gfp_mask(old_file->f_mapping, lo->old_gfp_mask);
+-	lo->lo_backing_file = file;
+-	lo->lo_blocksize = S_ISBLK(mapping->host->i_mode) ?
++	mapping_set_gfp_mask(old_file->f_mapping, lo->lo_file.old_gfp_mask);
++	lo->lo_file.file = file;
++	lo->lo_file.blocksize = S_ISBLK(mapping->host->i_mode) ?
+ 		mapping->host->i_bdev->bd_block_size : PAGE_SIZE;
+-	lo->old_gfp_mask = mapping_gfp_mask(mapping);
+-	mapping_set_gfp_mask(mapping, lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS));
++	lo->lo_file.old_gfp_mask = mapping_gfp_mask(mapping);
++	mapping_set_gfp_mask(mapping,
++			     lo->lo_file.old_gfp_mask & ~(__GFP_IO|__GFP_FS));
+ out:
+ 	complete(&p->wait);
+ }
+@@ -786,7 +787,7 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
+ 		goto out;
+ 
+ 	inode = file->f_mapping->host;
+-	old_file = lo->lo_backing_file;
++	old_file = lo->lo_file.file;
+ 
+ 	error = -EINVAL;
+ 
+@@ -829,8 +830,9 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	struct file	*file, *f;
+ 	struct inode	*inode;
+ 	struct address_space *mapping;
+-	unsigned lo_blocksize;
++	unsigned	blocksize;
+ 	int		lo_flags = 0;
++	int		lo_file_flags = 0;
+ 	int		error;
+ 	loff_t		size;
+ 
+@@ -859,7 +861,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 			error = -EINVAL;
+ 			goto out_putf;
+ 		}
+-		f = l->lo_backing_file;
++		f = l->lo_file.file;
+ 	}
+ 
+ 	mapping = file->f_mapping;
+@@ -873,11 +875,11 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 		const struct address_space_operations *aops = mapping->a_ops;
+ 
+ 		if (aops->write_begin)
+-			lo_flags |= LO_FLAGS_USE_AOPS;
+-		if (!(lo_flags & LO_FLAGS_USE_AOPS) && !file->f_op->write)
++			lo_file_flags |= LO_FILE_FLAGS_USE_AOPS;
++		if (!(lo_file_flags & LO_FILE_FLAGS_USE_AOPS) && !file->f_op->write)
+ 			lo_flags |= LO_FLAGS_READ_ONLY;
+ 
+-		lo_blocksize = S_ISBLK(inode->i_mode) ?
++		blocksize = S_ISBLK(inode->i_mode) ?
+ 			inode->i_bdev->bd_block_size : PAGE_SIZE;
+ 
+ 		error = 0;
+@@ -900,15 +902,18 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 
+ 	set_device_ro(bdev, (lo_flags & LO_FLAGS_READ_ONLY) != 0);
+ 
+-	lo->lo_blocksize = lo_blocksize;
+ 	lo->lo_device = bdev;
+ 	lo->lo_flags = lo_flags;
+-	lo->lo_backing_file = file;
+ 	lo->transfer = transfer_none;
+ 	lo->ioctl = NULL;
+ 	lo->lo_sizelimit = 0;
+-	lo->old_gfp_mask = mapping_gfp_mask(mapping);
+-	mapping_set_gfp_mask(mapping, lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS));
++
++	lo->lo_file.old_gfp_mask = mapping_gfp_mask(mapping);
++	lo->lo_file.blocksize = blocksize;
++	lo->lo_file.flags = lo_file_flags;
++	lo->lo_file.file = file;
++	mapping_set_gfp_mask(mapping,
++			     lo->lo_file.old_gfp_mask & ~(__GFP_IO|__GFP_FS));
+ 
+ 	bio_list_init(&lo->lo_bio_list);
+ 
+@@ -928,7 +933,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	/* let user-space know about the new size */
+ 	kobject_uevent(&disk_to_dev(bdev->bd_disk)->kobj, KOBJ_CHANGE);
+ 
+-	set_blocksize(bdev, lo_blocksize);
++	set_blocksize(bdev, blocksize);
+ 
+ 	lo->lo_thread = kthread_create(loop_thread, lo, "loop%d",
+ 						lo->lo_number);
+@@ -945,13 +950,14 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ out_clr:
+ 	lo->lo_thread = NULL;
+ 	lo->lo_device = NULL;
+-	lo->lo_backing_file = NULL;
+ 	lo->lo_flags = 0;
++	lo->lo_file.flags = 0;
++	lo->lo_file.file = NULL;
+ 	set_capacity(lo->lo_disk, 0);
+ 	invalidate_bdev(bdev);
+ 	bd_set_size(bdev, 0);
+ 	kobject_uevent(&disk_to_dev(bdev->bd_disk)->kobj, KOBJ_CHANGE);
+-	mapping_set_gfp_mask(mapping, lo->old_gfp_mask);
++	mapping_set_gfp_mask(mapping, lo->lo_file.old_gfp_mask);
+ 	lo->lo_state = Lo_unbound;
+ out_putp:
+ 	loop_release_parser(lo);
+@@ -1002,8 +1008,8 @@ loop_init_xfer(struct loop_device *lo, struct loop_func_table *xfer,
+ 
+ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+ {
+-	struct file *filp = lo->lo_backing_file;
+-	gfp_t gfp = lo->old_gfp_mask;
++	struct file *filp = lo->lo_file.file;
++	gfp_t gfp = lo->lo_file.old_gfp_mask;
+ 
+ 	if (lo->lo_state != Lo_bound)
+ 		return -ENXIO;
+@@ -1023,7 +1029,8 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+ 	loop_release_parser(lo);
+ 
+ 	lo->lo_queue->unplug_fn = NULL;
+-	lo->lo_backing_file = NULL;
++	lo->lo_file.file = NULL;
++	lo->lo_file.flags = 0;
+ 
+ 	loop_release_xfer(lo);
+ 	lo->transfer = NULL;
+@@ -1135,7 +1142,7 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
+ static int
+ loop_get_status(struct loop_device *lo, struct loop_info64 *info)
+ {
+-	struct file *file = lo->lo_backing_file;
++	struct file *file = lo->lo_file.file;
+ 	struct kstat stat;
+ 	int error;
+ 
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index 93ebd16..447a427 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -28,11 +28,28 @@ enum {
+ 
+ struct loop_func_table;
+ 
++/*
++ * Loop file flags
++ */
++enum {
++	LO_FILE_FLAGS_USE_AOPS	= 1,
++};
++
++struct lo_file {
++	int		flags;
++	struct file *	file;
++	unsigned	blocksize;
++	gfp_t		old_gfp_mask;
++};
++
+ struct loop_device {
+ 	int		lo_number;
+ 	int		lo_refcnt;
++
++	/* Raw parser use only. */
+ 	loff_t		lo_offset;
+ 	loff_t		lo_sizelimit;
++
+ 	int		lo_flags;
+ 	int		(*transfer)(struct loop_device *, int cmd,
+ 				    struct page *raw_page, unsigned raw_off,
+@@ -47,15 +64,11 @@ struct loop_device {
+ 	void           *lo_parser_priv;
+ 	__u32           lo_init[2];
+ 	uid_t		lo_key_owner;	/* Who set the key */
+-	int		(*ioctl)(struct loop_device *, int cmd, 
+-				 unsigned long arg); 
++	int		(*ioctl)(struct loop_device *, int cmd,
++				 unsigned long arg);
+ 
+-	struct file *	lo_backing_file;
+ 	struct block_device *lo_device;
+-	unsigned	lo_blocksize;
+-	void		*key_data; 
+-
+-	gfp_t		old_gfp_mask;
++	void		*key_data;
+ 
+ 	spinlock_t		lo_lock;
+ 	struct bio_list		lo_bio_list;
+@@ -68,11 +81,7 @@ struct loop_device {
+ 	struct gendisk		*lo_disk;
+ 	struct list_head	lo_list;
+ 
+-	struct bio_vec *(*transform)(struct loop_device *lo,
+-				     loff_t pos, loff_t *fpos,
+-				     struct bio_vec *in,
+-				     struct bio_vec *out,
+-				     struct bio_vec *rem);
++	struct lo_file		lo_file;
+ };
+ 
+ #endif /* __KERNEL__ */
+@@ -82,7 +91,6 @@ struct loop_device {
+  */
+ enum {
+ 	LO_FLAGS_READ_ONLY	= 1,
+-	LO_FLAGS_USE_AOPS	= 2,
+ 	LO_FLAGS_AUTOCLEAR	= 4,
+ };
+ 
+-- 
+1.7.0.4
+

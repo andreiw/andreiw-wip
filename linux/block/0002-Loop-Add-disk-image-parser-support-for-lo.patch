@@ -1,7 +1,7 @@
-From ab23ee412f18f881374167c663332c26c7f52e25 Mon Sep 17 00:00:00 2001
+From 33db31fd59c285f7baadeef7791da99dbefdf773 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Tue, 2 Aug 2011 16:37:21 -0500
-Subject: [PATCH 2/2] Loop: Add disk-image parser support for lo.
+Subject: [PATCH 2/5] Loop: Add disk-image parser support for lo.
 
 This sets up for development of VHD and VMDK parsers.
 
@@ -13,7 +13,7 @@ Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
  2 files changed, 167 insertions(+), 31 deletions(-)
 
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
-index 6167026..1c91ca5 100644
+index 6167026..288bbad 100644
 --- a/drivers/block/loop.c
 +++ b/drivers/block/loop.c
 @@ -79,30 +79,12 @@
@@ -119,7 +119,7 @@ index 6167026..1c91ca5 100644
 +		owner = parser->owner;
 +
 +		if (!try_module_get(owner))
-+			return -EINVAL;
++			continue;
 +
 +		priv = parser->init(lo, file);
 +		if (priv) {
