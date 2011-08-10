@@ -1,0 +1,172 @@
+From 44af9336a637923afbfa53a4fecb5b44c744a978 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Wed, 10 Aug 2011 17:21:13 -0500
+Subject: [PATCH 6/6] Loop: Propagate lo_file into lo_send/lo_receive path.
+
+This allows lo_send/lo_receive to operate on arbitrary
+lo_files.
+
+Next step is enhancing lo_send/lo_receive to avoid
+crypto/parser transformations for internal I/O requests
+from the parser.
+
+Change-Id: Ibc84d02eb5376b8e88b0d84fcc031d9bca0328bb
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c |   50 +++++++++++++++++++++++++++++---------------------
+ 1 files changed, 29 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index c511745..dcbb205 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -210,10 +210,12 @@ lo_do_transfer(struct loop_device *lo, int cmd,
+  * This is the fast version for backing filesystems which implement the address
+  * space operations write_begin and write_end.
+  */
+-static int do_lo_send_aops(struct loop_device *lo, struct bio_vec *bvec,
+-		loff_t pos, struct page *unused)
++static int do_lo_send_aops(struct loop_device *lo,
++			   struct lo_file *lo_file,
++			   struct bio_vec *bvec,
++			   loff_t pos, struct page *unused)
+ {
+-	struct file *file = lo->lo_file.file; /* kudos to NFsckingS */
++	struct file *file = lo_file->file; /* kudos to NFsckingS */
+ 	struct address_space *mapping = file->f_mapping;
+ 	pgoff_t index;
+ 	unsigned offset, bv_offs;
+@@ -305,9 +307,11 @@ static int __do_lo_send_write(struct file *file,
+  * filesystems.
+  */
+ static int do_lo_send_direct_write(struct loop_device *lo,
+-		struct bio_vec *bvec, loff_t pos, struct page *page)
++				   struct lo_file *lo_file,
++				   struct bio_vec *bvec, loff_t pos,
++				   struct page *page)
+ {
+-	ssize_t bw = __do_lo_send_write(lo->lo_file.file,
++	ssize_t bw = __do_lo_send_write(lo_file->file,
+ 			kmap(bvec->bv_page) + bvec->bv_offset,
+ 			bvec->bv_len, pos);
+ 	kunmap(bvec->bv_page);
+@@ -328,13 +332,15 @@ static int do_lo_send_direct_write(struct loop_device *lo,
+  * the transformations in place as we do not have direct access to the
+  * destination pages of the backing file.
+  */
+-static int do_lo_send_write(struct loop_device *lo, struct bio_vec *bvec,
+-		loff_t pos, struct page *page)
++static int do_lo_send_write(struct loop_device *lo,
++			    struct lo_file *lo_file,
++			    struct bio_vec *bvec, loff_t pos,
++			    struct page *page)
+ {
+ 	int ret = lo_do_transfer(lo, WRITE, page, 0, bvec->bv_page,
+ 			bvec->bv_offset, bvec->bv_len, pos >> 9);
+ 	if (likely(!ret))
+-		return __do_lo_send_write(lo->lo_file.file,
++		return __do_lo_send_write(lo_file->file,
+ 				page_address(page), bvec->bv_len,
+ 				pos);
+ 	printk(KERN_ERR "loop: Transfer error at byte offset %llu, "
+@@ -344,17 +350,18 @@ static int do_lo_send_write(struct loop_device *lo, struct bio_vec *bvec,
+ 	return ret;
+ }
+ 
+-static int lo_send(struct loop_device *lo, struct bio *bio, loff_t pos)
++static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
++		   struct bio *bio, loff_t pos)
+ {
+-	int (*do_lo_send)(struct loop_device *, struct bio_vec *, loff_t,
+-			struct page *page);
++	int (*do_lo_send)(struct loop_device *, struct lo_file *,
++			  struct bio_vec *, loff_t, struct page *page);
+ 	loff_t fpos;
+ 	struct bio_vec *bvec, *vec, ovec, rvec;
+ 	struct page *page = NULL;
+ 	int i, ret = 0;
+ 
+ 	do_lo_send = do_lo_send_aops;
+-	if (!(lo->lo_file.flags & LO_FILE_FLAGS_USE_AOPS)) {
++	if (!(lo_file->flags & LO_FILE_FLAGS_USE_AOPS)) {
+ 		do_lo_send = do_lo_send_direct_write;
+ 		if (lo->transfer != transfer_none) {
+ 			page = alloc_page(GFP_NOIO | __GFP_HIGHMEM);
+@@ -376,7 +383,7 @@ static int lo_send(struct loop_device *lo, struct bio *bio, loff_t pos)
+ 				break;
+ 			}
+ 
+-			ret = do_lo_send(lo, vec, fpos, page);
++			ret = do_lo_send(lo, lo_file, vec, fpos, page);
+ 			if (ret < 0)
+ 				break;
+ 
+@@ -450,8 +457,8 @@ lo_direct_splice_actor(struct pipe_inode_info *pipe, struct splice_desc *sd)
+ }
+ 
+ static int
+-do_lo_receive(struct loop_device *lo,
+-	      struct bio_vec *bvec, int bsize, loff_t pos)
++do_lo_receive(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio_vec *bvec, loff_t pos)
+ {
+ 	struct lo_read_data cookie;
+ 	struct splice_desc sd;
+@@ -461,7 +468,7 @@ do_lo_receive(struct loop_device *lo,
+ 	cookie.lo = lo;
+ 	cookie.page = bvec->bv_page;
+ 	cookie.offset = bvec->bv_offset;
+-	cookie.bsize = bsize;
++	cookie.bsize = lo_file->blocksize;
+ 
+ 	sd.len = 0;
+ 	sd.total_len = bvec->bv_len;
+@@ -469,7 +476,7 @@ do_lo_receive(struct loop_device *lo,
+ 	sd.pos = pos;
+ 	sd.u.data = &cookie;
+ 
+-	file = lo->lo_file.file;
++	file = lo_file->file;
+ 	retval = splice_direct_to_actor(file, &sd, lo_direct_splice_actor);
+ 
+ 	if (retval < 0)
+@@ -479,7 +486,8 @@ do_lo_receive(struct loop_device *lo,
+ }
+ 
+ static int
+-lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
++lo_receive(struct loop_device *lo, struct lo_file *lo_file,
++	   struct bio *bio, loff_t pos)
+ {
+ 	loff_t fpos;
+ 	struct bio_vec *bvec, *vec, ovec, rvec;
+@@ -496,7 +504,7 @@ lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
+ 				break;
+ 			}
+ 
+-			ret = do_lo_receive(lo, vec, bsize, fpos);
++			ret = do_lo_receive(lo, lo_file, vec, fpos);
+ 			if (ret < 0)
+ 				break;
+ 
+@@ -534,7 +542,7 @@ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ 			}
+ 		}
+ 
+-		ret = lo_send(lo, bio, pos);
++		ret = lo_send(lo, &lo->lo_file, bio, pos);
+ 
+ 		ret = lo->lo_parser->flush(lo, lo->lo_parser_priv);
+ 		if (unlikely(ret)) {
+@@ -548,7 +556,7 @@ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ 				ret = -EIO;
+ 		}
+ 	} else
+-		ret = lo_receive(lo, bio, lo->lo_file.blocksize, pos);
++		ret = lo_receive(lo, &lo->lo_file, bio, pos);
+ 
+ out:
+ 	return ret;
+-- 
+1.7.0.4
+
