@@ -1,4 +1,4 @@
-From 520702ba98ceafd92ac5dc163b694e46ba5016da Mon Sep 17 00:00:00 2001
+From caf8133d1e4a66d42eacf96a5577c290e4f106e0 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Thu, 11 Aug 2011 16:56:23 -0500
 Subject: [PATCH 10/11] Loop: Implement parser I/O accessor.
@@ -8,14 +8,14 @@ Implement the direct I/O accessor used by parser code.
 Change-Id: I552eeebc2c818e821d8c4e34810922897ae0eaa0
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
- drivers/block/loop.c |   45 +++++++++++++++++++++++++++++++++++++++++++++
- 1 files changed, 45 insertions(+), 0 deletions(-)
+ drivers/block/loop.c |   66 +++++++++++++++++++++++++++++++++++++++++++++----
+ 1 files changed, 60 insertions(+), 6 deletions(-)
 
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
-index 29e887c..5138d23 100644
+index 29e887c..9d0323a 100644
 --- a/drivers/block/loop.c
 +++ b/drivers/block/loop.c
-@@ -543,6 +543,51 @@ lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+@@ -543,6 +543,61 @@ lo_receive(struct loop_device *lo, struct lo_file *lo_file,
  	return ret;
  }
  
@@ -25,13 +25,23 @@ index 29e887c..5138d23 100644
 +{
 +	unsigned int bv_len;
 +	unsigned int bv_offset;
++	struct bio_vec *bvec;
 +
++	/* Fake a BIO containing bvec's describing a physically
++	 * contiguous kernel buffer. bio_add_page is too smart
++	 *  and relies on a present rq. In our case, we just want
++	 *  to use the same file I/O logic, which just happens to
++	 *  use BIO. It might be nicer to redo everything to use
++	 *  sg's and convert BIO nvecs to sg inside do_bio_filebacked.
++	 */
 +	while (len) {
-+		bv_offset = (uintptr_t) kbuf & PAGE_MASK;
++		bv_offset = ((uintptr_t) kbuf) & ~PAGE_MASK;
 +		bv_len = min(len, (unsigned int) PAGE_SIZE - bv_offset);
-+		if (bv_len != bio_add_page(bio, virt_to_page(kbuf),
-+					   bv_len, bv_offset))
-+			return -EINVAL;
++		bvec = &bio->bi_io_vec[bio->bi_vcnt];
++		bvec->bv_page = virt_to_page(kbuf);
++		bvec->bv_len = bv_len;
++		bvec->bv_offset = bv_offset;
++		bio->bi_vcnt++;
 +		len -= bv_len;
 +		kbuf += bv_len;
 +	}
@@ -40,7 +50,7 @@ index 29e887c..5138d23 100644
 +
 +int loop_parser_io(struct loop_device *lo,
 +		   struct lo_file *lo_file,
-+		   u8 *kbuf,
++		   void *kbuf,
 +		   size_t len,
 +		   loff_t pos,
 +		   int cmd)
@@ -67,6 +77,33 @@ index 29e887c..5138d23 100644
  static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
  {
  	int ret;
+@@ -928,6 +983,10 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	mapping_set_gfp_mask(mapping,
+ 			     lo->lo_file.old_gfp_mask & ~(__GFP_IO|__GFP_FS));
+ 
++	lo->lo_flags = lo_flags;
++	lo->transfer = transfer_none;
++	lo->lo_sizelimit = 0;
++
+ 	error = loop_match_parser(lo, &lo->lo_file);
+ 	if (error)
+ 		goto out_putlf;
+@@ -941,14 +1000,9 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	if (!(mode & FMODE_WRITE))
+ 		lo_flags |= LO_FLAGS_READ_ONLY;
+ 
+-	set_device_ro(bdev, (lo_flags & LO_FLAGS_READ_ONLY) != 0);
+-
+ 	lo->lo_device = bdev;
+-	lo->lo_flags = lo_flags;
+-	lo->transfer = transfer_none;
+ 	lo->ioctl = NULL;
+-	lo->lo_sizelimit = 0;
+-
++	set_device_ro(bdev, (lo_flags & LO_FLAGS_READ_ONLY) != 0);
+ 	bio_list_init(&lo->lo_bio_list);
+ 
+ 	/*
 -- 
 1.7.0.4
 

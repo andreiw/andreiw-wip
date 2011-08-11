@@ -1,4 +1,4 @@
-From 10f8a705c7d0842bc7d9776aba2c7955c8d337cb Mon Sep 17 00:00:00 2001
+From 7b70b7d198b87accd2ec89076717b4c0c92fa48c Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Thu, 11 Aug 2011 17:08:57 -0500
 Subject: [PATCH 11/11] Loop: Cleanup loop size computation.
@@ -20,7 +20,7 @@ Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
  1 files changed, 16 insertions(+), 20 deletions(-)
 
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
-index 5138d23..5f206ce 100644
+index 9d0323a..4593df1 100644
 --- a/drivers/block/loop.c
 +++ b/drivers/block/loop.c
 @@ -184,24 +184,6 @@ static struct loop_func_table *xfer_funcs[MAX_LO_CRYPT] = {
@@ -48,7 +48,7 @@ index 5138d23..5f206ce 100644
  static int
  figure_loop_size(struct loop_device *lo)
  {
-@@ -877,7 +859,8 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
+@@ -887,7 +869,8 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
  	   This is an extremely basic check. No verification is
  	   done as to whether the new file is supported by the parser
  	   and equivalent in state to the old one. Caveat Emptor! */
@@ -58,7 +58,7 @@ index 5138d23..5f206ce 100644
  		goto out_putf;
  
  	/* and ... switch */
-@@ -1809,7 +1792,20 @@ static void raw_release(struct loop_device *lo, struct lo_file *lo_file)
+@@ -1818,7 +1801,20 @@ static void raw_release(struct loop_device *lo, struct lo_file *lo_file)
  
  static loff_t raw_size(struct loop_device *lo, struct lo_file *lo_file)
  {
