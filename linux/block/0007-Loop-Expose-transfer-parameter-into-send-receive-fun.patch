@@ -1,0 +1,171 @@
+From 0a2c985673170ecb563dcaa937ee5a80689b8767 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Thu, 11 Aug 2011 14:24:31 -0500
+Subject: [PATCH 7/9] Loop: Expose transfer parameter into send/receive funcs.
+
+Expose the transfer function as a parameter into
+do_lo_send/do_lo_receive, so the same code can be
+reused for performing direct untransformed file I/O
+on behalf of parser code.
+
+Change-Id: Iaf2b292f5cac7f8f6a06ea7d0ea0caf68b05d35b
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c |   35 ++++++++++++++---------------------
+ include/linux/loop.h |   10 ++++++----
+ 2 files changed, 20 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index dcbb205..ecc1fc4 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -192,18 +192,6 @@ figure_loop_size(struct loop_device *lo)
+ 	return 0;
+ }
+ 
+-static inline int
+-lo_do_transfer(struct loop_device *lo, int cmd,
+-	       struct page *rpage, unsigned roffs,
+-	       struct page *lpage, unsigned loffs,
+-	       int size, sector_t rblock)
+-{
+-	if (unlikely(!lo->transfer))
+-		return 0;
+-
+-	return lo->transfer(lo, cmd, rpage, roffs, lpage, loffs, size, rblock);
+-}
+-
+ /**
+  * do_lo_send_aops - helper for writing data to a loop device
+  *
+@@ -212,6 +200,7 @@ lo_do_transfer(struct loop_device *lo, int cmd,
+  */
+ static int do_lo_send_aops(struct loop_device *lo,
+ 			   struct lo_file *lo_file,
++			   loop_xfer transfer,
+ 			   struct bio_vec *bvec,
+ 			   loff_t pos, struct page *unused)
+ {
+@@ -245,8 +234,8 @@ static int do_lo_send_aops(struct loop_device *lo,
+ 
+ 		file_update_time(file);
+ 
+-		transfer_result = lo_do_transfer(lo, WRITE, page, offset,
+-				bvec->bv_page, bv_offs, size, IV);
++		transfer_result = transfer(lo, WRITE, page, offset,
++					   bvec->bv_page, bv_offs, size, IV);
+ 		copied = size;
+ 		if (unlikely(transfer_result))
+ 			copied = 0;
+@@ -308,6 +297,7 @@ static int __do_lo_send_write(struct file *file,
+  */
+ static int do_lo_send_direct_write(struct loop_device *lo,
+ 				   struct lo_file *lo_file,
++				   loop_xfer unused,
+ 				   struct bio_vec *bvec, loff_t pos,
+ 				   struct page *page)
+ {
+@@ -334,11 +324,12 @@ static int do_lo_send_direct_write(struct loop_device *lo,
+  */
+ static int do_lo_send_write(struct loop_device *lo,
+ 			    struct lo_file *lo_file,
++			    loop_xfer transfer,
+ 			    struct bio_vec *bvec, loff_t pos,
+ 			    struct page *page)
+ {
+-	int ret = lo_do_transfer(lo, WRITE, page, 0, bvec->bv_page,
+-			bvec->bv_offset, bvec->bv_len, pos >> 9);
++	int ret = transfer(lo, WRITE, page, 0, bvec->bv_page,
++			   bvec->bv_offset, bvec->bv_len, pos >> 9);
+ 	if (likely(!ret))
+ 		return __do_lo_send_write(lo_file->file,
+ 				page_address(page), bvec->bv_len,
+@@ -353,7 +344,7 @@ static int do_lo_send_write(struct loop_device *lo,
+ static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
+ 		   struct bio *bio, loff_t pos)
+ {
+-	int (*do_lo_send)(struct loop_device *, struct lo_file *,
++	int (*do_lo_send)(struct loop_device *, struct lo_file *, loop_xfer,
+ 			  struct bio_vec *, loff_t, struct page *page);
+ 	loff_t fpos;
+ 	struct bio_vec *bvec, *vec, ovec, rvec;
+@@ -383,7 +374,7 @@ static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
+ 				break;
+ 			}
+ 
+-			ret = do_lo_send(lo, lo_file, vec, fpos, page);
++			ret = do_lo_send(lo, lo_file, lo->transfer, vec, fpos, page);
+ 			if (ret < 0)
+ 				break;
+ 
+@@ -408,6 +399,7 @@ fail:
+ 
+ struct lo_read_data {
+ 	struct loop_device *lo;
++	loop_xfer transfer;
+ 	struct page *page;
+ 	unsigned offset;
+ 	int bsize;
+@@ -433,7 +425,7 @@ lo_splice_actor(struct pipe_inode_info *pipe, struct pipe_buffer *buf,
+ 	if (size > p->bsize)
+ 		size = p->bsize;
+ 
+-	if (lo_do_transfer(lo, READ, page, buf->offset, p->page, p->offset, size, IV)) {
++	if (p->transfer(lo, READ, page, buf->offset, p->page, p->offset, size, IV)) {
+ 		printk(KERN_ERR "loop: transfer error block %ld\n",
+ 		       page->index);
+ 		size = -EINVAL;
+@@ -458,7 +450,7 @@ lo_direct_splice_actor(struct pipe_inode_info *pipe, struct splice_desc *sd)
+ 
+ static int
+ do_lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+-	      struct bio_vec *bvec, loff_t pos)
++	      loop_xfer transfer, struct bio_vec *bvec, loff_t pos)
+ {
+ 	struct lo_read_data cookie;
+ 	struct splice_desc sd;
+@@ -469,6 +461,7 @@ do_lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+ 	cookie.page = bvec->bv_page;
+ 	cookie.offset = bvec->bv_offset;
+ 	cookie.bsize = lo_file->blocksize;
++	cookie.transfer = transfer;
+ 
+ 	sd.len = 0;
+ 	sd.total_len = bvec->bv_len;
+@@ -504,7 +497,7 @@ lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+ 				break;
+ 			}
+ 
+-			ret = do_lo_receive(lo, lo_file, vec, fpos);
++			ret = do_lo_receive(lo, lo_file, lo->transfer, vec, fpos);
+ 			if (ret < 0)
+ 				break;
+ 
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index 447a427..5ff6d40 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -145,14 +145,16 @@ struct loop_info64 {
+ #define LO_CRYPT_CRYPTOAPI	18
+ #define MAX_LO_CRYPT		20
+ 
++typedef int (*loop_xfer)(struct loop_device *lo, int cmd,
++			struct page *raw_page, unsigned raw_off,
++			struct page *loop_page, unsigned loop_off,
++			int size, sector_t real_block);
++
+ #ifdef __KERNEL__
+ /* Support for loadable transfer modules */
+ struct loop_func_table {
+ 	int number;	/* filter type */ 
+-	int (*transfer)(struct loop_device *lo, int cmd,
+-			struct page *raw_page, unsigned raw_off,
+-			struct page *loop_page, unsigned loop_off,
+-			int size, sector_t real_block);
++	loop_xfer transfer;
+ 	int (*init)(struct loop_device *, const struct loop_info64 *); 
+ 	/* release is called from loop_unregister_transfer or clr_fd */
+ 	int (*release)(struct loop_device *); 
+-- 
+1.7.0.4
+

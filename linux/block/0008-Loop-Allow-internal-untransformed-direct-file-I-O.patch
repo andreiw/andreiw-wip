@@ -1,0 +1,218 @@
+From d42cb3048b5c612bf1dcecd3f808e669be9863ca Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Thu, 11 Aug 2011 14:43:43 -0500
+Subject: [PATCH 8/9] Loop: Allow internal untransformed direct file I/O.
+
+Allow parser code to making direct file I/O using
+do_send and do_receive.
+
+Change-Id: I2f56fb4dc4dcb41e9e09b23e9a2da998e863103f
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c |   80 ++++++++++++++++++++++++++++----------------------
+ include/linux/loop.h |   14 +++++----
+ 2 files changed, 53 insertions(+), 41 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index ecc1fc4..c423432 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -87,6 +87,28 @@ static int part_shift;
+ static struct loop_parser raw_parser;
+ 
+ /*
++ * This is the almost do-nothing transform for regular loopback
++ * images and direct access to backing file from parsers. The
++ * backing file store linearly maps block to file position, with
++ * an offset supported.
++ */
++static struct bio_vec *transform_none(struct loop_device *lo, void *unused,
++				      loff_t pos, loff_t *fpos,
++				      struct bio_vec *in,
++				      struct bio_vec *out,
++				      struct bio_vec *rem)
++{
++	*fpos = pos + lo->lo_offset;
++
++	/* Ensures "remainder" bvec is never examined in
++	   lo_send and lo_receive. */
++	rem->bv_len = 0;
++
++	/* No need to split bvec as data is always contiguous. */
++	return in;
++}
++
++/*
+  * Transfer functions
+  */
+ static int transfer_none(struct loop_device *lo, int cmd,
+@@ -342,7 +364,7 @@ static int do_lo_send_write(struct loop_device *lo,
+ }
+ 
+ static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
+-		   struct bio *bio, loff_t pos)
++		   struct bio *bio, loff_t pos, bool direct)
+ {
+ 	int (*do_lo_send)(struct loop_device *, struct lo_file *, loop_xfer,
+ 			  struct bio_vec *, loff_t, struct page *page);
+@@ -350,11 +372,15 @@ static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
+ 	struct bio_vec *bvec, *vec, ovec, rvec;
+ 	struct page *page = NULL;
+ 	int i, ret = 0;
++	loop_xform transform = direct ? transform_none :
++		lo->lo_parser->transform;
++	loop_xfer transfer = direct ? transfer_none :
++		lo->transfer;
+ 
+ 	do_lo_send = do_lo_send_aops;
+ 	if (!(lo_file->flags & LO_FILE_FLAGS_USE_AOPS)) {
+ 		do_lo_send = do_lo_send_direct_write;
+-		if (lo->transfer != transfer_none) {
++		if (transfer != transfer_none) {
+ 			page = alloc_page(GFP_NOIO | __GFP_HIGHMEM);
+ 			if (unlikely(!page))
+ 				goto fail;
+@@ -366,15 +392,15 @@ static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
+ 		vec = bvec;
+ 
+ 		do {
+-			vec = lo->lo_parser->transform(lo, lo->lo_parser_priv,
+-						       pos, &fpos,
+-						       vec, &ovec, &rvec);
++			vec = transform(lo, lo->lo_parser_priv,
++					pos, &fpos,
++					vec, &ovec, &rvec);
+ 			if (IS_ERR(vec)) {
+ 				ret = PTR_ERR(vec);
+ 				break;
+ 			}
+ 
+-			ret = do_lo_send(lo, lo_file, lo->transfer, vec, fpos, page);
++			ret = do_lo_send(lo, lo_file, transfer, vec, fpos, page);
+ 			if (ret < 0)
+ 				break;
+ 
+@@ -480,24 +506,29 @@ do_lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+ 
+ static int
+ lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+-	   struct bio *bio, loff_t pos)
++	   struct bio *bio, loff_t pos, bool direct)
+ {
+ 	loff_t fpos;
+ 	struct bio_vec *bvec, *vec, ovec, rvec;
++	loop_xform transform = direct ? transform_none :
++		lo->lo_parser->transform;
++	loop_xfer transfer = direct ? transfer_none :
++		lo->transfer;
++
+ 	int i, ret = 0;
+ 
+ 	bio_for_each_segment(bvec, bio, i) {
+ 		vec = bvec;
+ 		do {
+-			vec = lo->lo_parser->transform(lo, lo->lo_parser_priv,
+-						       pos, &fpos,
+-						       vec, &ovec, &rvec);
++			vec = transform(lo, lo->lo_parser_priv,
++					pos, &fpos,
++					vec, &ovec, &rvec);
+ 			if (IS_ERR(vec)) {
+ 				ret = PTR_ERR(vec);
+ 				break;
+ 			}
+ 
+-			ret = do_lo_receive(lo, lo_file, lo->transfer, vec, fpos);
++			ret = do_lo_receive(lo, lo_file, transfer, vec, fpos);
+ 			if (ret < 0)
+ 				break;
+ 
+@@ -535,7 +566,7 @@ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ 			}
+ 		}
+ 
+-		ret = lo_send(lo, &lo->lo_file, bio, pos);
++		ret = lo_send(lo, &lo->lo_file, bio, pos, false);
+ 
+ 		ret = lo->lo_parser->flush(lo, lo->lo_parser_priv);
+ 		if (unlikely(ret)) {
+@@ -549,7 +580,7 @@ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ 				ret = -EIO;
+ 		}
+ 	} else
+-		ret = lo_receive(lo, &lo->lo_file, bio, pos);
++		ret = lo_receive(lo, &lo->lo_file, bio, pos, false);
+ 
+ out:
+ 	return ret;
+@@ -1742,34 +1773,13 @@ static int raw_flush(struct loop_device *lo, void *priv)
+ 	return 0;
+ }
+ 
+-/*
+- * This is the almost do-nothing transform for regular loopback
+- * images. The backing file store linearly maps block to file
+- * position, with an offset supported.
+- */
+-static struct bio_vec *raw_transform(struct loop_device *lo, void *priv,
+-				     loff_t pos, loff_t *fpos,
+-				     struct bio_vec *in,
+-				     struct bio_vec *out,
+-				     struct bio_vec *rem)
+-{
+-	*fpos = pos + lo->lo_offset;
+-
+-	/* Ensures "remainder" bvec is never examined in
+-	   lo_send and lo_receive. */
+-	rem->bv_len = 0;
+-
+-	/* No need to split bvec as data is always contiguous. */
+-	return in;
+-}
+-
+ static struct loop_parser raw_parser =
+ {
+ 	.init = raw_init,
+ 	.release = raw_release,
+ 	.flush = raw_flush,
+ 	.size = raw_size,
+-	.transform = raw_transform,
++	.transform = transform_none,
+ 	.owner = THIS_MODULE
+ };
+ 
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index 5ff6d40..526e16d 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -165,6 +165,13 @@ struct loop_func_table {
+ int loop_register_transfer(struct loop_func_table *funcs);
+ int loop_unregister_transfer(int number); 
+ 
++typedef struct bio_vec *(*loop_xform)(
++		struct loop_device *lo, void *priv,
++		loff_t pos, loff_t *fpos,
++		struct bio_vec *in,
++		struct bio_vec *out,
++		struct bio_vec *rem);
++
+ /* Support for loadable parser modules */
+ struct loop_parser {
+ 	struct list_head list;
+@@ -172,12 +179,7 @@ struct loop_parser {
+ 	void (*release)(struct loop_device *lo, void *priv);
+ 	int (*flush)(struct loop_device *lo, void *priv);
+ 	loff_t (*size)(struct loop_device *lo, void *priv);
+-	struct bio_vec *(*transform)(
+-		struct loop_device *lo, void *priv,
+-		loff_t pos, loff_t *fpos,
+-		struct bio_vec *in,
+-		struct bio_vec *out,
+-		struct bio_vec *rem);
++	loop_xform transform;
+ 	struct module *owner;
+ };
+ 
+-- 
+1.7.0.4
+

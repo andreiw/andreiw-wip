@@ -1,0 +1,250 @@
+From 9261e92ce3a2dc4e70706c9044172cea0631b4f1 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Thu, 11 Aug 2011 14:59:33 -0500
+Subject: [PATCH 9/9] Loop: Make parser operate on lo_file instead of file.
+
+Parser private pointer is also located in lo_file.
+
+Change-Id: Ib5d786d05fb443f685e7957d6557bbd1e74406b4
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c |   71 ++++++++++++++++++++++++-------------------------
+ include/linux/loop.h |   13 +++++----
+ 2 files changed, 42 insertions(+), 42 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index c423432..29e887c 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -92,7 +92,8 @@ static struct loop_parser raw_parser;
+  * backing file store linearly maps block to file position, with
+  * an offset supported.
+  */
+-static struct bio_vec *transform_none(struct loop_device *lo, void *unused,
++static struct bio_vec *transform_none(struct loop_device *lo,
++				      struct lo_file *unused,
+ 				      loff_t pos, loff_t *fpos,
+ 				      struct bio_vec *in,
+ 				      struct bio_vec *out,
+@@ -204,7 +205,7 @@ static loff_t get_loop_size(struct loop_device *lo, struct file *file)
+ static int
+ figure_loop_size(struct loop_device *lo)
+ {
+-	loff_t size = lo->lo_parser->size(lo, lo->lo_parser_priv);
++	loff_t size = lo->lo_parser->size(lo, &lo->lo_file);
+ 	sector_t x = (sector_t)size;
+ 
+ 	if (unlikely((loff_t)x != size))
+@@ -392,7 +393,7 @@ static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
+ 		vec = bvec;
+ 
+ 		do {
+-			vec = transform(lo, lo->lo_parser_priv,
++			vec = transform(lo, &lo->lo_file,
+ 					pos, &fpos,
+ 					vec, &ovec, &rvec);
+ 			if (IS_ERR(vec)) {
+@@ -520,7 +521,7 @@ lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+ 	bio_for_each_segment(bvec, bio, i) {
+ 		vec = bvec;
+ 		do {
+-			vec = transform(lo, lo->lo_parser_priv,
++			vec = transform(lo, &lo->lo_file,
+ 					pos, &fpos,
+ 					vec, &ovec, &rvec);
+ 			if (IS_ERR(vec)) {
+@@ -568,7 +569,7 @@ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ 
+ 		ret = lo_send(lo, &lo->lo_file, bio, pos, false);
+ 
+-		ret = lo->lo_parser->flush(lo, lo->lo_parser_priv);
++		ret = lo->lo_parser->flush(lo, &lo->lo_file);
+ 		if (unlikely(ret)) {
+ 			ret = -EIO;
+ 			goto out;
+@@ -752,11 +753,11 @@ out:
+ 	complete(&p->wait);
+ }
+ 
+-static int loop_match_parser(struct loop_device *lo, struct file *file)
++static int loop_match_parser(struct loop_device *lo, struct lo_file *lo_file)
+ {
+ 	struct loop_parser *parser;
+ 	struct module *owner;
+-	void *priv;
++	int ret;
+ 
+ 	mutex_lock(&loop_parsers_mutex);
+ 	list_for_each_entry(parser, &loop_parsers, list) {
+@@ -765,10 +766,9 @@ static int loop_match_parser(struct loop_device *lo, struct file *file)
+ 		if (!try_module_get(owner))
+ 			continue;
+ 
+-		priv = parser->init(lo, file);
+-		if (priv) {
++		ret = parser->init(lo, lo_file);
++		if (!ret) {
+ 			lo->lo_parser = parser;
+-			lo->lo_parser_priv = priv;
+ 			break;
+ 		}
+ 
+@@ -779,16 +779,15 @@ static int loop_match_parser(struct loop_device *lo, struct file *file)
+ 	/* raw_parser will always bind if no other parsers do. */
+ 	if(!lo->lo_parser) {
+ 		lo->lo_parser = &raw_parser;
+-		lo->lo_parser_priv = lo->lo_parser->init(lo, file);
++		lo->lo_parser->init(lo, lo_file);
+ 	}
+ 	return 0;
+ }
+ 
+ static void loop_release_parser(struct loop_device *lo)
+ {
+-	lo->lo_parser->release(lo, lo->lo_parser_priv);
++	lo->lo_parser->release(lo, &lo->lo_file);
+ 	module_put(lo->lo_parser->owner);
+-	lo->lo_parser_priv = NULL;
+ 	lo->lo_parser = NULL;
+ }
+ 
+@@ -922,10 +921,17 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 		goto out_putf;
+ 	}
+ 
+-	error = loop_match_parser(lo, file);
++	lo->lo_file.blocksize = blocksize;
++	lo->lo_file.flags = lo_file_flags;
++	lo->lo_file.file = file;
++	lo->lo_file.old_gfp_mask = mapping_gfp_mask(mapping);
++	mapping_set_gfp_mask(mapping,
++			     lo->lo_file.old_gfp_mask & ~(__GFP_IO|__GFP_FS));
++
++	error = loop_match_parser(lo, &lo->lo_file);
+ 	if (error)
+-		goto out_putf;
+-	size = lo->lo_parser->size(lo, lo->lo_parser_priv);
++		goto out_putlf;
++	size = lo->lo_parser->size(lo, &lo->lo_file);
+ 
+ 	if ((loff_t)(sector_t)size != size) {
+ 		error = -EFBIG;
+@@ -943,13 +949,6 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	lo->ioctl = NULL;
+ 	lo->lo_sizelimit = 0;
+ 
+-	lo->lo_file.old_gfp_mask = mapping_gfp_mask(mapping);
+-	lo->lo_file.blocksize = blocksize;
+-	lo->lo_file.flags = lo_file_flags;
+-	lo->lo_file.file = file;
+-	mapping_set_gfp_mask(mapping,
+-			     lo->lo_file.old_gfp_mask & ~(__GFP_IO|__GFP_FS));
+-
+ 	bio_list_init(&lo->lo_bio_list);
+ 
+ 	/*
+@@ -985,20 +984,21 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ out_clr:
+ 	lo->lo_thread = NULL;
+ 	lo->lo_device = NULL;
+-	lo->lo_flags = 0;
+-	lo->lo_file.flags = 0;
+-	lo->lo_file.file = NULL;
+ 	set_capacity(lo->lo_disk, 0);
+ 	invalidate_bdev(bdev);
+ 	bd_set_size(bdev, 0);
+ 	kobject_uevent(&disk_to_dev(bdev->bd_disk)->kobj, KOBJ_CHANGE);
+-	mapping_set_gfp_mask(mapping, lo->lo_file.old_gfp_mask);
+ 	lo->lo_state = Lo_unbound;
+ out_putp:
+ 	loop_release_parser(lo);
+- out_putf:
++out_putlf:
++	lo->lo_flags = 0;
++	lo->lo_file.flags = 0;
++	lo->lo_file.file = NULL;
++	mapping_set_gfp_mask(mapping, lo->lo_file.old_gfp_mask);
++out_putf:
+ 	fput(file);
+- out:
++out:
+ 	/* This is safe: open() is still holding a reference. */
+ 	module_put(THIS_MODULE);
+ 	return error;
+@@ -1753,22 +1753,21 @@ static struct kobject *loop_probe(dev_t dev, int *part, void *data)
+ 	return kobj;
+ }
+ 
+-static void *raw_init(struct loop_device *lo, struct file *file)
++static int raw_init(struct loop_device *lo, struct lo_file *lo_file)
+ {
+-	return file;
++	return 0;
+ }
+ 
+-static void raw_release(struct loop_device *lo, void *priv)
++static void raw_release(struct loop_device *lo, struct lo_file *lo_file)
+ {
+ }
+ 
+-static loff_t raw_size(struct loop_device *lo, void *priv)
++static loff_t raw_size(struct loop_device *lo, struct lo_file *lo_file)
+ {
+-	struct file *filp = (struct file *) priv;
+-	return get_loop_size(lo, filp);
++	return get_loop_size(lo, lo_file->file);
+ }
+ 
+-static int raw_flush(struct loop_device *lo, void *priv)
++static int raw_flush(struct loop_device *lo, struct lo_file *lo_file)
+ {
+ 	return 0;
+ }
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index 526e16d..c2a2070 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -40,6 +40,7 @@ struct lo_file {
+ 	struct file *	file;
+ 	unsigned	blocksize;
+ 	gfp_t		old_gfp_mask;
++	void *		parser_priv;
+ };
+ 
+ struct loop_device {
+@@ -61,7 +62,6 @@ struct loop_device {
+ 	int		lo_encrypt_key_size;
+ 	struct loop_func_table *lo_encryption;
+ 	struct loop_parser *lo_parser;
+-	void           *lo_parser_priv;
+ 	__u32           lo_init[2];
+ 	uid_t		lo_key_owner;	/* Who set the key */
+ 	int		(*ioctl)(struct loop_device *, int cmd,
+@@ -166,7 +166,8 @@ int loop_register_transfer(struct loop_func_table *funcs);
+ int loop_unregister_transfer(int number); 
+ 
+ typedef struct bio_vec *(*loop_xform)(
+-		struct loop_device *lo, void *priv,
++		struct loop_device *lo,
++		struct lo_file *lo_file,
+ 		loff_t pos, loff_t *fpos,
+ 		struct bio_vec *in,
+ 		struct bio_vec *out,
+@@ -175,10 +176,10 @@ typedef struct bio_vec *(*loop_xform)(
+ /* Support for loadable parser modules */
+ struct loop_parser {
+ 	struct list_head list;
+-	void *(*init)(struct loop_device *lo, struct file *file);
+-	void (*release)(struct loop_device *lo, void *priv);
+-	int (*flush)(struct loop_device *lo, void *priv);
+-	loff_t (*size)(struct loop_device *lo, void *priv);
++	int (*init)(struct loop_device *lo, struct lo_file *lo_file);
++	void (*release)(struct loop_device *lo, struct lo_file *lo_file);
++	int (*flush)(struct loop_device *lo, struct lo_file *lo_file);
++	loff_t (*size)(struct loop_device *lo, struct lo_file *lo_file);
+ 	loop_xform transform;
+ 	struct module *owner;
+ };
+-- 
+1.7.0.4
+
