@@ -1,0 +1,20 @@
+Loop device parser support.
+===================================
+
+These are my work-in-progress patches for developing
+VHD/VMDK/qcow and other-virtual-disk support in loop device via
+the addition of loop parser support and parser implementations.
+
+The first parser will be for VHD, in the following order of
+implementation:
+1) Fixed-size VHDs.
+2) Dynamic VHDs.
+3) Differencing VHDs.
+
+VHD spec is of course at:
+http://www.microsoft.com/download/en/details.aspx?id=23850
+
+Contact Info
+============
+
+Andrei Warkentin (andrey.warkentin@gmail.com, andreiw@motorola.com)
