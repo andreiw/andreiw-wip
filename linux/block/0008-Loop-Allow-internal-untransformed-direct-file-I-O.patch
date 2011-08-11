@@ -1,7 +1,7 @@
 From d42cb3048b5c612bf1dcecd3f808e669be9863ca Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Thu, 11 Aug 2011 14:43:43 -0500
-Subject: [PATCH 8/9] Loop: Allow internal untransformed direct file I/O.
+Subject: [PATCH 08/11] Loop: Allow internal untransformed direct file I/O.
 
 Allow parser code to making direct file I/O using
 do_send and do_receive.

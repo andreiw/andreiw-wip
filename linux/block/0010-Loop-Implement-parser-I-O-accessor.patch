@@ -1,0 +1,72 @@
+From 520702ba98ceafd92ac5dc163b694e46ba5016da Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Thu, 11 Aug 2011 16:56:23 -0500
+Subject: [PATCH 10/11] Loop: Implement parser I/O accessor.
+
+Implement the direct I/O accessor used by parser code.
+
+Change-Id: I552eeebc2c818e821d8c4e34810922897ae0eaa0
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c |   45 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 45 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index 29e887c..5138d23 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -543,6 +543,51 @@ lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+ 	return ret;
+ }
+ 
++static int lo_kbuf_to_bio(struct bio *bio,
++			  u8 *kbuf,
++			  size_t len)
++{
++	unsigned int bv_len;
++	unsigned int bv_offset;
++
++	while (len) {
++		bv_offset = (uintptr_t) kbuf & PAGE_MASK;
++		bv_len = min(len, (unsigned int) PAGE_SIZE - bv_offset);
++		if (bv_len != bio_add_page(bio, virt_to_page(kbuf),
++					   bv_len, bv_offset))
++			return -EINVAL;
++		len -= bv_len;
++		kbuf += bv_len;
++	}
++	return 0;
++}
++
++int loop_parser_io(struct loop_device *lo,
++		   struct lo_file *lo_file,
++		   u8 *kbuf,
++		   size_t len,
++		   loff_t pos,
++		   int cmd)
++{
++	int ret;
++	unsigned nr_vecs = (len + PAGE_SIZE -1) >> PAGE_SHIFT;
++	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++
++	ret = lo_kbuf_to_bio(bio, (u8 *) kbuf, len);
++	if (ret)
++		goto out;
++
++	if (cmd == READ)
++		ret = lo_receive(lo, lo_file, bio, pos, true);
++	else
++		ret = lo_send(lo, lo_file, bio, pos, true);
++out:
++	bio_put(bio);
++	return ret;
++}
++
++EXPORT_SYMBOL(loop_parser_io);
++
+ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ {
+ 	int ret;
+-- 
+1.7.0.4
+

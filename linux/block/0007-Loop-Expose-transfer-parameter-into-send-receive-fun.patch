@@ -1,7 +1,7 @@
 From 0a2c985673170ecb563dcaa937ee5a80689b8767 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Thu, 11 Aug 2011 14:24:31 -0500
-Subject: [PATCH 7/9] Loop: Expose transfer parameter into send/receive funcs.
+Subject: [PATCH 07/11] Loop: Expose transfer parameter into send/receive funcs.
 
 Expose the transfer function as a parameter into
 do_lo_send/do_lo_receive, so the same code can be

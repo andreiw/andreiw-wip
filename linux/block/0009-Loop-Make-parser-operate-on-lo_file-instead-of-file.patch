@@ -1,7 +1,7 @@
 From 9261e92ce3a2dc4e70706c9044172cea0631b4f1 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Thu, 11 Aug 2011 14:59:33 -0500
-Subject: [PATCH 9/9] Loop: Make parser operate on lo_file instead of file.
+Subject: [PATCH 09/11] Loop: Make parser operate on lo_file instead of file.
 
 Parser private pointer is also located in lo_file.
 
