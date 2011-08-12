@@ -1,7 +1,7 @@
 From 49fce318b8cf3ed780fd8f5a6c667071e47d831d Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 10 Aug 2011 15:55:00 -0500
-Subject: [PATCH 03/11] Loop: Allow file I/O to kernel buffers.
+Subject: [PATCH 03/13] Loop: Allow file I/O to kernel buffers.
 
 flush_dcache_page cannot be called on slab pages.
 

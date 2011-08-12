@@ -1,7 +1,7 @@
 From 33db31fd59c285f7baadeef7791da99dbefdf773 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Tue, 2 Aug 2011 16:37:21 -0500
-Subject: [PATCH 02/11] Loop: Add disk-image parser support for lo.
+Subject: [PATCH 02/13] Loop: Add disk-image parser support for lo.
 
 This sets up for development of VHD and VMDK parsers.
 

@@ -1,0 +1,103 @@
+From d1d8bbc122594805a7f0e6b3cb7f674b80c31b99 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Fri, 12 Aug 2011 14:59:09 -0500
+Subject: [PATCH 12/13] Loop: Allow parser to notify loop if losetup should fail.
+
+This let's us deal with corrupt files, as you wouldn't
+want to allow raw access to them anyway.
+
+Also adds a 'name' field to lo_parser.
+
+Change-Id: I67402d9e79ec558ebe46dca79b715c36fa537a3c
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c |   19 ++++++++++++++-----
+ include/linux/loop.h |    8 ++++++++
+ 2 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index 4593df1..31d50e7 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -562,7 +562,7 @@ int loop_parser_io(struct loop_device *lo,
+ 		   int cmd)
+ {
+ 	int ret;
+-	unsigned nr_vecs = (len + PAGE_SIZE -1) >> PAGE_SHIFT;
++	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
+ 	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
+ 
+ 	ret = lo_kbuf_to_bio(bio, (u8 *) kbuf, len);
+@@ -810,15 +810,22 @@ static int loop_match_parser(struct loop_device *lo, struct lo_file *lo_file)
+ 		}
+ 
+ 		module_put(owner);
++
++		if (ret == -EPERM)
++			break;
+ 	}
+ 	mutex_unlock(&loop_parsers_mutex);
+ 
+-	/* raw_parser will always bind if no other parsers do. */
+-	if(!lo->lo_parser) {
++	/*
++	 * raw_parser will always bind if no other parsers do,
++	 * unless a parser noted that the file is supported, but
++	 * losetup should be denied.
++	 */
++	if(!lo->lo_parser && ret != -EPERM) {
+ 		lo->lo_parser = &raw_parser;
+ 		lo->lo_parser->init(lo, lo_file);
+ 	}
+-	return 0;
++	return ret;
+ }
+ 
+ static void loop_release_parser(struct loop_device *lo)
+@@ -1647,7 +1654,8 @@ MODULE_ALIAS_BLOCKDEV_MAJOR(LOOP_MAJOR);
+ 
+ int loop_register_parser(struct loop_parser *parser)
+ {
+-	if (!parser->init ||
++	if (!parser->name ||
++	    !parser->init ||
+ 	    !parser->release ||
+ 	    !parser->flush ||
+ 	    !parser->size ||
+@@ -1824,6 +1832,7 @@ static int raw_flush(struct loop_device *lo, struct lo_file *lo_file)
+ 
+ static struct loop_parser raw_parser =
+ {
++	.name = "raw",
+ 	.init = raw_init,
+ 	.release = raw_release,
+ 	.flush = raw_flush,
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index c2a2070..8f5a8af 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -176,6 +176,7 @@ typedef struct bio_vec *(*loop_xform)(
+ /* Support for loadable parser modules */
+ struct loop_parser {
+ 	struct list_head list;
++	const char *name;
+ 	int (*init)(struct loop_device *lo, struct lo_file *lo_file);
+ 	void (*release)(struct loop_device *lo, struct lo_file *lo_file);
+ 	int (*flush)(struct loop_device *lo, struct lo_file *lo_file);
+@@ -186,6 +187,13 @@ struct loop_parser {
+ 
+ int loop_register_parser(struct loop_parser *parser);
+ int loop_unregister_parser(struct loop_parser *parser);
++int loop_parser_io(struct loop_device *lo,
++		   struct lo_file *lo_file,
++		   void *kbuf,
++		   size_t len,
++		   loff_t pos,
++		   int cmd);
++
+ #endif
+ /*
+  * IOCTL commands --- we will commandeer 0x4C ('L')
+-- 
+1.7.0.4
+
