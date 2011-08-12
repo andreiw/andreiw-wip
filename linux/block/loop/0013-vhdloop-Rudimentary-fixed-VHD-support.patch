@@ -1,4 +1,4 @@
-From ce0cdec783b2f5361bf65c0f14ac6e53f04ea78c Mon Sep 17 00:00:00 2001
+From b2dc34fef7eb89bd4f84cabc2db3ca50beb1c42a Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Fri, 12 Aug 2011 15:00:46 -0500
 Subject: [PATCH 13/13] vhdloop: Rudimentary fixed VHD support.
@@ -8,10 +8,10 @@ Should do more sanity checking as per spec.
 Change-Id: I8c7af8d7300dfcf948756b16d966a535ff4b902a
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
- drivers/block/Kconfig   |    7 ++
+ drivers/block/Kconfig   |    7 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  244 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 252 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  340 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 348 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index aff5ac9..49f46eb 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..833833a
+index 0000000..b489107
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,340 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -131,21 +131,82 @@ index 0000000..833833a
 +struct vhd
 +{
 +
-+	/* Read from image. */
 +	struct vhd_footer footer_data;
 +
 +	/*
 +	 * Parsed from image. Crazy footer can be
-+	 * in last 511 bytes of file.
++	 * in last 511 bytes of file, so this points
++	 * somewhere into footer_data.
 +	 */
 +	struct vhd_footer *footer;
-+
-+	/* Backing file size. */
 +	loff_t file_size;
-+
-+	/* Virtual disk size. */
 +	loff_t size;
++	u32 type;
++	u32 features;
++	u32 version;
 +};
++
++static int vhd_chs(struct vhd *vhd)
++{
++	u64 temp;
++	u64 cyl_x_heads;
++	u64 sectors = vhd->size >> 9;
++	struct vhd_chs chs;
++
++	/*
++	 * Blame AndrewN for this one... All this logic is from
++	 * the VHD specification.
++	 */
++	if (sectors > 65535 * 16 * 255) {
++
++		/* ~127GiB */
++		sectors =  65535 * 16 * 255;
++	}
++	if (sectors >= 65535 * 16 * 63) {
++		chs.s = 255;
++		chs.h = 16;
++		cyl_x_heads = sectors;
++		do_div(cyl_x_heads, chs.s);
++	} else {
++		chs.s = 17;
++		cyl_x_heads = sectors;
++		do_div(cyl_x_heads, chs.s);
++		chs.h = (cyl_x_heads + 1023) / 1024;
++		if (chs.h < 4)
++			chs.h = 4;
++
++		if (cyl_x_heads >= (chs.h * 1024) || chs.h > 16) {
++			chs.s = 31;
++			chs.h = 16;
++			cyl_x_heads = sectors;
++			do_div(cyl_x_heads, chs.s);
++		}
++		if (cyl_x_heads >= (chs.h * 1024)) {
++			chs.s = 63;
++			chs.h = 16;
++			cyl_x_heads = sectors;
++			do_div(cyl_x_heads, chs.s);
++		}
++	}
++	temp = cyl_x_heads;
++	do_div(temp, chs.h);
++	chs.c = temp;
++
++	if (be16_to_cpu(vhd->footer->disk_geometry.c) != chs.c ||
++	    vhd->footer->disk_geometry.h != chs.h ||
++	    vhd->footer->disk_geometry.s != chs.s) {
++		return -EINVAL;
++	}
++
++	/*
++	 * At some point we'll have the ability to pass options
++	 * to the parser from losetup, and we can add the option
++	 * to clamp size to CHS-implied size, as you can have VHDs
++	 * whose size doesn't match CHS-implied size. This may be
++	 * seen in Hyper-V moving a VHD from SCSI to ATA.
++	 */
++	return 0;
++}
 +
 +static u32 vhd_checksum(uint8_t *data, off_t size)
 +{
@@ -156,7 +217,7 @@ index 0000000..833833a
 +	return ~csum;
 +}
 +
-+static bool vhd_footer_csum(struct vhd_footer *footer)
++static int vhd_footer_csum(struct vhd_footer *footer)
 +{
 +	u32 nsum;
 +	u32 csum = footer->checksum;
@@ -164,24 +225,71 @@ index 0000000..833833a
 +	nsum = vhd_checksum((u8 *) footer, sizeof(*footer));
 +	footer->checksum = csum;
 +	if (nsum != be32_to_cpu(csum)) {
-+		return false;
++		return -EINVAL;
 +	}
-+	return true;
++	return 0;
 +}
 +
 +static struct vhd_footer *vhd_check_footer(struct vhd_footer *footer)
 +{
 +	struct vhd_footer *f = footer;
-+	if (!vhd_footer_csum(f)) {
++	if (vhd_footer_csum(f)) {
 +
 +		/* Could be < VPC2004 version, with 511-byte header. */
 +		f = (struct vhd_footer *)((u8 *) footer + 1);
-+		if (!vhd_footer_csum(f)) {
++		if (vhd_footer_csum(f)) {
 +			return NULL;
 +		}
 +	}
 +
 +	return f;
++}
++
++static int vhd_verify(struct loop_device *lo, struct vhd *vhd)
++{
++	vhd->type = be32_to_cpu(vhd->footer->disk_type);
++	if (vhd->type != FOOTER_TYPE_FIXED) {
++		printk(KERN_ERR "%s: only fixed VHDs supported\n",
++			lo->lo_disk->disk_name);
++		return -EPERM;
++	}
++
++	vhd->features = be32_to_cpu(vhd->footer->features);
++	if (!(vhd->features & FOOTER_FEAT_RSVD)) {
++		printk(KERN_ERR "%s: corrupt (bad features 0x%x)\n",
++		       lo->lo_disk->disk_name,
++		       vhd->features);
++	}
++
++	vhd->version = be32_to_cpu(vhd->footer->file_format_ver);
++	if ((vhd->version & FOOTER_VMAJ_MASK) != FOOTER_VERSION_1) {
++		printk(KERN_ERR "%s: corrupt (bad version 0x%x)\n",
++		       lo->lo_disk->disk_name,
++		       vhd->version);
++		return -EPERM;
++	}
++
++	vhd->size = be64_to_cpu(vhd->footer->current_size);
++	if (vhd_chs(vhd)) {
++		printk(KERN_ERR "%s: corrupt (bad CHS data)\n",
++		       lo->lo_disk->disk_name);
++		return -EPERM;
++	}
++
++	if (be64_to_cpu(vhd->footer->data_offset) != FOOTER_DOFF_FIXED) {
++		printk(KERN_ERR "%s: corrupt (data_offset not fixed)\n",
++		       lo->lo_disk->disk_name);
++		return -EPERM;
++	}
++
++	if ((vhd->size + sizeof(struct vhd_footer) -
++	     ((ptrdiff_t) vhd->footer - (ptrdiff_t) &vhd->footer_data)) !=
++	    vhd->file_size) {
++		printk(KERN_ERR "%s: corrupt (wrong size %lld bytes)\n",
++		       lo->lo_disk->disk_name, vhd->size);
++		return -EPERM;
++	}
++	return 0;
 +}
 +
 +static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
@@ -205,24 +313,12 @@ index 0000000..833833a
 +	if (!vhd->footer)
 +		goto out;
 +
-+	if (be32_to_cpu(vhd->footer->disk_type) != FOOTER_TYPE_FIXED) {
-+		printk("%s: only fixed VHDs supported\n",
-+			lo->lo_disk->disk_name);
-+		ret = -EPERM;
++	ret = vhd_verify(lo, vhd);
++	if (ret)
 +		goto out;
-+	}
 +
-+	vhd->size = be64_to_cpu(vhd->footer->current_size);
-+	if ((vhd->size + sizeof(struct vhd_footer) -
-+	     ((ptrdiff_t) vhd->footer - (ptrdiff_t) &vhd->footer_data)) !=
-+	    vhd->file_size) {
-+		printk("%s: corrupt (wrong size %lld bytes)\n",
-+		       lo->lo_disk->disk_name, vhd->size);
-+		ret = -EPERM;
-+		goto out;
-+	}
-+
-+	printk("%s: fixed VHD %lld bytes\n", lo->lo_disk->disk_name, vhd->size);
++	printk(KERN_INFO "%s: fixed VHD %lld bytes\n",
++	       lo->lo_disk->disk_name, vhd->size);
 +	lo_file->parser_priv = vhd;
 +out:
 +	if (ret)
