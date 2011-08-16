@@ -1,0 +1,361 @@
+From c563d8d89768f51d8655939235223f72eee95c92 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Tue, 16 Aug 2011 16:24:06 -0500
+Subject: [PATCH 15/15] VHDLoop: Dynamic VHD groundwork.
+
+Verification of format and some basic init.
+Next is using a slab cache to manage block bitmaps.
+
+Change-Id: I3358a15dc16c6c9420654682b1b63b017ea93054
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/vhdloop.c |  240 ++++++++++++++++++++++++++++++++++++++++-------
+ 1 files changed, 207 insertions(+), 33 deletions(-)
+
+diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
+index c43c9b2..3d9362a 100644
+--- a/drivers/block/vhdloop.c
++++ b/drivers/block/vhdloop.c
+@@ -27,16 +27,20 @@ MODULE_LICENSE("GPL");
+ MODULE_DESCRIPTION("loop VHD parser");
+ MODULE_AUTHOR("Andrei Warkentin <andreiw@motorola.com>");
+ 
++#define COOKIE(x)           (*(uint64_t *) x)
++#define CXSPARSE_COOKIE     COOKIE("cxsparse")
+ #define FOOTER_FEAT_RSVD    (2)
+-#define FOOTER_VERSION_1    (0x00010000UL)
+-#define FOOTER_VMAJ_MASK    (0xFFFF0000UL)
+-#define FOOTER_VMIN_MASK    (0x0000FFFFUL)
++#define VHD_VERSION_1       (0x00010000UL)
++#define VHD_VMAJ_MASK       (0xFFFF0000UL)
++#define VHD_VMIN_MASK       (0x0000FFFFUL)
+ #define FOOTER_DOFF_FIXED   (0xFFFFFFFFFFFFFFFFULL)
+ #define DYN_DOFF_DYN        (0xFFFFFFFFFFFFFFFFULL)
+-#define FOOTER_CREATOR(x)   (*(u32 *) x)
+ #define FOOTER_TYPE_FIXED   (2)
+ #define FOOTER_TYPE_DYN     (3)
+ #define FOOTER_TYPE_DIFF    (4)
++#define SEC_SZ              (512)
++#define BAT_SZ(entries) round_up(sizeof(vhd_bate) * (entries), SEC_SZ)
++#define SECTOR_BMP_SZ(unit_sz) round_up((unit_sz) / SEC_SZ / CHAR_BIT, SEC_SZ)
+ 
+ /* All fields Big-Endian */
+ struct vhd_id
+@@ -76,10 +80,42 @@ struct vhd_footer
+ 	u8 reserved[427];
+ };
+ 
++/* All fields Big-Endian */
++struct vhd_ploc
++{
++	u32 code;
++	u32 sectors;
++	u32 length;
++	u32 reserved;
++	u64 offset;
++};
++
++/* All fields Big-Endian */
++struct vhd_dyn
++{
++	u64 cookie;
++	u64 data_offset;
++	u64 table_offset;
++	u32 header_version;
++	u32 max_tab_entries;
++	u32 block_size;
++	u32 checksum;
++	struct vhd_id parent;
++	u32 parent_time_stamp;
++	u32 reserved0;
++	u8 parent_utf16[512];
++	struct vhd_ploc pe[8];
++	u8 reserved1[256];
++};
++
++typedef u32 vhd_bate;
++
+ struct vhd
+ {
+ 
+ 	struct vhd_footer footer_data;
++	struct vhd_dyn    dyn;
++	struct vhd_footer mirror;
+ 
+ 	/*
+ 	 * Parsed from image. Crazy footer can be
+@@ -92,6 +128,14 @@ struct vhd
+ 	u32 type;
+ 	u32 features;
+ 	u32 version;
++
++	/*
++	 * Parsed from dynamic header.
++	 */
++	loff_t table_offset;
++	u32 bat_entries;
++	size_t block_unit;
++	vhd_bate *bat;
+ };
+ 
+ static int vhd_chs(struct vhd *vhd)
+@@ -177,6 +221,19 @@ static int vhd_footer_csum(struct vhd_footer *footer)
+ 	return 0;
+ }
+ 
++static int vhd_dyn_csum(struct vhd_dyn *dyn)
++{
++	u32 nsum;
++	u32 csum = dyn->checksum;
++	dyn->checksum = 0;
++	nsum = vhd_checksum((uint8_t *) dyn, sizeof(*dyn));
++	dyn->checksum = csum;
++	if (nsum != be32_to_cpu(csum))
++		return -EINVAL;
++
++	return 0;
++}
++
+ static struct vhd_footer *vhd_check_footer(struct vhd_footer *footer)
+ {
+ 	struct vhd_footer *f = footer;
+@@ -191,61 +248,161 @@ static struct vhd_footer *vhd_check_footer(struct vhd_footer *footer)
+ 	return f;
+ }
+ 
+-static int vhd_verify(struct loop_device *lo, struct vhd *vhd)
++static int vhd_verify_dyn(struct loop_device *lo,
++			  struct lo_file *lo_file,
++			  struct vhd *vhd)
+ {
+-	vhd->type = be32_to_cpu(vhd->footer->disk_type);
+-	if (vhd->type != FOOTER_TYPE_FIXED) {
+-		printk(KERN_ERR "%s: only fixed VHDs supported\n",
+-			lo->lo_disk->disk_name);
+-		return -EPERM;
++	int ret;
++	loff_t blocks;
++	u64 data_offset = be64_to_cpu(vhd->footer->data_offset);
++	if (data_offset > vhd->file_size ||
++	    data_offset + sizeof(vhd->dyn) > vhd->file_size)
++		return -EINVAL;
++
++	ret = loop_recv_buf(lo, lo_file, &vhd->mirror,
++			    sizeof(vhd->mirror),
++			    0,
++			    NULL);
++	if (ret)
++		return ret;
++
++	if (memcmp(vhd->footer, &vhd->mirror,
++		   sizeof(vhd->footer_data) -
++		   (vhd->footer - &vhd->footer_data))) {
++		printk(KERN_ERR "%s: corrupt (footer != mirror)\n",
++		       lo->lo_disk->disk_name);
++		return -EINVAL;
+ 	}
+ 
++	ret = loop_recv_buf(lo, lo_file, &vhd->dyn,
++			    sizeof(vhd->dyn),
++			    data_offset,
++			    NULL);
++	if (ret)
++		return ret;
++
++	if (vhd->dyn.cookie != CXSPARSE_COOKIE ||
++	    be64_to_cpu(vhd->dyn.data_offset) != DYN_DOFF_DYN ||
++	    vhd_dyn_csum(&vhd->dyn)) {
++		printk(KERN_ERR "%s: corrupt sparse header\n",
++		       lo->lo_disk->disk_name);
++		return -EINVAL;
++	}
++
++	vhd->table_offset = be32_to_cpu(vhd->dyn.table_offset);
++	vhd->bat_entries = be32_to_cpu(vhd->dyn.max_tab_entries);
++	vhd->block_unit = be32_to_cpu(vhd->dyn.block_size);
++	if (!vhd->block_unit ||
++	    (vhd->block_unit & (vhd->block_unit - 1))) {
++		printk(KERN_ERR "%s: invalid sparse block size %d\n",
++		       lo->lo_disk->disk_name, vhd->block_unit);
++		return -EINVAL;
++
++	}
++	blocks = vhd->size;
++	do_div(blocks, vhd->block_unit);
++	if (blocks != vhd->bat_entries) {
++		printk(KERN_ERR "%s: sparse blocks (%lld) don't match disk size (%lld)\n",
++		       lo->lo_disk->disk_name, blocks, vhd->bat_entries);
++		return -EINVAL;
++	}
++
++	if (vhd->table_offset > vhd->file_size ||
++	    vhd->table_offset + BAT_SZ(vhd->bat_entries) > vhd->file_size) {
++		printk(KERN_ERR "%s: sparse block table outside VHD\n",
++		       lo->lo_disk->disk_name);
++		return -EINVAL;
++	}
++
++	vhd->bat = kzalloc(BAT_SZ(vhd->bat_entries), GFP_KERNEL);
++	if (!vhd->bat)
++		return -ENOMEM;
++
++	ret = loop_recv_buf(lo, lo_file, vhd->bat,
++			    BAT_SZ(vhd->bat_entries),
++			    vhd->table_offset, NULL);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
++static int vhd_verify_fixed(struct loop_device *lo,
++			    struct lo_file *lo_file,
++			    struct vhd *vhd)
++{
++	if (be64_to_cpu(vhd->footer->data_offset) != FOOTER_DOFF_FIXED) {
++		printk(KERN_ERR "%s: corrupt (data_offset not fixed)\n",
++		       lo->lo_disk->disk_name);
++		return -EINVAL;
++	}
++
++	if (vhd->size + (sizeof(struct vhd_footer) -
++			 (vhd->footer - &vhd->footer_data)) !=
++	    vhd->file_size) {
++		printk(KERN_ERR "%s: corrupt (wrong size %lld bytes)\n",
++		       lo->lo_disk->disk_name, vhd->size);
++		return -EINVAL;
++	}
++	return 0;
++}
++
++static int vhd_verify(struct loop_device *lo,
++		      struct lo_file *lo_file,
++		      struct vhd *vhd)
++{
++	int ret;
++
+ 	vhd->features = be32_to_cpu(vhd->footer->features);
+ 	if (!(vhd->features & FOOTER_FEAT_RSVD)) {
+ 		printk(KERN_ERR "%s: corrupt (bad features 0x%x)\n",
+ 		       lo->lo_disk->disk_name,
+ 		       vhd->features);
+-		return -EPERM;
++		return -EINVAL;
+ 	}
+ 
+ 	vhd->version = be32_to_cpu(vhd->footer->file_format_ver);
+-	if ((vhd->version & FOOTER_VMAJ_MASK) != FOOTER_VERSION_1) {
++	if ((vhd->version & VHD_VMAJ_MASK) != VHD_VERSION_1) {
+ 		printk(KERN_ERR "%s: corrupt (bad version 0x%x)\n",
+ 		       lo->lo_disk->disk_name,
+ 		       vhd->version);
+-		return -EPERM;
++		return -EINVAL;
+ 	}
+ 
+ 	vhd->size = be64_to_cpu(vhd->footer->current_size);
+-	if (vhd_chs(vhd)) {
++	vhd->type = be32_to_cpu(vhd->footer->disk_type);
++	ret = vhd_chs(vhd);
++	if (ret) {
+ 		printk(KERN_ERR "%s: corrupt (bad CHS data)\n",
+ 		       lo->lo_disk->disk_name);
+-		return -EPERM;
++		return ret;
+ 	}
+ 
+-	if (be64_to_cpu(vhd->footer->data_offset) != FOOTER_DOFF_FIXED) {
+-		printk(KERN_ERR "%s: corrupt (data_offset not fixed)\n",
++	if (vhd->type == FOOTER_TYPE_FIXED) {
++		ret = vhd_verify_fixed(lo, lo_file, vhd);
++		if (ret)
++			return ret;
++	} else if (vhd->type == FOOTER_TYPE_DYN) {
++		ret = vhd_verify_dyn(lo, lo_file, vhd);
++		if (ret)
++			return ret;
++	} else {
++		printk(KERN_ERR "%s: only fixed and dynamic VHDs supported\n",
+ 		       lo->lo_disk->disk_name);
+-		return -EPERM;
++	       return -EINVAL;
+ 	}
+ 
+-	if ((vhd->size + sizeof(struct vhd_footer) -
+-	     ((ptrdiff_t) vhd->footer - (ptrdiff_t) &vhd->footer_data)) !=
+-	    vhd->file_size) {
+-		printk(KERN_ERR "%s: corrupt (wrong size %lld bytes)\n",
+-		       lo->lo_disk->disk_name, vhd->size);
+-		return -EPERM;
+-	}
+-	return 0;
++	return ret;
+ }
+ 
+ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ {
+ 	int ret;
+ 	struct vhd *vhd;
++	BUILD_BUG_ON(sizeof(struct vhd_dyn) != 1024);
+ 	BUILD_BUG_ON(sizeof(struct vhd_footer) != 512);
+ 
+-	vhd = kmalloc(sizeof(struct vhd), GFP_KERNEL);
++	vhd = kzalloc(sizeof(struct vhd), GFP_KERNEL);
+ 	if (!vhd)
+ 		return -ENOMEM;
+ 
+@@ -261,14 +418,21 @@ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ 	if (!vhd->footer)
+ 		goto out;
+ 
+-	ret = vhd_verify(lo, vhd);
+-	if (ret)
++	ret = vhd_verify(lo, lo_file, vhd);
++	if (ret) {
++		/* Invalid format, ensure other parsers don't bind. */
++		ret = -EPERM;
+ 		goto out;
++	}
+ 
+-	printk(KERN_INFO "%s: fixed VHD %lld bytes\n",
+-	       lo->lo_disk->disk_name, vhd->size);
++	printk(KERN_INFO "%s: %s VHD %lld bytes\n",
++	       lo->lo_disk->disk_name,
++	       vhd->type == FOOTER_TYPE_DYN ? "dynamic" : "fixed",
++	       vhd->size);
+ 	lo_file->parser_priv = vhd;
+ out:
++	if (vhd->bat)
++		kfree(vhd->bat);
+ 	if (ret)
+ 		kfree(vhd);
+ 	return ret;
+@@ -296,13 +460,23 @@ static int vhd_sync(struct loop_device *lo, struct lo_file *lo_file,
+ int vhd_read(struct loop_device *lo, struct lo_file *lo_file,
+ 	     struct bio *bio, loff_t pos)
+ {
+-	return loop_recv(lo, lo_file, bio, pos, NULL);
++	struct vhd *vhd = lo_file->parser_priv;
++
++	if (vhd->type == FOOTER_TYPE_FIXED)
++		return loop_recv(lo, lo_file, bio, pos, NULL);
++
++	return -EIO;
+ }
+ 
+ int vhd_write(struct loop_device *lo, struct lo_file *lo_file,
+ 	      struct bio *bio, loff_t pos)
+ {
+-	return loop_send(lo, lo_file, bio, pos, NULL);
++	struct vhd *vhd = lo_file->parser_priv;
++	if (vhd->type == FOOTER_TYPE_FIXED)
++		return loop_send(lo, lo_file, bio, pos, NULL);
++
++	/* Don't do writes to sparse files yet. */
++	return -EIO;
+ }
+ 
+ static struct loop_parser vhd_parser =
+-- 
+1.7.0.4
+

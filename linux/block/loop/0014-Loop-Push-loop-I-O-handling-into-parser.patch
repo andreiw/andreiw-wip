@@ -1,7 +1,7 @@
 From dbd5fc315e6a42174d611aeb5399bd7639a6b743 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Tue, 16 Aug 2011 12:05:07 -0500
-Subject: [PATCH 14/14] Loop: Push loop I/O handling into parser.
+Subject: [PATCH 14/15] Loop: Push loop I/O handling into parser.
 
 This refactors the loop I/O code, such that the actual
 read/writes are handled by parser code, which then

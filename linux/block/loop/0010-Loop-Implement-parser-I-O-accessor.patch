@@ -1,7 +1,7 @@
 From caf8133d1e4a66d42eacf96a5577c290e4f106e0 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Thu, 11 Aug 2011 16:56:23 -0500
-Subject: [PATCH 10/14] Loop: Implement parser I/O accessor.
+Subject: [PATCH 10/15] Loop: Implement parser I/O accessor.
 
 Implement the direct I/O accessor used by parser code.
 
