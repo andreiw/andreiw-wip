@@ -1,0 +1,528 @@
+From dbd5fc315e6a42174d611aeb5399bd7639a6b743 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Tue, 16 Aug 2011 12:05:07 -0500
+Subject: [PATCH 14/14] Loop: Push loop I/O handling into parser.
+
+This refactors the loop I/O code, such that the actual
+read/writes are handled by parser code, which then
+does direct file I/O as necessary.
+
+I'm dumping the old parser->transform() business as
+it's inflexible and not generic enough to handle
+sparse and compressed formats.
+
+Change-Id: I09feb54fa205ebf3bc47e6854eca977e0d3da892
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c    |  210 ++++++++++++++++++++++------------------------
+ drivers/block/vhdloop.c |   45 +++++------
+ include/linux/loop.h    |   44 ++++++----
+ 3 files changed, 148 insertions(+), 151 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index 31d50e7..60c391c 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -87,29 +87,6 @@ static int part_shift;
+ static struct loop_parser raw_parser;
+ 
+ /*
+- * This is the almost do-nothing transform for regular loopback
+- * images and direct access to backing file from parsers. The
+- * backing file store linearly maps block to file position, with
+- * an offset supported.
+- */
+-static struct bio_vec *transform_none(struct loop_device *lo,
+-				      struct lo_file *unused,
+-				      loff_t pos, loff_t *fpos,
+-				      struct bio_vec *in,
+-				      struct bio_vec *out,
+-				      struct bio_vec *rem)
+-{
+-	*fpos = pos + lo->lo_offset;
+-
+-	/* Ensures "remainder" bvec is never examined in
+-	   lo_send and lo_receive. */
+-	rem->bv_len = 0;
+-
+-	/* No need to split bvec as data is always contiguous. */
+-	return in;
+-}
+-
+-/*
+  * Transfer functions
+  */
+ static int transfer_none(struct loop_device *lo, int cmd,
+@@ -346,19 +323,17 @@ static int do_lo_send_write(struct loop_device *lo,
+ 	return ret;
+ }
+ 
+-static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
+-		   struct bio *bio, loff_t pos, bool direct)
++int loop_send(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos, loop_xfer transfer)
+ {
+ 	int (*do_lo_send)(struct loop_device *, struct lo_file *, loop_xfer,
+ 			  struct bio_vec *, loff_t, struct page *page);
+-	loff_t fpos;
+-	struct bio_vec *bvec, *vec, ovec, rvec;
++	struct bio_vec *bvec;
+ 	struct page *page = NULL;
+ 	int i, ret = 0;
+-	loop_xform transform = direct ? transform_none :
+-		lo->lo_parser->transform;
+-	loop_xfer transfer = direct ? transfer_none :
+-		lo->transfer;
++
++	if (!transfer)
++		transfer = transfer_none;
+ 
+ 	do_lo_send = do_lo_send_aops;
+ 	if (!(lo_file->flags & LO_FILE_FLAGS_USE_AOPS)) {
+@@ -372,27 +347,10 @@ static int lo_send(struct loop_device *lo, struct lo_file *lo_file,
+ 		}
+ 	}
+ 	bio_for_each_segment(bvec, bio, i) {
+-		vec = bvec;
+-
+-		do {
+-			vec = transform(lo, &lo->lo_file,
+-					pos, &fpos,
+-					vec, &ovec, &rvec);
+-			if (IS_ERR(vec)) {
+-				ret = PTR_ERR(vec);
+-				break;
+-			}
+-
+-			ret = do_lo_send(lo, lo_file, transfer, vec, fpos, page);
+-			if (ret < 0)
+-				break;
+-
+-			pos += vec->bv_len;
+-			vec = &rvec;
+-		} while (vec->bv_len != 0);
+-
++		ret = do_lo_send(lo, lo_file, transfer, bvec, pos, page);
+ 		if (ret < 0)
+ 			break;
++		pos += bvec->bv_len;
+ 	}
+ 	if (page) {
+ 		kunmap(page);
+@@ -406,6 +364,8 @@ fail:
+ 	goto out;
+ }
+ 
++EXPORT_SYMBOL(loop_send);
++
+ struct lo_read_data {
+ 	struct loop_device *lo;
+ 	loop_xfer transfer;
+@@ -487,44 +447,26 @@ do_lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+ 	return 0;
+ }
+ 
+-static int
+-lo_receive(struct loop_device *lo, struct lo_file *lo_file,
+-	   struct bio *bio, loff_t pos, bool direct)
++int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos, loop_xfer transfer)
+ {
+-	loff_t fpos;
+-	struct bio_vec *bvec, *vec, ovec, rvec;
+-	loop_xform transform = direct ? transform_none :
+-		lo->lo_parser->transform;
+-	loop_xfer transfer = direct ? transfer_none :
+-		lo->transfer;
+-
++	struct bio_vec *bvec;
+ 	int i, ret = 0;
+ 
+-	bio_for_each_segment(bvec, bio, i) {
+-		vec = bvec;
+-		do {
+-			vec = transform(lo, &lo->lo_file,
+-					pos, &fpos,
+-					vec, &ovec, &rvec);
+-			if (IS_ERR(vec)) {
+-				ret = PTR_ERR(vec);
+-				break;
+-			}
+-
+-			ret = do_lo_receive(lo, lo_file, transfer, vec, fpos);
+-			if (ret < 0)
+-				break;
+-
+-			pos += vec->bv_len;
+-			vec = &rvec;
+-		} while (vec->bv_len != 0);
++	if (!transfer)
++		transfer = transfer_none;
+ 
++	bio_for_each_segment(bvec, bio, i) {
++		ret = do_lo_receive(lo, lo_file, transfer, bvec, pos);
+ 		if (ret < 0)
+ 			break;
++		pos += bvec->bv_len;
+ 	}
+ 	return ret;
+ }
+ 
++EXPORT_SYMBOL(loop_recv);
++
+ static int lo_kbuf_to_bio(struct bio *bio,
+ 			  u8 *kbuf,
+ 			  size_t len)
+@@ -554,12 +496,12 @@ static int lo_kbuf_to_bio(struct bio *bio,
+ 	return 0;
+ }
+ 
+-int loop_parser_io(struct loop_device *lo,
+-		   struct lo_file *lo_file,
+-		   void *kbuf,
+-		   size_t len,
+-		   loff_t pos,
+-		   int cmd)
++int loop_send_buf(struct loop_device *lo,
++		  struct lo_file *lo_file,
++		  void *kbuf,
++		  size_t len,
++		  loff_t pos,
++		  loop_xfer transfer)
+ {
+ 	int ret;
+ 	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
+@@ -569,16 +511,63 @@ int loop_parser_io(struct loop_device *lo,
+ 	if (ret)
+ 		goto out;
+ 
+-	if (cmd == READ)
+-		ret = lo_receive(lo, lo_file, bio, pos, true);
+-	else
+-		ret = lo_send(lo, lo_file, bio, pos, true);
++	ret = loop_send(lo, lo_file, bio, pos, transfer);
+ out:
+ 	bio_put(bio);
+ 	return ret;
+ }
+ 
+-EXPORT_SYMBOL(loop_parser_io);
++EXPORT_SYMBOL(loop_send_buf);
++
++int loop_recv_buf(struct loop_device *lo,
++		  struct lo_file *lo_file,
++		  void *kbuf,
++		  size_t len,
++		  loff_t pos,
++		  loop_xfer transfer)
++{
++	int ret;
++	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++
++	ret = lo_kbuf_to_bio(bio, (u8 *) kbuf, len);
++	if (ret)
++		goto out;
++
++	ret = loop_recv(lo, lo_file, bio, pos, transfer);
++out:
++	bio_put(bio);
++	return ret;
++}
++
++EXPORT_SYMBOL(loop_recv_buf);
++
++int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
++	      unsigned long reqf)
++{
++	int ret;
++	struct file *file = lo->lo_file.file;
++	if (reqf & REQ_HARDBARRIER) {
++		if (unlikely(!file->f_op->fsync)) {
++			ret = -EOPNOTSUPP;
++			goto out;
++		}
++
++		ret = vfs_fsync(file, 0);
++		if (unlikely(ret)) {
++			ret = -EIO;
++			goto out;
++		}
++	} else {
++		ret = vfs_fsync(file, 0);
++		if (unlikely(ret))
++			ret = -EIO;
++	}
++out:
++	return ret;
++}
++
++EXPORT_SYMBOL(loop_sync);
+ 
+ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ {
+@@ -589,36 +578,28 @@ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ 
+ 	if (bio_rw(bio) == WRITE) {
+ 		bool barrier = !!(bio->bi_rw & REQ_HARDBARRIER);
+-		struct file *file = lo->lo_file.file;
+ 
+ 		if (barrier) {
+-			if (unlikely(!file->f_op->fsync)) {
+-				ret = -EOPNOTSUPP;
+-				goto out;
+-			}
+-
+-			ret = vfs_fsync(file, 0);
+-			if (unlikely(ret)) {
+-				ret = -EIO;
++			ret = lo->lo_parser->sync(lo, &lo->lo_file,
++						  REQ_HARDBARRIER);
++			if (unlikely(ret))
+ 				goto out;
+-			}
+ 		}
+ 
+-		ret = lo_send(lo, &lo->lo_file, bio, pos, false);
++		ret = lo->lo_parser->write(lo, &lo->lo_file, bio, pos);
+ 
+-		ret = lo->lo_parser->flush(lo, &lo->lo_file);
+ 		if (unlikely(ret)) {
+ 			ret = -EIO;
+ 			goto out;
+ 		}
+ 
+ 		if (barrier && !ret) {
+-			ret = vfs_fsync(file, 0);
++			ret = lo->lo_parser->sync(lo, &lo->lo_file, 0);
+ 			if (unlikely(ret))
+-				ret = -EIO;
++				goto out;
+ 		}
+ 	} else
+-		ret = lo_receive(lo, &lo->lo_file, bio, pos, false);
++		ret = lo->lo_parser->read(lo, &lo->lo_file, bio, pos);
+ 
+ out:
+ 	return ret;
+@@ -1657,9 +1638,10 @@ int loop_register_parser(struct loop_parser *parser)
+ 	if (!parser->name ||
+ 	    !parser->init ||
+ 	    !parser->release ||
+-	    !parser->flush ||
++	    !parser->sync ||
+ 	    !parser->size ||
+-	    !parser->transform)
++	    !parser->read ||
++	    !parser->write)
+ 		return -EINVAL;
+ 
+ 	mutex_lock(&loop_parsers_mutex);
+@@ -1825,9 +1807,16 @@ static loff_t raw_size(struct loop_device *lo, struct lo_file *lo_file)
+ 	return size >> 9;
+ }
+ 
+-static int raw_flush(struct loop_device *lo, struct lo_file *lo_file)
++int raw_read(struct loop_device *lo, struct lo_file *lo_file,
++	     struct bio *bio, loff_t pos)
+ {
+-	return 0;
++	return loop_recv(lo, lo_file, bio, pos + lo->lo_offset, lo->transfer);
++}
++
++int raw_write(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos)
++{
++	return loop_send(lo, lo_file, bio, pos + lo->lo_offset, lo->transfer);
+ }
+ 
+ static struct loop_parser raw_parser =
+@@ -1835,9 +1824,10 @@ static struct loop_parser raw_parser =
+ 	.name = "raw",
+ 	.init = raw_init,
+ 	.release = raw_release,
+-	.flush = raw_flush,
++	.sync = loop_sync,
+ 	.size = raw_size,
+-	.transform = transform_none,
++	.read = raw_read,
++	.write = raw_write,
+ 	.owner = THIS_MODULE
+ };
+ 
+diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
+index b489107..c43c9b2 100644
+--- a/drivers/block/vhdloop.c
++++ b/drivers/block/vhdloop.c
+@@ -172,9 +172,8 @@ static int vhd_footer_csum(struct vhd_footer *footer)
+ 	footer->checksum = 0;
+ 	nsum = vhd_checksum((u8 *) footer, sizeof(*footer));
+ 	footer->checksum = csum;
+-	if (nsum != be32_to_cpu(csum)) {
++	if (nsum != be32_to_cpu(csum))
+ 		return -EINVAL;
+-	}
+ 	return 0;
+ }
+ 
+@@ -185,9 +184,8 @@ static struct vhd_footer *vhd_check_footer(struct vhd_footer *footer)
+ 
+ 		/* Could be < VPC2004 version, with 511-byte header. */
+ 		f = (struct vhd_footer *)((u8 *) footer + 1);
+-		if (vhd_footer_csum(f)) {
++		if (vhd_footer_csum(f))
+ 			return NULL;
+-		}
+ 	}
+ 
+ 	return f;
+@@ -207,6 +205,7 @@ static int vhd_verify(struct loop_device *lo, struct vhd *vhd)
+ 		printk(KERN_ERR "%s: corrupt (bad features 0x%x)\n",
+ 		       lo->lo_disk->disk_name,
+ 		       vhd->features);
++		return -EPERM;
+ 	}
+ 
+ 	vhd->version = be32_to_cpu(vhd->footer->file_format_ver);
+@@ -251,9 +250,10 @@ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ 		return -ENOMEM;
+ 
+ 	vhd->file_size = i_size_read(lo_file->file->f_mapping->host);
+-	ret = loop_parser_io(lo, lo_file, &vhd->footer_data,
+-			     sizeof(vhd->footer_data),
+-			     vhd->file_size - sizeof(vhd->footer_data), READ);
++	ret = loop_recv_buf(lo, lo_file, &vhd->footer_data,
++			    sizeof(vhd->footer_data),
++			    vhd->file_size - sizeof(vhd->footer_data),
++			    NULL);
+ 	if (ret)
+ 		goto out;
+ 
+@@ -287,26 +287,22 @@ static loff_t vhd_size(struct loop_device *lo, struct lo_file *lo_file)
+ 	return vhd->size >> 9;
+ }
+ 
+-static int vhd_flush(struct loop_device *lo, struct lo_file *lo_file)
++static int vhd_sync(struct loop_device *lo, struct lo_file *lo_file,
++		    unsigned long reqf)
+ {
+-	return 0;
++	return loop_sync(lo, lo_file, reqf);
+ }
+ 
+-static struct bio_vec *vhd_transform(struct loop_device *lo,
+-				     struct lo_file *lo_file,
+-				     loff_t pos, loff_t *fpos,
+-				     struct bio_vec *in,
+-				     struct bio_vec *out,
+-				     struct bio_vec *rem)
++int vhd_read(struct loop_device *lo, struct lo_file *lo_file,
++	     struct bio *bio, loff_t pos)
+ {
+-	*fpos = pos;
+-
+-	/* Ensures "remainder" bvec is never examined in
+-	   lo_send and lo_receive. */
+-	rem->bv_len = 0;
++	return loop_recv(lo, lo_file, bio, pos, NULL);
++}
+ 
+-	/* No need to split bvec as data is always contiguous. */
+-	return in;
++int vhd_write(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos)
++{
++	return loop_send(lo, lo_file, bio, pos, NULL);
+ }
+ 
+ static struct loop_parser vhd_parser =
+@@ -314,9 +310,10 @@ static struct loop_parser vhd_parser =
+ 	.name = "vhd",
+ 	.init = vhd_init,
+ 	.release = vhd_release,
+-	.flush = vhd_flush,
++	.sync = vhd_sync,
+ 	.size = vhd_size,
+-	.transform = vhd_transform,
++	.read = vhd_read,
++	.write = vhd_write,
+ 	.owner = THIS_MODULE
+ };
+ 
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index 8f5a8af..f17130f 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -52,6 +52,8 @@ struct loop_device {
+ 	loff_t		lo_sizelimit;
+ 
+ 	int		lo_flags;
++
++	/* TBD: Push crypto specifics into raw parser. */
+ 	int		(*transfer)(struct loop_device *, int cmd,
+ 				    struct page *raw_page, unsigned raw_off,
+ 				    struct page *loop_page, unsigned loop_off,
+@@ -165,35 +167,43 @@ struct loop_func_table {
+ int loop_register_transfer(struct loop_func_table *funcs);
+ int loop_unregister_transfer(int number); 
+ 
+-typedef struct bio_vec *(*loop_xform)(
+-		struct loop_device *lo,
+-		struct lo_file *lo_file,
+-		loff_t pos, loff_t *fpos,
+-		struct bio_vec *in,
+-		struct bio_vec *out,
+-		struct bio_vec *rem);
+-
+ /* Support for loadable parser modules */
+ struct loop_parser {
+ 	struct list_head list;
+ 	const char *name;
+ 	int (*init)(struct loop_device *lo, struct lo_file *lo_file);
+ 	void (*release)(struct loop_device *lo, struct lo_file *lo_file);
+-	int (*flush)(struct loop_device *lo, struct lo_file *lo_file);
++	int (*sync)(struct loop_device *lo, struct lo_file *lo_file,
++		    unsigned long reqf);
+ 	loff_t (*size)(struct loop_device *lo, struct lo_file *lo_file);
+-	loop_xform transform;
++	int (*write)(struct loop_device *lo, struct lo_file *lo_file,
++		     struct bio *bio, loff_t pos);
++	int (*read)(struct loop_device *lo, struct lo_file *lo_file,
++		    struct bio *bio, loff_t pos);
+ 	struct module *owner;
+ };
+ 
++/* Interface between loop and loop parser modules. */
+ int loop_register_parser(struct loop_parser *parser);
+ int loop_unregister_parser(struct loop_parser *parser);
+-int loop_parser_io(struct loop_device *lo,
+-		   struct lo_file *lo_file,
+-		   void *kbuf,
+-		   size_t len,
+-		   loff_t pos,
+-		   int cmd);
+-
++int loop_send(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos, loop_xfer transfer);
++int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos, loop_xfer transfer);
++int loop_send_buf(struct loop_device *lo,
++		  struct lo_file *lo_file,
++		  void *kbuf,
++		  size_t len,
++		  loff_t pos,
++		  loop_xfer transfer);
++int loop_recv_buf(struct loop_device *lo,
++		  struct lo_file *lo_file,
++		  void *kbuf,
++		  size_t len,
++		  loff_t pos,
++		  loop_xfer transfer);
++int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
++	      unsigned long reqf);
+ #endif
+ /*
+  * IOCTL commands --- we will commandeer 0x4C ('L')
+-- 
+1.7.0.4
+

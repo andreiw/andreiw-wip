@@ -1,7 +1,7 @@
 From 529ca27c4c30916d388cb0bee5e6267a5bceaf52 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 10 Aug 2011 16:01:28 -0500
-Subject: [PATCH 05/13] Loop: Cleanup parser matching logic.
+Subject: [PATCH 05/14] Loop: Cleanup parser matching logic.
 
 No need to play with registering/unregistering raw parser.
 

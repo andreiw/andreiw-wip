@@ -1,7 +1,7 @@
 From 2dcc532d7e4b734ceeadc16e35809dceac6b7c24 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 10 Aug 2011 15:51:50 -0500
-Subject: [PATCH 04/13] Loop: Break out backing-file specifics away from loop device.
+Subject: [PATCH 04/14] Loop: Break out backing-file specifics away from loop device.
 
 This is in order to facilitate loop parser changes.
 

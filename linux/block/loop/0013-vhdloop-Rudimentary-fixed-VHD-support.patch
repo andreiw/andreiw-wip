@@ -1,7 +1,7 @@
 From b2dc34fef7eb89bd4f84cabc2db3ca50beb1c42a Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Fri, 12 Aug 2011 15:00:46 -0500
-Subject: [PATCH 13/13] vhdloop: Rudimentary fixed VHD support.
+Subject: [PATCH 13/14] vhdloop: Rudimentary fixed VHD support.
 
 Should do more sanity checking as per spec.
 
