@@ -1,0 +1,604 @@
+From e38619730ff317437a65b98fec3e034c2894ce71 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Fri, 19 Aug 2011 17:01:50 -0500
+Subject: [PATCH 16/16] Loop/VHDLoop: Cleanup loop and implement dynamic VHD support.
+
+Loop: Remove kbuf accessors (VHDLoop needs page accessors as well).
+VHDLoop: Implement RO support for dynamic VHD.
+
+Change-Id: Idbda4a448dfae84b649ff6692d7df27c2d8783e0
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/loop.c    |   82 +------------
+ drivers/block/vhdloop.c |  309 ++++++++++++++++++++++++++++++++++++++++++----
+ include/linux/loop.h    |   12 --
+ 3 files changed, 286 insertions(+), 117 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index 60c391c..b36d390 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -82,7 +82,7 @@ static DEFINE_MUTEX(loop_devices_mutex);
+ static LIST_HEAD(loop_parsers);
+ static DEFINE_MUTEX(loop_parsers_mutex);
+ 
+-static int max_part;
++static int max_part = 5;
+ static int part_shift;
+ static struct loop_parser raw_parser;
+ 
+@@ -467,81 +467,6 @@ int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
+ 
+ EXPORT_SYMBOL(loop_recv);
+ 
+-static int lo_kbuf_to_bio(struct bio *bio,
+-			  u8 *kbuf,
+-			  size_t len)
+-{
+-	unsigned int bv_len;
+-	unsigned int bv_offset;
+-	struct bio_vec *bvec;
+-
+-	/* Fake a BIO containing bvec's describing a physically
+-	 * contiguous kernel buffer. bio_add_page is too smart
+-	 *  and relies on a present rq. In our case, we just want
+-	 *  to use the same file I/O logic, which just happens to
+-	 *  use BIO. It might be nicer to redo everything to use
+-	 *  sg's and convert BIO nvecs to sg inside do_bio_filebacked.
+-	 */
+-	while (len) {
+-		bv_offset = ((uintptr_t) kbuf) & ~PAGE_MASK;
+-		bv_len = min(len, (unsigned int) PAGE_SIZE - bv_offset);
+-		bvec = &bio->bi_io_vec[bio->bi_vcnt];
+-		bvec->bv_page = virt_to_page(kbuf);
+-		bvec->bv_len = bv_len;
+-		bvec->bv_offset = bv_offset;
+-		bio->bi_vcnt++;
+-		len -= bv_len;
+-		kbuf += bv_len;
+-	}
+-	return 0;
+-}
+-
+-int loop_send_buf(struct loop_device *lo,
+-		  struct lo_file *lo_file,
+-		  void *kbuf,
+-		  size_t len,
+-		  loff_t pos,
+-		  loop_xfer transfer)
+-{
+-	int ret;
+-	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
+-	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
+-
+-	ret = lo_kbuf_to_bio(bio, (u8 *) kbuf, len);
+-	if (ret)
+-		goto out;
+-
+-	ret = loop_send(lo, lo_file, bio, pos, transfer);
+-out:
+-	bio_put(bio);
+-	return ret;
+-}
+-
+-EXPORT_SYMBOL(loop_send_buf);
+-
+-int loop_recv_buf(struct loop_device *lo,
+-		  struct lo_file *lo_file,
+-		  void *kbuf,
+-		  size_t len,
+-		  loff_t pos,
+-		  loop_xfer transfer)
+-{
+-	int ret;
+-	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
+-	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
+-
+-	ret = lo_kbuf_to_bio(bio, (u8 *) kbuf, len);
+-	if (ret)
+-		goto out;
+-
+-	ret = loop_recv(lo, lo_file, bio, pos, transfer);
+-out:
+-	bio_put(bio);
+-	return ret;
+-}
+-
+-EXPORT_SYMBOL(loop_recv_buf);
+-
+ int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
+ 	      unsigned long reqf)
+ {
+@@ -805,6 +730,7 @@ static int loop_match_parser(struct loop_device *lo, struct lo_file *lo_file)
+ 	if(!lo->lo_parser && ret != -EPERM) {
+ 		lo->lo_parser = &raw_parser;
+ 		lo->lo_parser->init(lo, lo_file);
++		ret = 0;
+ 	}
+ 	return ret;
+ }
+@@ -1807,13 +1733,13 @@ static loff_t raw_size(struct loop_device *lo, struct lo_file *lo_file)
+ 	return size >> 9;
+ }
+ 
+-int raw_read(struct loop_device *lo, struct lo_file *lo_file,
++static int raw_read(struct loop_device *lo, struct lo_file *lo_file,
+ 	     struct bio *bio, loff_t pos)
+ {
+ 	return loop_recv(lo, lo_file, bio, pos + lo->lo_offset, lo->transfer);
+ }
+ 
+-int raw_write(struct loop_device *lo, struct lo_file *lo_file,
++static int raw_write(struct loop_device *lo, struct lo_file *lo_file,
+ 	      struct bio *bio, loff_t pos)
+ {
+ 	return loop_send(lo, lo_file, bio, pos + lo->lo_offset, lo->transfer);
+diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
+index 3d9362a..a85d1a2 100644
+--- a/drivers/block/vhdloop.c
++++ b/drivers/block/vhdloop.c
+@@ -38,9 +38,12 @@ MODULE_AUTHOR("Andrei Warkentin <andreiw@motorola.com>");
+ #define FOOTER_TYPE_FIXED   (2)
+ #define FOOTER_TYPE_DYN     (3)
+ #define FOOTER_TYPE_DIFF    (4)
+-#define SEC_SZ              (512)
+-#define BAT_SZ(entries) round_up(sizeof(vhd_bate) * (entries), SEC_SZ)
+-#define SECTOR_BMP_SZ(unit_sz) round_up((unit_sz) / SEC_SZ / CHAR_BIT, SEC_SZ)
++#define SEC_SHIFT           (9)
++#define SEC_SZ              (1 << SEC_SHIFT)
++#define BAT_SZ(entries) round_up(sizeof(vhd_batent) * (entries), SEC_SZ)
++#define SECTOR_BMP_SZ(usz) round_up((usz) >> (SEC_SHIFT + 3), SEC_SZ)
++
++#define BMP_CACHE_PREFIX ("vhdbmp")
+ 
+ /* All fields Big-Endian */
+ struct vhd_id
+@@ -108,7 +111,15 @@ struct vhd_dyn
+ 	u8 reserved1[256];
+ };
+ 
+-typedef u32 vhd_bate;
++typedef u32 vhd_batent;
++
++#define VHD_BMP_DIRTY (0x1)
++
++struct vhd_bmp
++{
++	u32 flags;
++	u8  bmp[0];
++};
+ 
+ struct vhd
+ {
+@@ -132,12 +143,121 @@ struct vhd
+ 	/*
+ 	 * Parsed from dynamic header.
+ 	 */
++	struct kmem_cache *bmp_cache;
++	char *bmp_cache_name;
+ 	loff_t table_offset;
+ 	u32 bat_entries;
+ 	size_t block_unit;
+-	vhd_bate *bat;
++	vhd_batent *bat;
++	struct vhd_bmp **bmps;
+ };
+ 
++static int vhd_kbuf_to_bio(struct bio *bio,
++			  u8 *kbuf,
++			  size_t len)
++{
++	unsigned int bv_len;
++	unsigned int bv_offset;
++	struct bio_vec *bvec;
++
++	/* Fake a BIO containing bvec's describing a physically
++	 * contiguous kernel buffer. bio_add_page is too smart
++	 * and relies on a present rq. In our case, we just want
++	 * to use the same file I/O logic, which just happens to
++	 * use BIO. It might be nicer to redo everything in loop-ng
++	 * to use sg's and convert BIO nvecs to sg inside
++	 * do_bio_filebacked.
++	 */
++	while (len) {
++		bv_offset = ((uintptr_t) kbuf) & ~PAGE_MASK;
++		bv_len = min(len, (unsigned int) PAGE_SIZE - bv_offset);
++		bvec = &bio->bi_io_vec[bio->bi_vcnt];
++		bvec->bv_page = virt_to_page(kbuf);
++		bvec->bv_len = bv_len;
++		bvec->bv_offset = bv_offset;
++		bio->bi_vcnt++;
++		len -= bv_len;
++		kbuf += bv_len;
++	}
++	return 0;
++}
++
++int vhd_write_kbuf(struct loop_device *lo,
++		   struct lo_file *lo_file,
++		   void *kbuf,
++		   size_t len,
++		   loff_t pos)
++{
++	int ret;
++	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++
++	ret = vhd_kbuf_to_bio(bio, (u8 *) kbuf, len);
++	if (ret)
++		goto out;
++
++	ret = loop_send(lo, lo_file, bio, pos, NULL);
++out:
++	bio_put(bio);
++	return ret;
++}
++
++int vhd_read_kbuf(struct loop_device *lo,
++		  struct lo_file *lo_file,
++		  void *kbuf,
++		  size_t len,
++		  loff_t pos)
++{
++	int ret;
++	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++
++	ret = vhd_kbuf_to_bio(bio, (u8 *) kbuf, len);
++	if (ret)
++		goto out;
++
++	ret = loop_recv(lo, lo_file, bio, pos, NULL);
++out:
++	bio_put(bio);
++	return ret;
++}
++
++int vhd_read_page(struct loop_device *lo,
++		  struct lo_file *lo_file,
++		  struct page *page,
++		  unsigned int offset,
++		  unsigned int len,
++		  loff_t pos)
++{
++	int ret;
++	struct bio *bio = bio_alloc(GFP_KERNEL, 1);
++	bio->bi_io_vec->bv_page = page;
++	bio->bi_io_vec->bv_offset = offset;
++	bio->bi_io_vec->bv_len = len;
++	bio->bi_vcnt = 1;
++	ret = loop_recv(lo, lo_file, bio, pos, NULL);
++	bio_put(bio);
++	return ret;
++}
++
++int vhd_write_page(struct loop_device *lo,
++		   struct lo_file *lo_file,
++		   struct page *page,
++		   unsigned int offset,
++		   unsigned int len,
++		   loff_t pos)
++{
++	int ret;
++	struct bio *bio = bio_alloc(GFP_KERNEL, 1);
++	bio->bi_io_vec->bv_page = page;
++	bio->bi_io_vec->bv_offset = offset;
++	bio->bi_io_vec->bv_len = len;
++	bio->bi_vcnt = 1;
++	ret = loop_send(lo, lo_file, bio, pos, NULL);
++	bio_put(bio);
++	return ret;
++}
++
+ static int vhd_chs(struct vhd *vhd)
+ {
+ 	u64 temp;
+@@ -254,15 +374,15 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ {
+ 	int ret;
+ 	loff_t blocks;
++	unsigned len;
+ 	u64 data_offset = be64_to_cpu(vhd->footer->data_offset);
+ 	if (data_offset > vhd->file_size ||
+ 	    data_offset + sizeof(vhd->dyn) > vhd->file_size)
+ 		return -EINVAL;
+ 
+-	ret = loop_recv_buf(lo, lo_file, &vhd->mirror,
++	ret = vhd_read_kbuf(lo, lo_file, &vhd->mirror,
+ 			    sizeof(vhd->mirror),
+-			    0,
+-			    NULL);
++			    0);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -274,10 +394,9 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 		return -EINVAL;
+ 	}
+ 
+-	ret = loop_recv_buf(lo, lo_file, &vhd->dyn,
++	ret = vhd_read_kbuf(lo, lo_file, &vhd->dyn,
+ 			    sizeof(vhd->dyn),
+-			    data_offset,
+-			    NULL);
++			    data_offset);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -289,7 +408,7 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 		return -EINVAL;
+ 	}
+ 
+-	vhd->table_offset = be32_to_cpu(vhd->dyn.table_offset);
++	vhd->table_offset = be64_to_cpu(vhd->dyn.table_offset);
+ 	vhd->bat_entries = be32_to_cpu(vhd->dyn.max_tab_entries);
+ 	vhd->block_unit = be32_to_cpu(vhd->dyn.block_size);
+ 	if (!vhd->block_unit ||
+@@ -299,10 +418,10 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 		return -EINVAL;
+ 
+ 	}
+-	blocks = vhd->size;
++	blocks = round_up(vhd->size, vhd->block_unit);
+ 	do_div(blocks, vhd->block_unit);
+ 	if (blocks != vhd->bat_entries) {
+-		printk(KERN_ERR "%s: sparse blocks (%lld) don't match disk size (%lld)\n",
++		printk(KERN_ERR "%s: sparse blocks (%lld) don't match disk size (%d)\n",
+ 		       lo->lo_disk->disk_name, blocks, vhd->bat_entries);
+ 		return -EINVAL;
+ 	}
+@@ -318,9 +437,26 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 	if (!vhd->bat)
+ 		return -ENOMEM;
+ 
+-	ret = loop_recv_buf(lo, lo_file, vhd->bat,
++	len = sizeof(BMP_CACHE_PREFIX) + strlen(lo->lo_disk->disk_name);
++	vhd->bmp_cache_name = kzalloc(len, GFP_KERNEL);
++	if (!vhd->bmp_cache_name)
++		return -ENOMEM;
++	strlcat(vhd->bmp_cache_name, lo->lo_disk->disk_name, len);
++	strlcat(vhd->bmp_cache_name, BMP_CACHE_PREFIX, len);
++
++	vhd->bmp_cache = kmem_cache_create(vhd->bmp_cache_name,
++					   SECTOR_BMP_SZ(vhd->block_unit),
++					   1, 0, NULL);
++	if (!vhd->bmp_cache)
++		return -ENOMEM;
++
++	vhd->bmps = kzalloc(vhd->bat_entries * sizeof(struct vhd_bmp *), GFP_KERNEL);
++	if (!vhd->bmps)
++		return -ENOMEM;
++
++	ret = vhd_read_kbuf(lo, lo_file, vhd->bat,
+ 			    BAT_SZ(vhd->bat_entries),
+-			    vhd->table_offset, NULL);
++			    vhd->table_offset);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -395,6 +531,32 @@ static int vhd_verify(struct loop_device *lo,
+ 	return ret;
+ }
+ 
++static void vhd_free_bmps(struct vhd *vhd)
++{
++	u32 bat_index;
++
++	for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
++
++		/* TBD - check dirty and flush. */
++		if (vhd->bmps[bat_index])
++			kmem_cache_free(vhd->bmp_cache, vhd->bmps[bat_index]);
++	}
++	kfree(vhd->bmps);
++}
++
++static void vhd_free(struct vhd *vhd)
++{
++	if (vhd->bmps)
++		vhd_free_bmps(vhd);
++	if (vhd->bmp_cache)
++		kmem_cache_destroy(vhd->bmp_cache);
++	if (vhd->bmp_cache_name)
++		kfree(vhd->bmp_cache_name);
++	if (vhd->bat)
++		kfree(vhd->bat);
++	kfree(vhd);
++}
++
+ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ {
+ 	int ret;
+@@ -407,16 +569,17 @@ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ 		return -ENOMEM;
+ 
+ 	vhd->file_size = i_size_read(lo_file->file->f_mapping->host);
+-	ret = loop_recv_buf(lo, lo_file, &vhd->footer_data,
++	ret = vhd_read_kbuf(lo, lo_file, &vhd->footer_data,
+ 			    sizeof(vhd->footer_data),
+-			    vhd->file_size - sizeof(vhd->footer_data),
+-			    NULL);
++			    vhd->file_size - sizeof(vhd->footer_data));
+ 	if (ret)
+ 		goto out;
+ 
+ 	vhd->footer = vhd_check_footer(&vhd->footer_data);
+-	if (!vhd->footer)
++	if (!vhd->footer) {
++		ret = -EINVAL;
+ 		goto out;
++	}
+ 
+ 	ret = vhd_verify(lo, lo_file, vhd);
+ 	if (ret) {
+@@ -431,10 +594,8 @@ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ 	       vhd->size);
+ 	lo_file->parser_priv = vhd;
+ out:
+-	if (vhd->bat)
+-		kfree(vhd->bat);
+ 	if (ret)
+-		kfree(vhd);
++		vhd_free(vhd);
+ 	return ret;
+ }
+ 
+@@ -442,7 +603,7 @@ static void vhd_release(struct loop_device *lo, struct lo_file *lo_file)
+ {
+ 	struct vhd *vhd = lo_file->parser_priv;
+ 	lo_file->parser_priv = NULL;
+-	kfree(vhd);
++	vhd_free(vhd);
+ }
+ 
+ static loff_t vhd_size(struct loop_device *lo, struct lo_file *lo_file)
+@@ -457,26 +618,120 @@ static int vhd_sync(struct loop_device *lo, struct lo_file *lo_file,
+ 	return loop_sync(lo, lo_file, reqf);
+ }
+ 
++static int vhd_pos_to_fpos(struct loop_device *lo, struct lo_file *lo_file,
++			      loff_t pos, loff_t *fpos)
++{
++	int ret;
++	struct vhd *vhd = lo_file->parser_priv;
++	loff_t bat_entry = pos;
++	u32 offset = do_div(bat_entry, vhd->block_unit);
++
++	pos = be32_to_cpu(vhd->bat[bat_entry]);
++	if (pos == 0xFFFFFFFF)
++		return -ENOENT;
++
++	if (!vhd->bmps[bat_entry]) {
++		vhd->bmps[bat_entry] = kmem_cache_alloc(vhd->bmp_cache, GFP_KERNEL);
++		ret = vhd_read_kbuf(lo, lo_file, &vhd->bmps[bat_entry]->bmp,
++				    SECTOR_BMP_SZ(vhd->block_unit), pos << SEC_SHIFT);
++		if (ret)
++			return ret;
++	}
++
++	if (!(vhd->bmps[bat_entry]->bmp[pos >> 3] & (pos & 7)))
++	    return -ENOENT;
++
++	*fpos = (pos << SEC_SHIFT) + SECTOR_BMP_SZ(vhd->block_unit) + offset;
++	return 0;
++}
++
++static int vhd_do_bvec(struct loop_device *lo, struct lo_file *lo_file,
++		       struct bio_vec *bvec, loff_t pos, int cmd)
++{
++	u8 *raw_buf;
++	unsigned int len;
++	int ret = 0;
++	loff_t fpos = 0;
++	unsigned int bv_len = bvec->bv_len;
++
++	while (bv_len) {
++		len = min(bv_len, (unsigned int)
++			  (SEC_SZ - (pos & (SEC_SZ - 1))));
++
++		ret  = vhd_pos_to_fpos(lo, lo_file, pos, &fpos);
++		if (ret && ret != -ENOENT) {
++			printk(KERN_ERR "%s: corrupt VHD (failed to lookup offset %llx)\n",
++			       lo->lo_disk->disk_name, pos);
++			break;
++		}
++
++		if (ret == -ENOENT) {
++			if (cmd == WRITE) {
++				ret = -EIO;
++				break;
++			}
++			ret = 0;
++			raw_buf = kmap_atomic(bvec->bv_page, KM_USER0) +
++				bvec->bv_offset + bvec->bv_len - bv_len;
++			memset(raw_buf, 0, len);
++			kunmap_atomic(raw_buf, KM_USER0);
++		} else {
++			if (cmd == READ)
++				ret = vhd_read_page(lo, lo_file, bvec->bv_page,
++						    bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
++			else
++				ret = vhd_write_page(lo, lo_file, bvec->bv_page,
++						     bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
++		}
++		if (ret)
++			break;
++
++		bv_len -= len;
++		pos += len;
++	}
++	return ret;
++}
++
+ int vhd_read(struct loop_device *lo, struct lo_file *lo_file,
+ 	     struct bio *bio, loff_t pos)
+ {
++	int i;
++	struct bio_vec *bvec;
++	int ret = 0;
+ 	struct vhd *vhd = lo_file->parser_priv;
+ 
+ 	if (vhd->type == FOOTER_TYPE_FIXED)
+ 		return loop_recv(lo, lo_file, bio, pos, NULL);
+ 
+-	return -EIO;
++	bio_for_each_segment(bvec, bio, i) {
++		ret = vhd_do_bvec(lo, lo_file, bvec, pos, READ);
++		if (ret)
++			break;
++		pos += bvec->bv_len;
++	}
++
++	return ret;
+ }
+ 
+ int vhd_write(struct loop_device *lo, struct lo_file *lo_file,
+ 	      struct bio *bio, loff_t pos)
+ {
++	int i = 0;
++	struct bio_vec *bvec;
++	int ret = 0;
+ 	struct vhd *vhd = lo_file->parser_priv;
++
+ 	if (vhd->type == FOOTER_TYPE_FIXED)
+ 		return loop_send(lo, lo_file, bio, pos, NULL);
+ 
+-	/* Don't do writes to sparse files yet. */
+-	return -EIO;
++	bio_for_each_segment(bvec, bio, i) {
++		ret = vhd_do_bvec(lo, lo_file, bvec, pos, WRITE);
++		if (ret)
++			break;
++		pos += bvec->bv_len;
++	}
++
++	return ret;
+ }
+ 
+ static struct loop_parser vhd_parser =
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index f17130f..800c2a8 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -190,18 +190,6 @@ int loop_send(struct loop_device *lo, struct lo_file *lo_file,
+ 	      struct bio *bio, loff_t pos, loop_xfer transfer);
+ int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
+ 	      struct bio *bio, loff_t pos, loop_xfer transfer);
+-int loop_send_buf(struct loop_device *lo,
+-		  struct lo_file *lo_file,
+-		  void *kbuf,
+-		  size_t len,
+-		  loff_t pos,
+-		  loop_xfer transfer);
+-int loop_recv_buf(struct loop_device *lo,
+-		  struct lo_file *lo_file,
+-		  void *kbuf,
+-		  size_t len,
+-		  loff_t pos,
+-		  loop_xfer transfer);
+ int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
+ 	      unsigned long reqf);
+ #endif
+-- 
+1.7.0.4
+

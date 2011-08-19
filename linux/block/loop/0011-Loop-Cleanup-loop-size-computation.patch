@@ -1,7 +1,7 @@
 From 7b70b7d198b87accd2ec89076717b4c0c92fa48c Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Thu, 11 Aug 2011 17:08:57 -0500
-Subject: [PATCH 11/15] Loop: Cleanup loop size computation.
+Subject: [PATCH 11/16] Loop: Cleanup loop size computation.
 
 Push lo_offset/lo_sizelimit into raw parser size() method,
 where it belongs. Get rid of get_loop_size and replace
