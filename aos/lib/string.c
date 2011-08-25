@@ -1,4 +1,12 @@
 /*
+ *  Copyright (C) 2011 Andrei Warkentin <andrey.warkentin@gmail.com>
+ *
+ * This program is free software ; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/*
  *  linux/lib/string.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
@@ -673,3 +681,5 @@ void *memchr(const void *s, int c, size_t n)
 	return NULL;
 }
 #endif
+
+const char hex_asc[] = "0123456789abcdef";

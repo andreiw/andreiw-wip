@@ -6,13 +6,12 @@
  * published by the Free Software Foundation.
  */
 
-#ifndef AOS_SYSTEM_H
-#define AOS_SYSTEM_H
+#ifndef AOS_LIB_VSPRINTF_H
+#define AOS_LIB_VSPRINTF_H
 
-#include <types.h>
-#include <stdarg.h>
-#include <defines.h>
-#include <asm/system.h>
-#include <bug.h>
+struct va_format {
+        const char *fmt;
+        va_list *va;
+};
 
-#endif /* AOS_SYSTEM_H */
+#endif

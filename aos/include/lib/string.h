@@ -1,3 +1,11 @@
+/*
+ *  Copyright (C) 2011 Andrei Warkentin <andrey.warkentin@gmail.com>
+ *
+ * This program is free software ; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #ifndef AOS_LIB_STRING_H
 #define AOS_LIB_STRING_H
 
@@ -31,5 +39,16 @@ void *memscan(void *addr, int c, size_t size);
 char *strstr(const char *s1, const char *s2);
 char *strnstr(const char *s1, const char *s2, size_t len);
 void *memchr(const void *s, int c, size_t n);
+
+extern const char hex_asc[];
+#define hex_asc_lo(x)   hex_asc[((x) & 0x0f)]
+#define hex_asc_hi(x)   hex_asc[((x) & 0xf0) >> 4]
+
+static inline char *pack_hex_byte(char *buf, u8 byte)
+{
+        *buf++ = hex_asc_hi(byte);
+        *buf++ = hex_asc_lo(byte);
+        return buf;
+}
 
 #endif

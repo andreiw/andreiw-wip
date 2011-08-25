@@ -6,6 +6,11 @@
  * published by the Free Software Foundation.
  */
 
+void __div0 (void)
+{
+	while (1);
+}
+
 void c_entry (void)
 {
 }

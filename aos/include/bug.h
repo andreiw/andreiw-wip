@@ -6,13 +6,13 @@
  * published by the Free Software Foundation.
  */
 
-#ifndef AOS_SYSTEM_H
-#define AOS_SYSTEM_H
+#ifndef AOS_BUG_H
+#define AOS_BUG_H
 
-#include <types.h>
-#include <stdarg.h>
-#include <defines.h>
-#include <asm/system.h>
-#include <bug.h>
+#include <system.h>
 
-#endif /* AOS_SYSTEM_H */
+#define BUG()
+
+#define BUG_ON(condition) do { if (unlikely(condition)) BUG(); } while(0)
+
+#endif
