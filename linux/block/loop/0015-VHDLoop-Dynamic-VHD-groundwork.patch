@@ -1,7 +1,7 @@
 From c563d8d89768f51d8655939235223f72eee95c92 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Tue, 16 Aug 2011 16:24:06 -0500
-Subject: [PATCH 15/16] VHDLoop: Dynamic VHD groundwork.
+Subject: [PATCH 15/17] VHDLoop: Dynamic VHD groundwork.
 
 Verification of format and some basic init.
 Next is using a slab cache to manage block bitmaps.

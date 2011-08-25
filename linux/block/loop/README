@@ -7,9 +7,14 @@ the addition of loop parser support and parser implementations.
 
 The first parser will be for VHD, in the following order of
 implementation:
-1) Fixed-size VHDs.
-2) Dynamic VHDs.
-3) Differencing VHDs.
+1) Fixed-size VHDs (Done!)
+2) Dynamic VHDs (Needs write testing for larger images, RO works)
+3) Differencing VHDs (Should be trivial, since it's a special
+   case of dynamic VHDs)
+4) Benching against exsting nbd/fuse-based solutions.
+5) Optimizations of read/write path.
+6) LRU/shrink enhancements for block bitmap cache.
+7) Parser options and backwards-compat loop_info changes.
 
 VHD spec is of course at:
 http://www.microsoft.com/download/en/details.aspx?id=23850

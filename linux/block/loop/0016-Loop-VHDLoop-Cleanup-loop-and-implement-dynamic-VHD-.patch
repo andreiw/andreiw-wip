@@ -1,7 +1,7 @@
-From e38619730ff317437a65b98fec3e034c2894ce71 Mon Sep 17 00:00:00 2001
+From 911c4d220c95fa24f301412ea55f40d9fb9e9cde Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Fri, 19 Aug 2011 17:01:50 -0500
-Subject: [PATCH 16/16] Loop/VHDLoop: Cleanup loop and implement dynamic VHD support.
+Subject: [PATCH 16/17] Loop/VHDLoop: Cleanup loop and implement dynamic VHD support.
 
 Loop: Remove kbuf accessors (VHDLoop needs page accessors as well).
 VHDLoop: Implement RO support for dynamic VHD.
@@ -9,24 +9,15 @@ VHDLoop: Implement RO support for dynamic VHD.
 Change-Id: Idbda4a448dfae84b649ff6692d7df27c2d8783e0
 Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
 ---
- drivers/block/loop.c    |   82 +------------
+ drivers/block/loop.c    |   80 +------------
  drivers/block/vhdloop.c |  309 ++++++++++++++++++++++++++++++++++++++++++----
  include/linux/loop.h    |   12 --
- 3 files changed, 286 insertions(+), 117 deletions(-)
+ 3 files changed, 285 insertions(+), 116 deletions(-)
 
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
-index 60c391c..b36d390 100644
+index 60c391c..4f2ffbe 100644
 --- a/drivers/block/loop.c
 +++ b/drivers/block/loop.c
-@@ -82,7 +82,7 @@ static DEFINE_MUTEX(loop_devices_mutex);
- static LIST_HEAD(loop_parsers);
- static DEFINE_MUTEX(loop_parsers_mutex);
- 
--static int max_part;
-+static int max_part = 5;
- static int part_shift;
- static struct loop_parser raw_parser;
- 
 @@ -467,81 +467,6 @@ int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
  
  EXPORT_SYMBOL(loop_recv);

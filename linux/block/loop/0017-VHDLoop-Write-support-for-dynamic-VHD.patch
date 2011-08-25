@@ -1,0 +1,462 @@
+From e570b96ee77ee3caadc3af0cb3384e92c10a3cc1 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Thu, 25 Aug 2011 18:46:12 -0500
+Subject: [PATCH 17/17] VHDLoop: Write support for dynamic VHD.
+
+Seemingly works but need to test block allocation
+path with a bigger VHD.
+
+Change-Id: If3f78b86e8d462e83ebfdc3dd903a3f31c2267f3
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/vhdloop.c |  196 +++++++++++++++++++++++++++++-----------------
+ 1 files changed, 123 insertions(+), 73 deletions(-)
+
+diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
+index a85d1a2..6e34153 100644
+--- a/drivers/block/vhdloop.c
++++ b/drivers/block/vhdloop.c
+@@ -40,8 +40,12 @@ MODULE_AUTHOR("Andrei Warkentin <andreiw@motorola.com>");
+ #define FOOTER_TYPE_DIFF    (4)
+ #define SEC_SHIFT           (9)
+ #define SEC_SZ              (1 << SEC_SHIFT)
+-#define BAT_SZ(entries) round_up(sizeof(vhd_batent) * (entries), SEC_SZ)
+-#define SECTOR_BMP_SZ(usz) round_up((usz) >> (SEC_SHIFT + 3), SEC_SZ)
++#define SEC_MASK            (SEC_SZ - 1)
++#define VHD_DNAME(vhd)      ((vhd)->lo->lo_disk->disk_name)
++#define BAT_SZ(entries)     round_up(sizeof(vhd_batent) * (entries), SEC_SZ)
++#define SECTOR_BMP_SZ(usz)  round_up((usz) >> (SEC_SHIFT + 3), SEC_SZ)
++#define FOOTER_SZ(vhd)      (sizeof(struct vhd_footer) - ((vhd)->footer -\
++			     &(vhd)->footer_data))
+ 
+ #define BMP_CACHE_PREFIX ("vhdbmp")
+ 
+@@ -117,13 +121,17 @@ typedef u32 vhd_batent;
+ 
+ struct vhd_bmp
+ {
+-	u32 flags;
++	unsigned flags;
+ 	u8  bmp[0];
+ };
+ 
++/* Dirty BAT needs to be flushed (and footer re-written) */
++#define VHD_BAT_DIRTY (0x1)
++
+ struct vhd
+ {
+-
++	struct loop_device *lo;
++	struct lo_file     *lo_file;
+ 	struct vhd_footer footer_data;
+ 	struct vhd_dyn    dyn;
+ 	struct vhd_footer mirror;
+@@ -150,6 +158,7 @@ struct vhd
+ 	size_t block_unit;
+ 	vhd_batent *bat;
+ 	struct vhd_bmp **bmps;
++	unsigned flags;
+ };
+ 
+ static int vhd_kbuf_to_bio(struct bio *bio,
+@@ -368,9 +377,7 @@ static struct vhd_footer *vhd_check_footer(struct vhd_footer *footer)
+ 	return f;
+ }
+ 
+-static int vhd_verify_dyn(struct loop_device *lo,
+-			  struct lo_file *lo_file,
+-			  struct vhd *vhd)
++static int vhd_verify_dyn(struct vhd *vhd)
+ {
+ 	int ret;
+ 	loff_t blocks;
+@@ -380,21 +387,19 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 	    data_offset + sizeof(vhd->dyn) > vhd->file_size)
+ 		return -EINVAL;
+ 
+-	ret = vhd_read_kbuf(lo, lo_file, &vhd->mirror,
++	ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, &vhd->mirror,
+ 			    sizeof(vhd->mirror),
+ 			    0);
+ 	if (ret)
+ 		return ret;
+ 
+-	if (memcmp(vhd->footer, &vhd->mirror,
+-		   sizeof(vhd->footer_data) -
+-		   (vhd->footer - &vhd->footer_data))) {
++	if (memcmp(vhd->footer, &vhd->mirror, FOOTER_SZ(vhd))) {
+ 		printk(KERN_ERR "%s: corrupt (footer != mirror)\n",
+-		       lo->lo_disk->disk_name);
++		       VHD_DNAME(vhd));
+ 		return -EINVAL;
+ 	}
+ 
+-	ret = vhd_read_kbuf(lo, lo_file, &vhd->dyn,
++	ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, &vhd->dyn,
+ 			    sizeof(vhd->dyn),
+ 			    data_offset);
+ 	if (ret)
+@@ -404,7 +409,7 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 	    be64_to_cpu(vhd->dyn.data_offset) != DYN_DOFF_DYN ||
+ 	    vhd_dyn_csum(&vhd->dyn)) {
+ 		printk(KERN_ERR "%s: corrupt sparse header\n",
+-		       lo->lo_disk->disk_name);
++		       VHD_DNAME(vhd));
+ 		return -EINVAL;
+ 	}
+ 
+@@ -414,7 +419,7 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 	if (!vhd->block_unit ||
+ 	    (vhd->block_unit & (vhd->block_unit - 1))) {
+ 		printk(KERN_ERR "%s: invalid sparse block size %d\n",
+-		       lo->lo_disk->disk_name, vhd->block_unit);
++		       VHD_DNAME(vhd), vhd->block_unit);
+ 		return -EINVAL;
+ 
+ 	}
+@@ -422,14 +427,14 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 	do_div(blocks, vhd->block_unit);
+ 	if (blocks != vhd->bat_entries) {
+ 		printk(KERN_ERR "%s: sparse blocks (%lld) don't match disk size (%d)\n",
+-		       lo->lo_disk->disk_name, blocks, vhd->bat_entries);
++		       VHD_DNAME(vhd), blocks, vhd->bat_entries);
+ 		return -EINVAL;
+ 	}
+ 
+ 	if (vhd->table_offset > vhd->file_size ||
+ 	    vhd->table_offset + BAT_SZ(vhd->bat_entries) > vhd->file_size) {
+ 		printk(KERN_ERR "%s: sparse block table outside VHD\n",
+-		       lo->lo_disk->disk_name);
++		       VHD_DNAME(vhd));
+ 		return -EINVAL;
+ 	}
+ 
+@@ -437,14 +442,15 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 	if (!vhd->bat)
+ 		return -ENOMEM;
+ 
+-	len = sizeof(BMP_CACHE_PREFIX) + strlen(lo->lo_disk->disk_name);
++	len = sizeof(BMP_CACHE_PREFIX) + strlen(VHD_DNAME(vhd));
+ 	vhd->bmp_cache_name = kzalloc(len, GFP_KERNEL);
+ 	if (!vhd->bmp_cache_name)
+ 		return -ENOMEM;
+-	strlcat(vhd->bmp_cache_name, lo->lo_disk->disk_name, len);
++	strlcat(vhd->bmp_cache_name, VHD_DNAME(vhd), len);
+ 	strlcat(vhd->bmp_cache_name, BMP_CACHE_PREFIX, len);
+ 
+ 	vhd->bmp_cache = kmem_cache_create(vhd->bmp_cache_name,
++					   sizeof(struct vhd_bmp) +
+ 					   SECTOR_BMP_SZ(vhd->block_unit),
+ 					   1, 0, NULL);
+ 	if (!vhd->bmp_cache)
+@@ -454,7 +460,7 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 	if (!vhd->bmps)
+ 		return -ENOMEM;
+ 
+-	ret = vhd_read_kbuf(lo, lo_file, vhd->bat,
++	ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
+ 			    BAT_SZ(vhd->bat_entries),
+ 			    vhd->table_offset);
+ 	if (ret)
+@@ -463,36 +469,30 @@ static int vhd_verify_dyn(struct loop_device *lo,
+ 	return 0;
+ }
+ 
+-static int vhd_verify_fixed(struct loop_device *lo,
+-			    struct lo_file *lo_file,
+-			    struct vhd *vhd)
++static int vhd_verify_fixed(struct vhd *vhd)
+ {
+ 	if (be64_to_cpu(vhd->footer->data_offset) != FOOTER_DOFF_FIXED) {
+ 		printk(KERN_ERR "%s: corrupt (data_offset not fixed)\n",
+-		       lo->lo_disk->disk_name);
++		       VHD_DNAME(vhd));
+ 		return -EINVAL;
+ 	}
+ 
+-	if (vhd->size + (sizeof(struct vhd_footer) -
+-			 (vhd->footer - &vhd->footer_data)) !=
+-	    vhd->file_size) {
++	if (vhd->size + FOOTER_SZ(vhd) != vhd->file_size) {
+ 		printk(KERN_ERR "%s: corrupt (wrong size %lld bytes)\n",
+-		       lo->lo_disk->disk_name, vhd->size);
++		       VHD_DNAME(vhd), vhd->size);
+ 		return -EINVAL;
+ 	}
+ 	return 0;
+ }
+ 
+-static int vhd_verify(struct loop_device *lo,
+-		      struct lo_file *lo_file,
+-		      struct vhd *vhd)
++static int vhd_verify(struct vhd *vhd)
+ {
+ 	int ret;
+ 
+ 	vhd->features = be32_to_cpu(vhd->footer->features);
+ 	if (!(vhd->features & FOOTER_FEAT_RSVD)) {
+ 		printk(KERN_ERR "%s: corrupt (bad features 0x%x)\n",
+-		       lo->lo_disk->disk_name,
++		       VHD_DNAME(vhd),
+ 		       vhd->features);
+ 		return -EINVAL;
+ 	}
+@@ -500,7 +500,7 @@ static int vhd_verify(struct loop_device *lo,
+ 	vhd->version = be32_to_cpu(vhd->footer->file_format_ver);
+ 	if ((vhd->version & VHD_VMAJ_MASK) != VHD_VERSION_1) {
+ 		printk(KERN_ERR "%s: corrupt (bad version 0x%x)\n",
+-		       lo->lo_disk->disk_name,
++		       VHD_DNAME(vhd),
+ 		       vhd->version);
+ 		return -EINVAL;
+ 	}
+@@ -510,21 +510,21 @@ static int vhd_verify(struct loop_device *lo,
+ 	ret = vhd_chs(vhd);
+ 	if (ret) {
+ 		printk(KERN_ERR "%s: corrupt (bad CHS data)\n",
+-		       lo->lo_disk->disk_name);
++		       VHD_DNAME(vhd));
+ 		return ret;
+ 	}
+ 
+ 	if (vhd->type == FOOTER_TYPE_FIXED) {
+-		ret = vhd_verify_fixed(lo, lo_file, vhd);
++		ret = vhd_verify_fixed(vhd);
+ 		if (ret)
+ 			return ret;
+ 	} else if (vhd->type == FOOTER_TYPE_DYN) {
+-		ret = vhd_verify_dyn(lo, lo_file, vhd);
++		ret = vhd_verify_dyn(vhd);
+ 		if (ret)
+ 			return ret;
+ 	} else {
+ 		printk(KERN_ERR "%s: only fixed and dynamic VHDs supported\n",
+-		       lo->lo_disk->disk_name);
++		       VHD_DNAME(vhd));
+ 	       return -EINVAL;
+ 	}
+ 
+@@ -534,24 +534,48 @@ static int vhd_verify(struct loop_device *lo,
+ static void vhd_free_bmps(struct vhd *vhd)
+ {
+ 	u32 bat_index;
++	struct vhd_bmp *bmp;
+ 
+ 	for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
+-
+-		/* TBD - check dirty and flush. */
+-		if (vhd->bmps[bat_index])
+-			kmem_cache_free(vhd->bmp_cache, vhd->bmps[bat_index]);
++		bmp = vhd->bmps[bat_index];
++		if (bmp) {
++			if (bmp->flags & VHD_BMP_DIRTY)
++				vhd_write_kbuf(vhd->lo, vhd->lo_file, &bmp->bmp,
++					       SECTOR_BMP_SZ(vhd->block_unit),
++					       be32_to_cpu(vhd->bat[bat_index]) << SEC_SHIFT);
++			kmem_cache_free(vhd->bmp_cache, bmp);
++		}
+ 	}
+ 	kfree(vhd->bmps);
+ }
+ 
+ static void vhd_free(struct vhd *vhd)
+ {
++	int ret;
++
+ 	if (vhd->bmps)
+ 		vhd_free_bmps(vhd);
+ 	if (vhd->bmp_cache)
+ 		kmem_cache_destroy(vhd->bmp_cache);
+ 	if (vhd->bmp_cache_name)
+ 		kfree(vhd->bmp_cache_name);
++
++	if (vhd->flags & VHD_BAT_DIRTY) {
++		ret = vhd_write_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
++				     BAT_SZ(vhd->bat_entries),
++				     vhd->table_offset);
++		if (ret)
++			printk(KERN_ERR "%s: failed to flush BAT, image corrupt\n",
++			       VHD_DNAME(vhd));
++
++		ret = vhd_write_kbuf(vhd->lo, vhd->lo_file, vhd->footer,
++				     FOOTER_SZ(vhd),
++				     vhd->file_size - FOOTER_SZ(vhd));
++		if (ret)
++			printk(KERN_ERR "%s: failed to flush footer, image corrupt\n",
++			       VHD_DNAME(vhd));
++	}
++
+ 	if (vhd->bat)
+ 		kfree(vhd->bat);
+ 	kfree(vhd);
+@@ -568,6 +592,8 @@ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ 	if (!vhd)
+ 		return -ENOMEM;
+ 
++	vhd->lo = lo;
++	vhd->lo_file = lo_file;
+ 	vhd->file_size = i_size_read(lo_file->file->f_mapping->host);
+ 	ret = vhd_read_kbuf(lo, lo_file, &vhd->footer_data,
+ 			    sizeof(vhd->footer_data),
+@@ -581,7 +607,7 @@ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ 		goto out;
+ 	}
+ 
+-	ret = vhd_verify(lo, lo_file, vhd);
++	ret = vhd_verify(vhd);
+ 	if (ret) {
+ 		/* Invalid format, ensure other parsers don't bind. */
+ 		ret = -EPERM;
+@@ -589,7 +615,7 @@ static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
+ 	}
+ 
+ 	printk(KERN_INFO "%s: %s VHD %lld bytes\n",
+-	       lo->lo_disk->disk_name,
++	       VHD_DNAME(vhd),
+ 	       vhd->type == FOOTER_TYPE_DYN ? "dynamic" : "fixed",
+ 	       vhd->size);
+ 	lo_file->parser_priv = vhd;
+@@ -618,35 +644,59 @@ static int vhd_sync(struct loop_device *lo, struct lo_file *lo_file,
+ 	return loop_sync(lo, lo_file, reqf);
+ }
+ 
+-static int vhd_pos_to_fpos(struct loop_device *lo, struct lo_file *lo_file,
+-			      loff_t pos, loff_t *fpos)
++static int vhd_pos_to_fpos(struct vhd *vhd, loff_t pos,
++			   loff_t len, loff_t *fpos, int cmd)
+ {
+ 	int ret;
+-	struct vhd *vhd = lo_file->parser_priv;
++	loff_t block_fpos;
+ 	loff_t bat_entry = pos;
+ 	u32 offset = do_div(bat_entry, vhd->block_unit);
+ 
+-	pos = be32_to_cpu(vhd->bat[bat_entry]);
+-	if (pos == 0xFFFFFFFF)
+-		return -ENOENT;
++	block_fpos = be32_to_cpu(vhd->bat[bat_entry]) << SEC_SHIFT;
++	if (block_fpos >> SEC_SHIFT == 0xFFFFFFF) {
++		if (cmd == READ)
++			return -ENOENT;
++
++		block_fpos = round_up(vhd->file_size - FOOTER_SZ(vhd), SEC_SZ);
++		vhd->file_size = block_fpos + vhd->block_unit + FOOTER_SZ(vhd);
++		vhd->bat[bat_entry] = cpu_to_be32(block_fpos >> SEC_SHIFT);
++		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache, GFP_KERNEL);
++		if (!vhd->bmps[bat_entry])
++			return -ENOMEM;
++		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
++		vhd->flags |= VHD_BAT_DIRTY;
++	}
+ 
+ 	if (!vhd->bmps[bat_entry]) {
+ 		vhd->bmps[bat_entry] = kmem_cache_alloc(vhd->bmp_cache, GFP_KERNEL);
+-		ret = vhd_read_kbuf(lo, lo_file, &vhd->bmps[bat_entry]->bmp,
+-				    SECTOR_BMP_SZ(vhd->block_unit), pos << SEC_SHIFT);
++		if (!vhd->bmps[bat_entry])
++			return -ENOMEM;
++		ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, &vhd->bmps[bat_entry]->bmp,
++				    SECTOR_BMP_SZ(vhd->block_unit), block_fpos);
+ 		if (ret)
+ 			return ret;
+ 	}
+ 
+-	if (!(vhd->bmps[bat_entry]->bmp[pos >> 3] & (pos & 7)))
+-	    return -ENOENT;
++	if (cmd == READ) {
++		if (!(vhd->bmps[bat_entry]->bmp[pos >> SEC_SHIFT + 3] &
++		      (1 << (pos << SEC_SHIFT & 7))))
++			return -ENOENT;
++	} else {
++		vhd->bmps[bat_entry]->bmp[pos >> SEC_SHIFT + 3] |=
++			1 << (pos << SEC_SHIFT & 7);
++		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
++	}
++
++	block_fpos += SECTOR_BMP_SZ(vhd->block_unit) + offset;
++	if (block_fpos > vhd->file_size || (block_fpos + len) > vhd->file_size)
++		return -EINVAL;
++	*fpos = block_fpos;
+ 
+-	*fpos = (pos << SEC_SHIFT) + SECTOR_BMP_SZ(vhd->block_unit) + offset;
+ 	return 0;
+ }
+ 
+-static int vhd_do_bvec(struct loop_device *lo, struct lo_file *lo_file,
+-		       struct bio_vec *bvec, loff_t pos, int cmd)
++static int vhd_do_bvec(struct vhd *vhd, struct bio_vec *bvec,
++		       loff_t pos, int cmd)
+ {
+ 	u8 *raw_buf;
+ 	unsigned int len;
+@@ -655,34 +705,34 @@ static int vhd_do_bvec(struct loop_device *lo, struct lo_file *lo_file,
+ 	unsigned int bv_len = bvec->bv_len;
+ 
+ 	while (bv_len) {
++
++		/* Should optimize this so that access to contiguous
++		 * sectors inside block don't involve multiple calls
++		 * to vhd_*_page.
++		 */
+ 		len = min(bv_len, (unsigned int)
+ 			  (SEC_SZ - (pos & (SEC_SZ - 1))));
+ 
+-		ret  = vhd_pos_to_fpos(lo, lo_file, pos, &fpos);
+-		if (ret && ret != -ENOENT) {
+-			printk(KERN_ERR "%s: corrupt VHD (failed to lookup offset %llx)\n",
+-			       lo->lo_disk->disk_name, pos);
+-			break;
+-		}
++		ret  = vhd_pos_to_fpos(vhd, pos, len, &fpos, cmd);
+ 
+-		if (ret == -ENOENT) {
+-			if (cmd == WRITE) {
+-				ret = -EIO;
+-				break;
+-			}
++		if (ret == -ENOENT && cmd == READ) {
+ 			ret = 0;
+ 			raw_buf = kmap_atomic(bvec->bv_page, KM_USER0) +
+ 				bvec->bv_offset + bvec->bv_len - bv_len;
+ 			memset(raw_buf, 0, len);
+ 			kunmap_atomic(raw_buf, KM_USER0);
+-		} else {
++		} else if (!ret) {
+ 			if (cmd == READ)
+-				ret = vhd_read_page(lo, lo_file, bvec->bv_page,
++				ret = vhd_read_page(vhd->lo, vhd->lo_file, bvec->bv_page,
+ 						    bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
+ 			else
+-				ret = vhd_write_page(lo, lo_file, bvec->bv_page,
++				ret = vhd_write_page(vhd->lo, vhd->lo_file, bvec->bv_page,
+ 						     bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
+-		}
++		} else
++			printk(KERN_ERR "%s: failed to %s: %d\n",
++			       VHD_DNAME(vhd), cmd == READ ? "read" : "write",
++			       ret);
++
+ 		if (ret)
+ 			break;
+ 
+@@ -704,7 +754,7 @@ int vhd_read(struct loop_device *lo, struct lo_file *lo_file,
+ 		return loop_recv(lo, lo_file, bio, pos, NULL);
+ 
+ 	bio_for_each_segment(bvec, bio, i) {
+-		ret = vhd_do_bvec(lo, lo_file, bvec, pos, READ);
++		ret = vhd_do_bvec(vhd, bvec, pos, READ);
+ 		if (ret)
+ 			break;
+ 		pos += bvec->bv_len;
+@@ -725,7 +775,7 @@ int vhd_write(struct loop_device *lo, struct lo_file *lo_file,
+ 		return loop_send(lo, lo_file, bio, pos, NULL);
+ 
+ 	bio_for_each_segment(bvec, bio, i) {
+-		ret = vhd_do_bvec(lo, lo_file, bvec, pos, WRITE);
++		ret = vhd_do_bvec(vhd, bvec, pos, WRITE);
+ 		if (ret)
+ 			break;
+ 		pos += bvec->bv_len;
+-- 
+1.7.0.4
+
