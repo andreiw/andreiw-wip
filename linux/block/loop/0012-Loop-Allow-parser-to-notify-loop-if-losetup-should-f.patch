@@ -1,7 +1,7 @@
 From d1d8bbc122594805a7f0e6b3cb7f674b80c31b99 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Fri, 12 Aug 2011 14:59:09 -0500
-Subject: [PATCH 12/17] Loop: Allow parser to notify loop if losetup should fail.
+Subject: [PATCH 12/18] Loop: Allow parser to notify loop if losetup should fail.
 
 This let's us deal with corrupt files, as you wouldn't
 want to allow raw access to them anyway.

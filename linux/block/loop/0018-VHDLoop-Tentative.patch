@@ -1,0 +1,230 @@
+From e9e690fe6661c61690e585ffc916128e33760ca1 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@motorola.com>
+Date: Tue, 30 Aug 2011 15:12:23 -0500
+Subject: [PATCH 18/18] VHDLoop: Tentative.
+
+Debugging code to figure out what's wrong.
+
+Change-Id: I9e19b3bdd6b3039511d32c074ff4481bbe805169
+Signed-off-by: Andrei Warkentin <andreiw@motorola.com>
+---
+ drivers/block/vhdloop.c |  108 +++++++++++++++++++++++++++++++----------------
+ 1 files changed, 72 insertions(+), 36 deletions(-)
+
+diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
+index 6e34153..8f94fce 100644
+--- a/drivers/block/vhdloop.c
++++ b/drivers/block/vhdloop.c
+@@ -33,6 +33,9 @@ MODULE_AUTHOR("Andrei Warkentin <andreiw@motorola.com>");
+ #define VHD_VERSION_1       (0x00010000UL)
+ #define VHD_VMAJ_MASK       (0xFFFF0000UL)
+ #define VHD_VMIN_MASK       (0x0000FFFFUL)
++#define DYN_VERSION_1       (0x00010000UL)
++#define DYN_VMAJ_MASK       (0xFFFF0000UL)
++#define DYN_VMIN_MASK       (0x0000FFFFUL)
+ #define FOOTER_DOFF_FIXED   (0xFFFFFFFFFFFFFFFFULL)
+ #define DYN_DOFF_DYN        (0xFFFFFFFFFFFFFFFFULL)
+ #define FOOTER_TYPE_FIXED   (2)
+@@ -145,8 +148,6 @@ struct vhd
+ 	loff_t file_size;
+ 	loff_t size;
+ 	u32 type;
+-	u32 features;
+-	u32 version;
+ 
+ 	/*
+ 	 * Parsed from dynamic header.
+@@ -413,6 +414,13 @@ static int vhd_verify_dyn(struct vhd *vhd)
+ 		return -EINVAL;
+ 	}
+ 
++	if ((be32_to_cpu(vhd->dyn.header_version) & DYN_VMAJ_MASK) != DYN_VERSION_1) {
++		printk(KERN_ERR "%s: corrupt (bad version 0x%x)\n",
++		       VHD_DNAME(vhd),
++		       be32_to_cpu(vhd->dyn.header_version));
++		return -EINVAL;
++	}
++
+ 	vhd->table_offset = be64_to_cpu(vhd->dyn.table_offset);
+ 	vhd->bat_entries = be32_to_cpu(vhd->dyn.max_tab_entries);
+ 	vhd->block_unit = be32_to_cpu(vhd->dyn.block_size);
+@@ -477,7 +485,7 @@ static int vhd_verify_fixed(struct vhd *vhd)
+ 		return -EINVAL;
+ 	}
+ 
+-	if (vhd->size + FOOTER_SZ(vhd) != vhd->file_size) {
++	if (vhd->size + FOOTER_SZ(vhd) > vhd->file_size) {
+ 		printk(KERN_ERR "%s: corrupt (wrong size %lld bytes)\n",
+ 		       VHD_DNAME(vhd), vhd->size);
+ 		return -EINVAL;
+@@ -489,19 +497,18 @@ static int vhd_verify(struct vhd *vhd)
+ {
+ 	int ret;
+ 
+-	vhd->features = be32_to_cpu(vhd->footer->features);
+-	if (!(vhd->features & FOOTER_FEAT_RSVD)) {
++	if (!(be32_to_cpu(vhd->footer->features) & FOOTER_FEAT_RSVD)) {
+ 		printk(KERN_ERR "%s: corrupt (bad features 0x%x)\n",
+ 		       VHD_DNAME(vhd),
+-		       vhd->features);
++		       be32_to_cpu(vhd->footer->features));
+ 		return -EINVAL;
+ 	}
+ 
+-	vhd->version = be32_to_cpu(vhd->footer->file_format_ver);
+-	if ((vhd->version & VHD_VMAJ_MASK) != VHD_VERSION_1) {
++	if ((be32_to_cpu(vhd->footer->file_format_ver) &
++	     VHD_VMAJ_MASK) != VHD_VERSION_1) {
+ 		printk(KERN_ERR "%s: corrupt (bad version 0x%x)\n",
+ 		       VHD_DNAME(vhd),
+-		       vhd->version);
++		       be32_to_cpu(vhd->footer->file_format_ver));
+ 		return -EINVAL;
+ 	}
+ 
+@@ -531,51 +538,69 @@ static int vhd_verify(struct vhd *vhd)
+ 	return ret;
+ }
+ 
+-static void vhd_free_bmps(struct vhd *vhd)
++static int vhd_meta_flush(struct vhd *vhd)
+ {
++	int ret;
+ 	u32 bat_index;
+ 	struct vhd_bmp *bmp;
+ 
+ 	for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
+ 		bmp = vhd->bmps[bat_index];
+-		if (bmp) {
+-			if (bmp->flags & VHD_BMP_DIRTY)
+-				vhd_write_kbuf(vhd->lo, vhd->lo_file, &bmp->bmp,
+-					       SECTOR_BMP_SZ(vhd->block_unit),
+-					       be32_to_cpu(vhd->bat[bat_index]) << SEC_SHIFT);
+-			kmem_cache_free(vhd->bmp_cache, bmp);
++		if (bmp && (bmp->flags & VHD_BMP_DIRTY)) {
++			ret = vhd_write_kbuf(vhd->lo, vhd->lo_file, &bmp->bmp,
++					     SECTOR_BMP_SZ(vhd->block_unit),
++					     be32_to_cpu(vhd->bat[bat_index]) << SEC_SHIFT);
++			if (ret) {
++				printk(KERN_ERR "%s: failed to flush bitmap for block %d\n",
++				       VHD_DNAME(vhd), bat_index);
++				return ret;
++			}
++			bmp->flags ^= VHD_BMP_DIRTY;
+ 		}
+ 	}
+-	kfree(vhd->bmps);
+-}
+-
+-static void vhd_free(struct vhd *vhd)
+-{
+-	int ret;
+-
+-	if (vhd->bmps)
+-		vhd_free_bmps(vhd);
+-	if (vhd->bmp_cache)
+-		kmem_cache_destroy(vhd->bmp_cache);
+-	if (vhd->bmp_cache_name)
+-		kfree(vhd->bmp_cache_name);
+ 
+ 	if (vhd->flags & VHD_BAT_DIRTY) {
+ 		ret = vhd_write_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
+ 				     BAT_SZ(vhd->bat_entries),
+ 				     vhd->table_offset);
+-		if (ret)
+-			printk(KERN_ERR "%s: failed to flush BAT, image corrupt\n",
++		if (ret) {
++			printk(KERN_ERR "%s: failed to flush BAT\n",
+ 			       VHD_DNAME(vhd));
++			return ret;
++		}
+ 
+ 		ret = vhd_write_kbuf(vhd->lo, vhd->lo_file, vhd->footer,
+ 				     FOOTER_SZ(vhd),
+ 				     vhd->file_size - FOOTER_SZ(vhd));
+-		if (ret)
+-			printk(KERN_ERR "%s: failed to flush footer, image corrupt\n",
++		if (ret) {
++			printk(KERN_ERR "%s: failed to flush footer\n",
+ 			       VHD_DNAME(vhd));
++			return ret;
++		}
++		vhd->flags ^= VHD_BAT_DIRTY;
+ 	}
++	return ret;
++}
+ 
++static void vhd_free(struct vhd *vhd)
++{
++	u32 bat_index;
++
++	if (vhd_meta_flush(vhd))
++		printk(KERN_ERR "%s: failed to flush metadata, expect corruption\n",
++		       VHD_DNAME(vhd));
++
++	if (vhd->bmps) {
++		for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
++			if (vhd->bmps[bat_index])
++				kmem_cache_free(vhd->bmp_cache, vhd->bmps[bat_index]);
++		}
++		kfree(vhd->bmps);
++	}
++	if (vhd->bmp_cache)
++		kmem_cache_destroy(vhd->bmp_cache);
++	if (vhd->bmp_cache_name)
++		kfree(vhd->bmp_cache_name);
+ 	if (vhd->bat)
+ 		kfree(vhd->bat);
+ 	kfree(vhd);
+@@ -641,6 +666,13 @@ static loff_t vhd_size(struct loop_device *lo, struct lo_file *lo_file)
+ static int vhd_sync(struct loop_device *lo, struct lo_file *lo_file,
+ 		    unsigned long reqf)
+ {
++	int ret;
++
++	struct vhd *vhd = lo_file->parser_priv;
++	ret = vhd_meta_flush(vhd);
++	if (ret)
++		return ret;
++
+ 	return loop_sync(lo, lo_file, reqf);
+ }
+ 
+@@ -657,6 +689,7 @@ static int vhd_pos_to_fpos(struct vhd *vhd, loff_t pos,
+ 		if (cmd == READ)
+ 			return -ENOENT;
+ 
++		printk("allocating block\n");
+ 		block_fpos = round_up(vhd->file_size - FOOTER_SZ(vhd), SEC_SZ);
+ 		vhd->file_size = block_fpos + vhd->block_unit + FOOTER_SZ(vhd);
+ 		vhd->bat[bat_entry] = cpu_to_be32(block_fpos >> SEC_SHIFT);
+@@ -665,6 +698,7 @@ static int vhd_pos_to_fpos(struct vhd *vhd, loff_t pos,
+ 			return -ENOMEM;
+ 		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
+ 		vhd->flags |= VHD_BAT_DIRTY;
++		printk("allocated block @ fpos 0x%llx\n", block_fpos);
+ 	}
+ 
+ 	if (!vhd->bmps[bat_entry]) {
+@@ -678,13 +712,15 @@ static int vhd_pos_to_fpos(struct vhd *vhd, loff_t pos,
+ 	}
+ 
+ 	if (cmd == READ) {
+-		if (!(vhd->bmps[bat_entry]->bmp[pos >> SEC_SHIFT + 3] &
++		if (!(vhd->bmps[bat_entry]->bmp[pos >> (SEC_SHIFT + 3)] &
+ 		      (1 << (pos << SEC_SHIFT & 7))))
+ 			return -ENOENT;
+ 	} else {
+-		vhd->bmps[bat_entry]->bmp[pos >> SEC_SHIFT + 3] |=
+-			1 << (pos << SEC_SHIFT & 7);
++		printk("updating meta\n");
++		vhd->bmps[bat_entry]->bmp[pos >> (SEC_SHIFT + 3)] |=
++			1 << ((pos << SEC_SHIFT) & 7);
+ 		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
++		printk("updated meta\n");
+ 	}
+ 
+ 	block_fpos += SECTOR_BMP_SZ(vhd->block_unit) + offset;
+-- 
+1.7.0.4
+

@@ -1,7 +1,7 @@
 From e570b96ee77ee3caadc3af0cb3384e92c10a3cc1 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Thu, 25 Aug 2011 18:46:12 -0500
-Subject: [PATCH 17/17] VHDLoop: Write support for dynamic VHD.
+Subject: [PATCH 17/18] VHDLoop: Write support for dynamic VHD.
 
 Seemingly works but need to test block allocation
 path with a bigger VHD.

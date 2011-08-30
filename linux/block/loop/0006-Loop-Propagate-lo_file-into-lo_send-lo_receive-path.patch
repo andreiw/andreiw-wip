@@ -1,7 +1,7 @@
 From 44af9336a637923afbfa53a4fecb5b44c744a978 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@motorola.com>
 Date: Wed, 10 Aug 2011 17:21:13 -0500
-Subject: [PATCH 06/17] Loop: Propagate lo_file into lo_send/lo_receive path.
+Subject: [PATCH 06/18] Loop: Propagate lo_file into lo_send/lo_receive path.
 
 This allows lo_send/lo_receive to operate on arbitrary
 lo_files.
