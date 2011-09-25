@@ -1,0 +1,74 @@
+From 1deed8dfc79af7e28492ab2a80dfbe29e20ea803 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sun, 25 Sep 2011 16:45:05 -0400
+Subject: [PATCH] BlueZ: HCI: Be more resilient to HCI protocol problems.
+
+Do not corrupt kernel structs on connect message handling after
+a missed (due to HCI transport issues or bad BT controller)
+disconnect event message.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ net/bluetooth/hci_event.c |   32 ++++++++++++++++++++++++++------
+ 1 files changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index a40170e..244807d 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -1417,8 +1417,15 @@ static inline void hci_conn_complete_evt(struct hci_dev *hdev, struct sk_buff *s
+ 		} else
+ 			conn->state = BT_CONNECTED;
+ 
+-		hci_conn_hold_device(conn);
+-		hci_conn_add_sysfs(conn);
++		/* We could have somehow not hci_conn_del-eted, due
++		   to errors in the HCI transport. */
++		if (atomic_read(&conn->devref) == 0) {
++			hci_conn_hold_device(conn);
++			hci_conn_add_sysfs(conn);
++		} else {
++			BT_ERR("connection to %s was never torn down", batostr(&ev->bdaddr));
++			hci_proto_disconn_cfm(conn, 0x16);
++		}
+ 
+ 		if (test_bit(HCI_AUTH, &hdev->flags))
+ 			conn->link_mode |= HCI_LM_AUTH;
+@@ -2476,8 +2483,16 @@ static inline void hci_sync_conn_complete_evt(struct hci_dev *hdev, struct sk_bu
+ 		conn->handle = __le16_to_cpu(ev->handle);
+ 		conn->state  = BT_CONNECTED;
+ 
+-		hci_conn_hold_device(conn);
+-		hci_conn_add_sysfs(conn);
++		/* We could have somehow not hci_conn_del-eted, due
++		   to errors in the HCI transport. */
++		if (atomic_read(&conn->devref) == 0) {
++			hci_conn_hold_device(conn);
++			hci_conn_add_sysfs(conn);
++		} else {
++			BT_ERR("sync connection to %s was never torn down", batostr(&ev->bdaddr));
++			hci_proto_disconn_cfm(conn, 0x16);
++		}
++
+ 		break;
+ 
+ 	case 0x11:	/* Unsupported Feature or Parameter Value */
+@@ -2823,8 +2838,13 @@ static inline void hci_le_conn_complete_evt(struct hci_dev *hdev, struct sk_buff
+ 	conn->handle = __le16_to_cpu(ev->handle);
+ 	conn->state = BT_CONNECTED;
+ 
+-	hci_conn_hold_device(conn);
+-	hci_conn_add_sysfs(conn);
++	if (atomic_read(&conn->devref) == 0) {
++		hci_conn_hold_device(conn);
++		hci_conn_add_sysfs(conn);
++	} else {
++		BT_ERR("le connection to %s was never torn down", batostr(&ev->bdaddr));
++		hci_proto_disconn_cfm(conn, 0x16);
++	}
+ 
+ 	hci_proto_connect_cfm(conn, ev->status);
+ 
+-- 
+1.7.6.1
+
