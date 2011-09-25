@@ -1,0 +1,88 @@
+From f978d6341c1522fda51439b01e65fcadced55abc Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sat, 24 Sep 2011 03:50:49 -0400
+Subject: [PATCH 1/3] MMP2: Enable FIQ support.
+
+Allows FIQ delivery and FIQ handler support.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ arch/arm/mach-mmp/Kconfig             |    1 +
+ arch/arm/mach-mmp/include/mach/irqs.h |    4 ++++
+ arch/arm/mach-mmp/include/mach/mmp2.h |    5 +++++
+ arch/arm/mach-mmp/irq-mmp2.c          |   18 ++++++++++++++++++
+ 4 files changed, 28 insertions(+), 0 deletions(-)
+
+diff --git a/arch/arm/mach-mmp/Kconfig b/arch/arm/mach-mmp/Kconfig
+index 9d285ea..9e8514f 100644
+--- a/arch/arm/mach-mmp/Kconfig
++++ b/arch/arm/mach-mmp/Kconfig
+@@ -101,6 +101,7 @@ config CPU_PXA910
+ config CPU_MMP2
+ 	bool
+ 	select CPU_PJ4
++        select FIQ
+ 	help
+ 	  Select code specific to MMP2. MMP2 is ARMv7 compatible.
+ 
+diff --git a/arch/arm/mach-mmp/include/mach/irqs.h b/arch/arm/mach-mmp/include/mach/irqs.h
+index a09d328..dd4545d 100644
+--- a/arch/arm/mach-mmp/include/mach/irqs.h
++++ b/arch/arm/mach-mmp/include/mach/irqs.h
+@@ -226,4 +226,8 @@
+ 
+ #define NR_IRQS				(IRQ_BOARD_START)
+ 
++#ifdef CONFIG_FIQ
++#define FIQ_START			(0)
++#endif
++
+ #endif /* __ASM_MACH_IRQS_H */
+diff --git a/arch/arm/mach-mmp/include/mach/mmp2.h b/arch/arm/mach-mmp/include/mach/mmp2.h
+index b5f79f2..eb5b57e 100644
+--- a/arch/arm/mach-mmp/include/mach/mmp2.h
++++ b/arch/arm/mach-mmp/include/mach/mmp2.h
+@@ -10,6 +10,11 @@ extern void __init mmp2_init_icu(void);
+ extern void __init mmp2_init_irq(void);
+ extern void mmp2_clear_pmic_int(void);
+ 
++#ifdef CONFIG_FIQ
++extern void icu_fiq_enable(unsigned int irq);
++extern void icu_fiq_disable(unsigned int irq);
++#endif
++
+ #include <linux/i2c.h>
+ #include <linux/i2c/pxa-i2c.h>
+ #include <mach/devices.h>
+diff --git a/arch/arm/mach-mmp/irq-mmp2.c b/arch/arm/mach-mmp/irq-mmp2.c
+index 508689f..0924046 100644
+--- a/arch/arm/mach-mmp/irq-mmp2.c
++++ b/arch/arm/mach-mmp/irq-mmp2.c
+@@ -20,6 +20,24 @@
+ 
+ #include "common.h"
+ 
++#ifdef CONFIG_FIQ
++void icu_fiq_enable(unsigned int irq)
++{
++	uint32_t r = __raw_readl(ICU_INT_CONF(irq));
++
++	r |= ICU_INT_ROUTE_PJ4_FIQ;
++	__raw_writel(r, ICU_INT_CONF(irq));
++}
++
++void icu_fiq_disable(unsigned int irq)
++{
++	uint32_t r = __raw_readl(ICU_INT_CONF(irq));
++
++	r &= ~ICU_INT_ROUTE_PJ4_FIQ;
++	__raw_writel(r, ICU_INT_CONF(irq));
++}
++#endif
++
+ static void icu_mask_irq(struct irq_data *d)
+ {
+ 	uint32_t r = __raw_readl(ICU_INT_CONF(d->irq));
+-- 
+1.7.6.1
+
