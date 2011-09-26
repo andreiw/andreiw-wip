@@ -1,0 +1,307 @@
+From 4dc747d6853ad27de67ceafb0f9ad17dfe32d821 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Mon, 26 Sep 2011 03:41:46 -0400
+Subject: [PATCH 4/4] MMP2: finish mmp2_fiq_debugger.c.
+
+Adds UART code. Had to add another method to asm/fiq_debugger.h
+to expose UART device to common FIQ debugger code.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ arch/arm/include/asm/fiq_debugger.h   |    3 +
+ arch/arm/mach-mmp/include/mach/mmp2.h |    8 ++-
+ arch/arm/mach-mmp/mmp2_fiq_debugger.c |  127 +++++++++++++++++++++++++++------
+ arch/arm/mach-mmp/olpc-xo-1-75.c      |   11 ++-
+ 4 files changed, 123 insertions(+), 26 deletions(-)
+
+diff --git a/arch/arm/include/asm/fiq_debugger.h b/arch/arm/include/asm/fiq_debugger.h
+index 00c41ee..4698566 100644
+--- a/arch/arm/include/asm/fiq_debugger.h
++++ b/arch/arm/include/asm/fiq_debugger.h
+@@ -1,6 +1,8 @@
+ /*
+  * arch/arm/include/asm/fiq_debugger.h
+  *
++ * Copyright (C) 2011 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
+  * Copyright (C) 2010 Google, Inc.
+  * Author: Colin Cross <ccross@android.com>
+  *
+@@ -37,6 +39,7 @@ struct fiq_debugger_pdata {
+ 
+ 	void (*force_irq)(struct platform_device *pdev, unsigned int irq);
+ 	void (*force_irq_ack)(struct platform_device *pdev, unsigned int irq);
++	struct clk *(*uart_clk)(struct platform_device *pdev);
+ };
+ 
+ #endif
+diff --git a/arch/arm/mach-mmp/include/mach/mmp2.h b/arch/arm/mach-mmp/include/mach/mmp2.h
+index 60c787b..03d09a0 100644
+--- a/arch/arm/mach-mmp/include/mach/mmp2.h
++++ b/arch/arm/mach-mmp/include/mach/mmp2.h
+@@ -18,12 +18,16 @@ extern void icu_fiq_disable(unsigned int irq);
+ #include <linux/i2c.h>
+ #include <linux/i2c/pxa-i2c.h>
+ #include <mach/devices.h>
++#include <linux/clk.h>
+ 
+ #ifdef CONFIG_MMP2_FIQ_DEBUGGER
+-extern void __init mmp2_fiq_debug_init(struct pxa_device_desc *d);
++extern int __init mmp2_fiq_debug_init(unsigned int base, struct clk *clk,
++				       int irq, int signal_irq, int wakeup_irq);
+ #else
+-static inline void __init mmp_fiq_debug_init(struct pxa_device_desc *d)
++static inline int __init mmp_fiq_debug_init(unsigned int base, struct clk *clk,
++					    int irq, int signal_irq, int wakeup_irq)
+ {
++	return -ENODEV;
+ }
+ #endif
+ 
+diff --git a/arch/arm/mach-mmp/mmp2_fiq_debugger.c b/arch/arm/mach-mmp/mmp2_fiq_debugger.c
+index bffa0df..06de7d9 100644
+--- a/arch/arm/mach-mmp/mmp2_fiq_debugger.c
++++ b/arch/arm/mach-mmp/mmp2_fiq_debugger.c
+@@ -6,6 +6,8 @@
+  * Copyright (C) 2011 Andrei Warkentin <andrey.warkentin@gmail.com>
+  * Copyright (C) 2008 Google, Inc.
+  *
++ * Serial code is derived from tty/serial/pxa.c.
++ *
+  * This file is licensed under the terms of the GNU General Public
+  * License version 2.  This program is licensed "as is" without any
+  * warranty of any kind, whether express or implied.
+@@ -17,30 +19,101 @@
+ #include <linux/io.h>
+ #include <linux/slab.h>
+ #include <linux/platform_device.h>
++#include <linux/serial_reg.h>
+ #include <asm/fiq_debugger.h>
+ #include <mach/mmp2.h>
+ 
+ struct mmp2_fiq_debugger {
+ 	struct fiq_debugger_pdata pdata;
++	bool break_seen;
++	struct clk *clk;
+ 	void __iomem *base;
+ };
+ 
++static inline unsigned int mmp2_in(struct mmp2_fiq_debugger *d, int offset)
++{
++	offset <<= 2;
++	return readl(d->base + offset);
++}
++
++static inline void mmp2_out(struct mmp2_fiq_debugger *d, int offset, int value)
++{
++	offset <<= 2;
++	writel(value, d->base + offset);
++}
++
++static struct clk *debug_clk(struct platform_device *pdev)
++{
++	struct mmp2_fiq_debugger *d;
++	d = container_of(dev_get_platdata(&pdev->dev), typeof(*d), pdata);
++
++	return d->clk;
++}
++
+ static int debug_port_init(struct platform_device *pdev)
+ {
+-	return -EIO;
++	struct mmp2_fiq_debugger *d;
++	d = container_of(dev_get_platdata(&pdev->dev), typeof(*d), pdata);
++
++	if (mmp2_in(d, UART_LSR) & UART_LSR_DR)
++		(void) mmp2_in(d, UART_RX);
++
++	/* Enable RX and LSR interrupt. */
++	mmp2_out(d, UART_IER, UART_IER_RLSI | UART_IER_RDI);
++
++	/* No FIFO. */
++        mmp2_out(d, UART_FCR, 0);
++
++	return 0;
++}
++
++static inline unsigned int mmp2_read_lsr(struct mmp2_fiq_debugger *d)
++{
++	unsigned int lsr;
++
++	lsr = mmp2_in(d, UART_LSR);
++	if (lsr & UART_LSR_BI)
++		d->break_seen = true;
++
++	return lsr;
+ }
+ 
+ static int debug_getc(struct platform_device *pdev)
+ {
++	unsigned lsr;
++	struct mmp2_fiq_debugger *d;
++	d = container_of(dev_get_platdata(&pdev->dev), typeof(*d), pdata);
++
++	lsr = mmp2_read_lsr(d);
++	if (lsr & UART_LSR_BI || d->break_seen) {
++		d->break_seen = false;
++		return FIQ_DEBUGGER_BREAK;
++	}
++
++	if (lsr & UART_LSR_DR)
++		return mmp2_in(d, UART_RX);
++
+ 	return FIQ_DEBUGGER_NO_CHAR;
+ }
+ 
+ static void debug_putc(struct platform_device *pdev, unsigned int c)
+ {
++	struct mmp2_fiq_debugger *d;
++	d = container_of(dev_get_platdata(&pdev->dev), typeof(*d), pdata);
++
++	while (!(mmp2_read_lsr(d) & UART_LSR_THRE))
++		cpu_relax();
++
++	mmp2_out(d, UART_TX, c);
+ }
+ 
+ static void debug_flush(struct platform_device *pdev)
+ {
++	struct mmp2_fiq_debugger *d;
++	d = container_of(dev_get_platdata(&pdev->dev), typeof(*d), pdata);
++
++	while (!(mmp2_read_lsr(d) & UART_LSR_TEMT))
++		cpu_relax();
+ }
+ 
+ static void debug_fiq_enable(struct platform_device *pdev,
+@@ -55,27 +128,30 @@ static void debug_fiq_enable(struct platform_device *pdev,
+ 
+ static int mmp2_fiq_debugger_id;
+ 
+-void __init mmp2_fiq_debug_init(struct pxa_device_desc *d)
++int __init mmp2_fiq_debug_init(unsigned int base, struct clk *clk,
++				int irq, int signal_irq, int wakeup_irq)
+ {
+-	struct mmp2_fiq_debugger *t;
++	struct mmp2_fiq_debugger *d;
+ 	struct platform_device *pdev;
+ 	struct resource *res;
+ 	int res_count;
+ 
+-	t = kzalloc(sizeof(struct mmp2_fiq_debugger), GFP_KERNEL);
+-	if (!t) {
++	d = kzalloc(sizeof(struct mmp2_fiq_debugger), GFP_KERNEL);
++	if (!d) {
+ 		pr_err("Failed to allocate for fiq debugger\n");
+-		return;
++		return -ENOMEM;
+ 	}
+ 
+-	t->pdata.uart_init = debug_port_init;
+-	t->pdata.uart_getc = debug_getc;
+-	t->pdata.uart_putc = debug_putc;
+-	t->pdata.uart_flush = debug_flush;
+-	t->pdata.fiq_enable = debug_fiq_enable;
++	d->pdata.uart_init = debug_port_init;
++	d->pdata.uart_getc = debug_getc;
++	d->pdata.uart_putc = debug_putc;
++	d->pdata.uart_flush = debug_flush;
++	d->pdata.uart_clk = debug_clk;
++	d->pdata.fiq_enable = debug_fiq_enable;
+ 
+-	t->base = ioremap(d->start, PAGE_SIZE);
+-	if (!t->base) {
++	d->clk = clk;
++	d->base = ioremap(base, PAGE_SIZE);
++	if (!d->base) {
+ 		pr_err("Failed to ioremap for fiq debugger\n");
+ 		goto out1;
+ 	}
+@@ -93,19 +169,27 @@ void __init mmp2_fiq_debug_init(struct pxa_device_desc *d)
+ 	};
+ 
+ 	res[0].flags = IORESOURCE_IRQ;
+-	res[0].start = d->irq;
+-	res[0].end = d->irq;
++	res[0].start = irq;
++	res[0].end = irq;
+ 	res[0].name = "fiq";
+ 
+ 	res[1].flags = IORESOURCE_IRQ;
+-	res[1].start = d->irq;
+-	res[1].end = d->irq;
++	res[1].start = signal_irq;
++	res[1].end = signal_irq;
+ 	res[1].name = "signal";
+ 	res_count = 2;
+ 
++	if (wakeup_irq >= 0) {
++		res[2].flags = IORESOURCE_IRQ;
++		res[2].start = wakeup_irq;
++		res[2].end = wakeup_irq;
++		res[2].name = "wakeup";
++		res_count++;
++	}
++
+ 	pdev->name = "fiq_debugger";
+ 	pdev->id = mmp2_fiq_debugger_id++;
+-	pdev->dev.platform_data = &t->pdata;
++	pdev->dev.platform_data = &d->pdata;
+ 	pdev->resource = res;
+ 	pdev->num_resources = res_count;
+ 
+@@ -114,15 +198,16 @@ void __init mmp2_fiq_debug_init(struct pxa_device_desc *d)
+ 		goto out4;
+ 	}
+ 
+-	return;
++	return 0;
+ 
+ out4:
+ 	kfree(pdev);
+ out3:
+ 	kfree(res);
+ out2:
+-	iounmap(t->base);
++	iounmap(d->base);
+ out1:
+-	kfree(t);
++	kfree(d);
++	return -ENXIO;
+ }
+ 
+diff --git a/arch/arm/mach-mmp/olpc-xo-1-75.c b/arch/arm/mach-mmp/olpc-xo-1-75.c
+index ef9e8ec..e60f93a 100644
+--- a/arch/arm/mach-mmp/olpc-xo-1-75.c
++++ b/arch/arm/mach-mmp/olpc-xo-1-75.c
+@@ -528,19 +528,24 @@ static void __init olpc_init_early(void)
+ static void __init olpc_xo_1_75_init(void)
+ {
+ 	u32 twsi6_lcr;
++        struct clk *debug_clk;
+ 	u32 __iomem *tmp;
+ 
+ 	pm_power_off = olpc_xo_1_75_poweroff;
+ 	arm_pm_restart = olpc_xo_1_75_restart;
+ 
+-	mmp2_fiq_debug_init(&mmp2_device_uart3);
+-
+ 	/* serial ports */
+ 	/* don't bother creating /dev/ttyS0 -- it only appears on
+ 	 * an unpopulated (and difficult to install) ribbon cable connector.
+ 	 *  mmp2_add_uart(1);  // ttyS0: on the 20-pin jtag/debug connector
+ 	 */
+-	mmp2_add_uart(3);  // ttyS2: normal console/debug
++	debug_clk = clk_get_sys("pxa2xx-uart.3", NULL);
++	if (!mmp2_fiq_debug_init(0xd4018000, debug_clk, IRQ_MMP2_UART3,
++                                 IRQ_MMP2_UART3, -1)) {
++          clk_put(debug_clk);
++          mmp2_add_uart(3);  // ttyS2: normal console/debug
++	}
++
+ 	/*	
+ 	 * configure ttyS3 by default, since it might be useful under
+ 	 * linux.  this is okay even if cforth is asked to keep control of
+-- 
+1.7.6.1
+

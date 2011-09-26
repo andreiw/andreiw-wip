@@ -1,7 +1,7 @@
-From bd9cd5410427e5b190f32b270aee45bdf6a43878 Mon Sep 17 00:00:00 2001
+From 5c47acad2e94b7b4a7ebc2a74dda56b13e35d5ef Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 04:06:19 -0400
-Subject: [PATCH 3/3] MMP2: First glimpses of FIQ debugger pdev.
+Subject: [PATCH 3/4] MMP2: First glimpses of FIQ debugger pdev.
 
 Turned on for XO-1.75.
 
@@ -125,7 +125,7 @@ index eb5b57e..60c787b 100644
  extern struct pxa_device_desc mmp2_device_uart3;
 diff --git a/arch/arm/mach-mmp/mmp2_fiq_debugger.c b/arch/arm/mach-mmp/mmp2_fiq_debugger.c
 new file mode 100644
-index 0000000..aef5f4d
+index 0000000..bffa0df
 --- /dev/null
 +++ b/arch/arm/mach-mmp/mmp2_fiq_debugger.c
 @@ -0,0 +1,128 @@
@@ -195,12 +195,12 @@ index 0000000..aef5f4d
 +
 +	t = kzalloc(sizeof(struct mmp2_fiq_debugger), GFP_KERNEL);
 +	if (!t) {
-+          pr_err("Failed to allocate for fiq debugger\n");
-+          return;
-+        }
++		pr_err("Failed to allocate for fiq debugger\n");
++		return;
++	}
 +
-+        t->pdata.uart_init = debug_port_init;
-+        t->pdata.uart_getc = debug_getc;
++	t->pdata.uart_init = debug_port_init;
++	t->pdata.uart_getc = debug_getc;
 +	t->pdata.uart_putc = debug_putc;
 +	t->pdata.uart_flush = debug_flush;
 +	t->pdata.fiq_enable = debug_fiq_enable;
@@ -258,14 +258,14 @@ index 0000000..aef5f4d
 +}
 +
 diff --git a/arch/arm/mach-mmp/olpc-xo-1-75.c b/arch/arm/mach-mmp/olpc-xo-1-75.c
-index 7fbdaa5..f78de79 100644
+index 7fbdaa5..ef9e8ec 100644
 --- a/arch/arm/mach-mmp/olpc-xo-1-75.c
 +++ b/arch/arm/mach-mmp/olpc-xo-1-75.c
 @@ -533,6 +533,8 @@ static void __init olpc_xo_1_75_init(void)
  	pm_power_off = olpc_xo_1_75_poweroff;
  	arm_pm_restart = olpc_xo_1_75_restart;
  
-+        mmp2_fiq_debug_init(&mmp2_device_uart3);
++	mmp2_fiq_debug_init(&mmp2_device_uart3);
 +
  	/* serial ports */
  	/* don't bother creating /dev/ttyS0 -- it only appears on
