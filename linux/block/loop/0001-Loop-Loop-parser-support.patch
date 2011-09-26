@@ -1,0 +1,816 @@
+From d7576c75ace98b97bd77dd3930c4bf016bc588cc Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sun, 25 Sep 2011 23:36:19 -0400
+Subject: [PATCH 1/2] Loop: Loop parser support.
+
+Loop parsers allow the loop device to understand sparse
+disk image formats, such as VMDK, VHD and QCOW.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ drivers/block/loop.c |  370 ++++++++++++++++++++++++++++++++++++--------------
+ include/linux/loop.h |   68 ++++++++--
+ 2 files changed, 322 insertions(+), 116 deletions(-)
+
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index 4720c7a..6eb8a8a 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -80,9 +80,12 @@
+ 
+ static DEFINE_IDR(loop_index_idr);
+ static DEFINE_MUTEX(loop_index_mutex);
++static LIST_HEAD(loop_parsers);
++static DEFINE_MUTEX(loop_parsers_mutex);
+ 
+ static int max_part;
+ static int part_shift;
++static struct loop_parser raw_parser;
+ 
+ /*
+  * Transfer functions
+@@ -159,47 +162,17 @@ static struct loop_func_table *xfer_funcs[MAX_LO_CRYPT] = {
+ 	&xor_funcs
+ };
+ 
+-static loff_t get_loop_size(struct loop_device *lo, struct file *file)
+-{
+-	loff_t size, offset, loopsize;
+-
+-	/* Compute loopsize in bytes */
+-	size = i_size_read(file->f_mapping->host);
+-	offset = lo->lo_offset;
+-	loopsize = size - offset;
+-	if (lo->lo_sizelimit > 0 && lo->lo_sizelimit < loopsize)
+-		loopsize = lo->lo_sizelimit;
+-
+-	/*
+-	 * Unfortunately, if we want to do I/O on the device,
+-	 * the number of 512-byte sectors has to fit into a sector_t.
+-	 */
+-	return loopsize >> 9;
+-}
+-
+ static int
+ figure_loop_size(struct loop_device *lo)
+ {
+-	loff_t size = get_loop_size(lo, lo->lo_backing_file);
++	loff_t size = lo->lo_parser->size(lo, &lo->lo_file);
+ 	sector_t x = (sector_t)size;
+ 
+ 	if (unlikely((loff_t)x != size))
+ 		return -EFBIG;
+ 
+ 	set_capacity(lo->lo_disk, x);
+-	return 0;					
+-}
+-
+-static inline int
+-lo_do_transfer(struct loop_device *lo, int cmd,
+-	       struct page *rpage, unsigned roffs,
+-	       struct page *lpage, unsigned loffs,
+-	       int size, sector_t rblock)
+-{
+-	if (unlikely(!lo->transfer))
+-		return 0;
+-
+-	return lo->transfer(lo, cmd, rpage, roffs, lpage, loffs, size, rblock);
++	return 0;
+ }
+ 
+ /**
+@@ -208,10 +181,13 @@ lo_do_transfer(struct loop_device *lo, int cmd,
+  * This is the fast version for backing filesystems which implement the address
+  * space operations write_begin and write_end.
+  */
+-static int do_lo_send_aops(struct loop_device *lo, struct bio_vec *bvec,
+-		loff_t pos, struct page *unused)
++static int do_lo_send_aops(struct loop_device *lo,
++			   struct lo_file *lo_file,
++			   loop_xfer transfer,
++			   struct bio_vec *bvec,
++			   loff_t pos, struct page *unused)
+ {
+-	struct file *file = lo->lo_backing_file; /* kudos to NFsckingS */
++	struct file *file = lo_file->file; /* kudos to NFsckingS */
+ 	struct address_space *mapping = file->f_mapping;
+ 	pgoff_t index;
+ 	unsigned offset, bv_offs;
+@@ -241,8 +217,8 @@ static int do_lo_send_aops(struct loop_device *lo, struct bio_vec *bvec,
+ 
+ 		file_update_time(file);
+ 
+-		transfer_result = lo_do_transfer(lo, WRITE, page, offset,
+-				bvec->bv_page, bv_offs, size, IV);
++		transfer_result = transfer(lo, WRITE, page, offset,
++					   bvec->bv_page, bv_offs, size, IV);
+ 		copied = size;
+ 		if (unlikely(transfer_result))
+ 			copied = 0;
+@@ -303,9 +279,12 @@ static int __do_lo_send_write(struct file *file,
+  * filesystems.
+  */
+ static int do_lo_send_direct_write(struct loop_device *lo,
+-		struct bio_vec *bvec, loff_t pos, struct page *page)
++				   struct lo_file *lo_file,
++				   loop_xfer unused,
++				   struct bio_vec *bvec, loff_t pos,
++				   struct page *page)
+ {
+-	ssize_t bw = __do_lo_send_write(lo->lo_backing_file,
++	ssize_t bw = __do_lo_send_write(lo_file->file,
+ 			kmap(bvec->bv_page) + bvec->bv_offset,
+ 			bvec->bv_len, pos);
+ 	kunmap(bvec->bv_page);
+@@ -326,13 +305,16 @@ static int do_lo_send_direct_write(struct loop_device *lo,
+  * the transformations in place as we do not have direct access to the
+  * destination pages of the backing file.
+  */
+-static int do_lo_send_write(struct loop_device *lo, struct bio_vec *bvec,
+-		loff_t pos, struct page *page)
+-{
+-	int ret = lo_do_transfer(lo, WRITE, page, 0, bvec->bv_page,
+-			bvec->bv_offset, bvec->bv_len, pos >> 9);
++static int do_lo_send_write(struct loop_device *lo,
++			    struct lo_file *lo_file,
++			    loop_xfer transfer,
++			    struct bio_vec *bvec, loff_t pos,
++			    struct page *page)
++{
++	int ret = transfer(lo, WRITE, page, 0, bvec->bv_page,
++			   bvec->bv_offset, bvec->bv_len, pos >> 9);
+ 	if (likely(!ret))
+-		return __do_lo_send_write(lo->lo_backing_file,
++		return __do_lo_send_write(lo_file->file,
+ 				page_address(page), bvec->bv_len,
+ 				pos);
+ 	printk(KERN_ERR "loop: Transfer error at byte offset %llu, "
+@@ -342,18 +324,22 @@ static int do_lo_send_write(struct loop_device *lo, struct bio_vec *bvec,
+ 	return ret;
+ }
+ 
+-static int lo_send(struct loop_device *lo, struct bio *bio, loff_t pos)
++int loop_send(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos, loop_xfer transfer)
+ {
+-	int (*do_lo_send)(struct loop_device *, struct bio_vec *, loff_t,
+-			struct page *page);
++	int (*do_lo_send)(struct loop_device *, struct lo_file *, loop_xfer,
++			  struct bio_vec *, loff_t, struct page *page);
+ 	struct bio_vec *bvec;
+ 	struct page *page = NULL;
+ 	int i, ret = 0;
+ 
++	if (!transfer)
++		transfer = transfer_none;
++
+ 	do_lo_send = do_lo_send_aops;
+-	if (!(lo->lo_flags & LO_FLAGS_USE_AOPS)) {
++	if (!(lo_file->flags & LO_FILE_FLAGS_USE_AOPS)) {
+ 		do_lo_send = do_lo_send_direct_write;
+-		if (lo->transfer != transfer_none) {
++		if (transfer != transfer_none) {
+ 			page = alloc_page(GFP_NOIO | __GFP_HIGHMEM);
+ 			if (unlikely(!page))
+ 				goto fail;
+@@ -362,7 +348,7 @@ static int lo_send(struct loop_device *lo, struct bio *bio, loff_t pos)
+ 		}
+ 	}
+ 	bio_for_each_segment(bvec, bio, i) {
+-		ret = do_lo_send(lo, bvec, pos, page);
++		ret = do_lo_send(lo, lo_file, transfer, bvec, pos, page);
+ 		if (ret < 0)
+ 			break;
+ 		pos += bvec->bv_len;
+@@ -379,8 +365,11 @@ fail:
+ 	goto out;
+ }
+ 
++EXPORT_SYMBOL(loop_send);
++
+ struct lo_read_data {
+ 	struct loop_device *lo;
++	loop_xfer transfer;
+ 	struct page *page;
+ 	unsigned offset;
+ 	int bsize;
+@@ -402,13 +391,16 @@ lo_splice_actor(struct pipe_inode_info *pipe, struct pipe_buffer *buf,
+ 	if (size > p->bsize)
+ 		size = p->bsize;
+ 
+-	if (lo_do_transfer(lo, READ, page, buf->offset, p->page, p->offset, size, IV)) {
++	if (p->transfer(lo, READ, page, buf->offset, p->page, p->offset, size, IV)) {
+ 		printk(KERN_ERR "loop: transfer error block %ld\n",
+ 		       page->index);
+ 		size = -EINVAL;
+ 	}
+ 
+-	flush_dcache_page(p->page);
++	/* Loop parser can do internal I/O on the file to
++	   kernel buffers, which have no aliasing issues. */
++	if (!PageSlab(p->page))
++		flush_dcache_page(p->page);
+ 
+ 	if (size > 0)
+ 		p->offset += size;
+@@ -423,8 +415,8 @@ lo_direct_splice_actor(struct pipe_inode_info *pipe, struct splice_desc *sd)
+ }
+ 
+ static int
+-do_lo_receive(struct loop_device *lo,
+-	      struct bio_vec *bvec, int bsize, loff_t pos)
++do_lo_receive(struct loop_device *lo, struct lo_file *lo_file,
++	      loop_xfer transfer, struct bio_vec *bvec, loff_t pos)
+ {
+ 	struct lo_read_data cookie;
+ 	struct splice_desc sd;
+@@ -434,7 +426,8 @@ do_lo_receive(struct loop_device *lo,
+ 	cookie.lo = lo;
+ 	cookie.page = bvec->bv_page;
+ 	cookie.offset = bvec->bv_offset;
+-	cookie.bsize = bsize;
++	cookie.bsize = lo_file->blocksize;
++	cookie.transfer = transfer;
+ 
+ 	sd.len = 0;
+ 	sd.total_len = bvec->bv_len;
+@@ -442,7 +435,7 @@ do_lo_receive(struct loop_device *lo,
+ 	sd.pos = pos;
+ 	sd.u.data = &cookie;
+ 
+-	file = lo->lo_backing_file;
++	file = lo_file->file;
+ 	retval = splice_direct_to_actor(file, &sd, lo_direct_splice_actor);
+ 
+ 	if (retval < 0)
+@@ -451,14 +444,17 @@ do_lo_receive(struct loop_device *lo,
+ 	return 0;
+ }
+ 
+-static int
+-lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
++int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos, loop_xfer transfer)
+ {
+ 	struct bio_vec *bvec;
+ 	int i, ret = 0;
+ 
++	if (!transfer)
++		transfer = transfer_none;
++
+ 	bio_for_each_segment(bvec, bio, i) {
+-		ret = do_lo_receive(lo, bvec, bsize, pos);
++		ret = do_lo_receive(lo, lo_file, transfer, bvec, pos);
+ 		if (ret < 0)
+ 			break;
+ 		pos += bvec->bv_len;
+@@ -466,33 +462,55 @@ lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
+ 	return ret;
+ }
+ 
++EXPORT_SYMBOL(loop_recv);
++
++int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
++	      unsigned long reqf)
++{
++	int ret;
++	struct file *file = lo->lo_file.file;
++
++	ret = vfs_fsync(file, 0);
++	if (unlikely(ret && ret != -EINVAL))
++		ret = -EIO;
++
++	return ret;
++}
++
++EXPORT_SYMBOL(loop_sync);
++
+ static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+ {
+ 	loff_t pos;
+ 	int ret;
+ 
+-	pos = ((loff_t) bio->bi_sector << 9) + lo->lo_offset;
++	pos = ((loff_t) bio->bi_sector << 9);
+ 
+ 	if (bio_rw(bio) == WRITE) {
+-		struct file *file = lo->lo_backing_file;
+ 
+ 		if (bio->bi_rw & REQ_FLUSH) {
+-			ret = vfs_fsync(file, 0);
++			ret = lo->lo_parser->sync(lo, &lo->lo_file,
++						  REQ_FLUSH);
++
+ 			if (unlikely(ret && ret != -EINVAL)) {
+ 				ret = -EIO;
+ 				goto out;
+ 			}
+ 		}
+ 
+-		ret = lo_send(lo, bio, pos);
++		ret = lo->lo_parser->write(lo, &lo->lo_file, bio, pos);
+ 
+ 		if ((bio->bi_rw & REQ_FUA) && !ret) {
+-			ret = vfs_fsync(file, 0);
+-			if (unlikely(ret && ret != -EINVAL))
++			ret = lo->lo_parser->sync(lo, &lo->lo_file,
++						  REQ_FUA);
++
++			if (unlikely(ret && ret != -EINVAL)) {
+ 				ret = -EIO;
++				goto out;
++			}
+ 		}
+ 	} else
+-		ret = lo_receive(lo, bio, lo->lo_blocksize, pos);
++		ret = lo->lo_parser->read(lo, &lo->lo_file, bio, pos);
+ 
+ out:
+ 	return ret;
+@@ -634,7 +652,7 @@ static int loop_flush(struct loop_device *lo)
+ static void do_loop_switch(struct loop_device *lo, struct switch_request *p)
+ {
+ 	struct file *file = p->file;
+-	struct file *old_file = lo->lo_backing_file;
++	struct file *old_file = lo->lo_file.file;
+ 	struct address_space *mapping;
+ 
+ 	/* if no new file, only flush of queued bios requested */
+@@ -642,16 +660,62 @@ static void do_loop_switch(struct loop_device *lo, struct switch_request *p)
+ 		goto out;
+ 
+ 	mapping = file->f_mapping;
+-	mapping_set_gfp_mask(old_file->f_mapping, lo->old_gfp_mask);
+-	lo->lo_backing_file = file;
+-	lo->lo_blocksize = S_ISBLK(mapping->host->i_mode) ?
++	mapping_set_gfp_mask(old_file->f_mapping, lo->lo_file.old_gfp_mask);
++	lo->lo_file.file = file;
++	lo->lo_file.blocksize = S_ISBLK(mapping->host->i_mode) ?
+ 		mapping->host->i_bdev->bd_block_size : PAGE_SIZE;
+-	lo->old_gfp_mask = mapping_gfp_mask(mapping);
+-	mapping_set_gfp_mask(mapping, lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS));
++	lo->lo_file.old_gfp_mask = mapping_gfp_mask(mapping);
++	mapping_set_gfp_mask(mapping,
++			     lo->lo_file.old_gfp_mask & ~(__GFP_IO|__GFP_FS));
+ out:
+ 	complete(&p->wait);
+ }
+ 
++static int loop_match_parser(struct loop_device *lo, struct lo_file *lo_file)
++{
++	struct loop_parser *parser;
++	struct module *owner;
++	int ret = 0;
++
++	mutex_lock(&loop_parsers_mutex);
++	list_for_each_entry(parser, &loop_parsers, list) {
++		owner = parser->owner;
++
++		if (!try_module_get(owner))
++			continue;
++
++		ret = parser->init(lo, lo_file);
++		if (!ret) {
++			lo->lo_parser = parser;
++			break;
++		}
++
++		module_put(owner);
++
++		if (ret == -EPERM)
++			break;
++	}
++	mutex_unlock(&loop_parsers_mutex);
++
++	/*
++	 * raw_parser will always bind if no other parsers do,
++	 * unless a parser noted that the file is supported, but
++	 * losetup should be denied.
++	 */
++	if(!lo->lo_parser && ret != -EPERM) {
++		lo->lo_parser = &raw_parser;
++		lo->lo_parser->init(lo, lo_file);
++		ret = 0;
++	}
++	return ret;
++}
++
++static void loop_release_parser(struct loop_device *lo)
++{
++	lo->lo_parser->release(lo, &lo->lo_file);
++	module_put(lo->lo_parser->owner);
++	lo->lo_parser = NULL;
++}
+ 
+ /*
+  * loop_change_fd switched the backing store of a loopback device to
+@@ -683,15 +747,19 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
+ 		goto out;
+ 
+ 	inode = file->f_mapping->host;
+-	old_file = lo->lo_backing_file;
++	old_file = lo->lo_file.file;
+ 
+ 	error = -EINVAL;
+ 
+ 	if (!S_ISREG(inode->i_mode) && !S_ISBLK(inode->i_mode))
+ 		goto out_putf;
+ 
+-	/* size of the new backing store needs to be the same */
+-	if (get_loop_size(lo, file) != get_loop_size(lo, old_file))
++	/* (File) size of the new backing store needs to be the same.
++	   This is an extremely basic check. No verification is
++	   done as to whether the new file is supported by the parser
++	   and equivalent in state to the old one. Caveat Emptor! */
++	if (i_size_read(file->f_mapping->host) !=
++	    i_size_read(old_file->f_mapping->host))
+ 		goto out_putf;
+ 
+ 	/* and ... switch */
+@@ -744,8 +812,8 @@ static ssize_t loop_attr_backing_file_show(struct loop_device *lo, char *buf)
+ 	char *p = NULL;
+ 
+ 	spin_lock_irq(&lo->lo_lock);
+-	if (lo->lo_backing_file)
+-		p = d_path(&lo->lo_backing_file->f_path, buf, PAGE_SIZE - 1);
++	if (lo->lo_file.file)
++		p = d_path(&lo->lo_file.file->f_path, buf, PAGE_SIZE - 1);
+ 	spin_unlock_irq(&lo->lo_lock);
+ 
+ 	if (IS_ERR_OR_NULL(p))
+@@ -813,8 +881,9 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	struct file	*file, *f;
+ 	struct inode	*inode;
+ 	struct address_space *mapping;
+-	unsigned lo_blocksize;
++	unsigned	blocksize;
+ 	int		lo_flags = 0;
++	int		lo_file_flags = 0;
+ 	int		error;
+ 	loff_t		size;
+ 
+@@ -843,7 +912,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 			error = -EINVAL;
+ 			goto out_putf;
+ 		}
+-		f = l->lo_backing_file;
++		f = l->lo_file.file;
+ 	}
+ 
+ 	mapping = file->f_mapping;
+@@ -857,11 +926,11 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 		const struct address_space_operations *aops = mapping->a_ops;
+ 
+ 		if (aops->write_begin)
+-			lo_flags |= LO_FLAGS_USE_AOPS;
+-		if (!(lo_flags & LO_FLAGS_USE_AOPS) && !file->f_op->write)
++			lo_file_flags |= LO_FILE_FLAGS_USE_AOPS;
++		if (!(lo_file_flags & LO_FILE_FLAGS_USE_AOPS) && !file->f_op->write)
+ 			lo_flags |= LO_FLAGS_READ_ONLY;
+ 
+-		lo_blocksize = S_ISBLK(inode->i_mode) ?
++		blocksize = S_ISBLK(inode->i_mode) ?
+ 			inode->i_bdev->bd_block_size : PAGE_SIZE;
+ 
+ 		error = 0;
+@@ -869,28 +938,33 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 		goto out_putf;
+ 	}
+ 
+-	size = get_loop_size(lo, file);
++	lo->lo_file.blocksize = blocksize;
++	lo->lo_file.flags = lo_file_flags;
++	lo->lo_file.file = file;
++	lo->lo_file.old_gfp_mask = mapping_gfp_mask(mapping);
++	mapping_set_gfp_mask(mapping,
++			     lo->lo_file.old_gfp_mask & ~(__GFP_IO|__GFP_FS));
++
++	lo->lo_flags = lo_flags;
++	lo->transfer = transfer_none;
++	lo->lo_sizelimit = 0;
++
++	error = loop_match_parser(lo, &lo->lo_file);
++	if (error)
++		goto out_putlf;
++	size = lo->lo_parser->size(lo, &lo->lo_file);
+ 
+ 	if ((loff_t)(sector_t)size != size) {
+ 		error = -EFBIG;
+-		goto out_putf;
++		goto out_putp;
+ 	}
+ 
+ 	if (!(mode & FMODE_WRITE))
+ 		lo_flags |= LO_FLAGS_READ_ONLY;
+ 
+-	set_device_ro(bdev, (lo_flags & LO_FLAGS_READ_ONLY) != 0);
+-
+-	lo->lo_blocksize = lo_blocksize;
+ 	lo->lo_device = bdev;
+-	lo->lo_flags = lo_flags;
+-	lo->lo_backing_file = file;
+-	lo->transfer = transfer_none;
+ 	lo->ioctl = NULL;
+-	lo->lo_sizelimit = 0;
+-	lo->old_gfp_mask = mapping_gfp_mask(mapping);
+-	mapping_set_gfp_mask(mapping, lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS));
+-
++	set_device_ro(bdev, (lo_flags & LO_FLAGS_READ_ONLY) != 0);
+ 	bio_list_init(&lo->lo_bio_list);
+ 
+ 	/*
+@@ -909,7 +983,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	/* let user-space know about the new size */
+ 	kobject_uevent(&disk_to_dev(bdev->bd_disk)->kobj, KOBJ_CHANGE);
+ 
+-	set_blocksize(bdev, lo_blocksize);
++	set_blocksize(bdev, blocksize);
+ 
+ 	lo->lo_thread = kthread_create(loop_thread, lo, "loop%d",
+ 						lo->lo_number);
+@@ -927,17 +1001,21 @@ out_clr:
+ 	loop_sysfs_exit(lo);
+ 	lo->lo_thread = NULL;
+ 	lo->lo_device = NULL;
+-	lo->lo_backing_file = NULL;
+-	lo->lo_flags = 0;
+ 	set_capacity(lo->lo_disk, 0);
+ 	invalidate_bdev(bdev);
+ 	bd_set_size(bdev, 0);
+ 	kobject_uevent(&disk_to_dev(bdev->bd_disk)->kobj, KOBJ_CHANGE);
+-	mapping_set_gfp_mask(mapping, lo->old_gfp_mask);
+ 	lo->lo_state = Lo_unbound;
+- out_putf:
++out_putp:
++	loop_release_parser(lo);
++out_putlf:
++	lo->lo_flags = 0;
++	lo->lo_file.flags = 0;
++	lo->lo_file.file = NULL;
++	mapping_set_gfp_mask(mapping, lo->lo_file.old_gfp_mask);
++out_putf:
+ 	fput(file);
+- out:
++out:
+ 	/* This is safe: open() is still holding a reference. */
+ 	module_put(THIS_MODULE);
+ 	return error;
+@@ -982,8 +1060,8 @@ loop_init_xfer(struct loop_device *lo, struct loop_func_table *xfer,
+ 
+ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+ {
+-	struct file *filp = lo->lo_backing_file;
+-	gfp_t gfp = lo->old_gfp_mask;
++	struct file *filp = lo->lo_file.file;
++	gfp_t gfp = lo->lo_file.old_gfp_mask;
+ 
+ 	if (lo->lo_state != Lo_bound)
+ 		return -ENXIO;
+@@ -1000,8 +1078,10 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+ 
+ 	kthread_stop(lo->lo_thread);
+ 
++	loop_release_parser(lo);
++
+ 	spin_lock_irq(&lo->lo_lock);
+-	lo->lo_backing_file = NULL;
++	lo->lo_file.file = NULL;
+ 	spin_unlock_irq(&lo->lo_lock);
+ 
+ 	loop_release_xfer(lo);
+@@ -1115,7 +1195,7 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
+ static int
+ loop_get_status(struct loop_device *lo, struct loop_info64 *info)
+ {
+-	struct file *file = lo->lo_backing_file;
++	struct file *file = lo->lo_file.file;
+ 	struct kstat stat;
+ 	int error;
+ 
+@@ -1551,6 +1631,34 @@ MODULE_PARM_DESC(max_part, "Maximum number of partitions per loop device");
+ MODULE_LICENSE("GPL");
+ MODULE_ALIAS_BLOCKDEV_MAJOR(LOOP_MAJOR);
+ 
++int loop_register_parser(struct loop_parser *parser)
++{
++	if (!parser->name ||
++	    !parser->init ||
++	    !parser->release ||
++	    !parser->sync ||
++	    !parser->size ||
++	    !parser->read ||
++	    !parser->write)
++		return -EINVAL;
++
++	mutex_lock(&loop_parsers_mutex);
++	list_add_tail(&parser->list, &loop_parsers);
++	mutex_unlock(&loop_parsers_mutex);
++	return 0;
++}
++
++int loop_unregister_parser(struct loop_parser *parser)
++{
++	mutex_lock(&loop_parsers_mutex);
++	list_del(&parser->list);
++	mutex_unlock(&loop_parsers_mutex);
++	return 0;
++}
++
++EXPORT_SYMBOL(loop_register_parser);
++EXPORT_SYMBOL(loop_unregister_parser);
++
+ int loop_register_transfer(struct loop_func_table *funcs)
+ {
+ 	unsigned int n = funcs->number;
+@@ -1788,6 +1896,60 @@ static struct miscdevice loop_misc = {
+ MODULE_ALIAS_MISCDEV(LOOP_CTRL_MINOR);
+ MODULE_ALIAS("devname:loop-control");
+ 
++static int raw_init(struct loop_device *lo, struct lo_file *lo_file)
++{
++	printk(KERN_INFO "%s: raw %lld bytes\n",
++	       lo->lo_disk->disk_name,
++	       i_size_read(lo_file->file->f_mapping->host));
++	return 0;
++}
++
++static void raw_release(struct loop_device *lo, struct lo_file *lo_file)
++{
++}
++
++static loff_t raw_size(struct loop_device *lo, struct lo_file *lo_file)
++{
++	loff_t size, offset, loopsize;
++
++	/* Compute loopsize in bytes */
++	size = i_size_read(lo_file->file->f_mapping->host);
++	offset = lo->lo_offset;
++	loopsize = size - offset;
++	if (lo->lo_sizelimit > 0 && lo->lo_sizelimit < loopsize)
++		loopsize = lo->lo_sizelimit;
++
++	/*
++	 * Unfortunately, if we want to do I/O on the device,
++	 * the number of 512-byte sectors has to fit into a sector_t.
++	 */
++	return size >> 9;
++}
++
++static int raw_read(struct loop_device *lo, struct lo_file *lo_file,
++		    struct bio *bio, loff_t pos)
++{
++	return loop_recv(lo, lo_file, bio, pos + lo->lo_offset, lo->transfer);
++}
++
++static int raw_write(struct loop_device *lo, struct lo_file *lo_file,
++		     struct bio *bio, loff_t pos)
++{
++	return loop_send(lo, lo_file, bio, pos + lo->lo_offset, lo->transfer);
++}
++
++static struct loop_parser raw_parser =
++{
++	.name = "raw",
++	.init = raw_init,
++	.release = raw_release,
++	.sync = loop_sync,
++	.size = raw_size,
++	.read = raw_read,
++	.write = raw_write,
++	.owner = THIS_MODULE
++};
++
+ static int __init loop_init(void)
+ {
+ 	int i, nr;
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index 683d698..ff8f201 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -28,12 +28,32 @@ enum {
+ 
+ struct loop_func_table;
+ 
++/*
++ * Loop file flags
++ */
++enum {
++	LO_FILE_FLAGS_USE_AOPS	= 1,
++};
++
++struct lo_file {
++	int		flags;
++	struct file *	file;
++	unsigned	blocksize;
++	gfp_t		old_gfp_mask;
++	void *		parser_priv;
++};
++
+ struct loop_device {
+ 	int		lo_number;
+ 	int		lo_refcnt;
++
++	/* Raw parser use only. */
+ 	loff_t		lo_offset;
+ 	loff_t		lo_sizelimit;
++
+ 	int		lo_flags;
++
++	/* TBD: Push crypto specifics into raw parser. */
+ 	int		(*transfer)(struct loop_device *, int cmd,
+ 				    struct page *raw_page, unsigned raw_off,
+ 				    struct page *loop_page, unsigned loop_off,
+@@ -43,17 +63,14 @@ struct loop_device {
+ 	char		lo_encrypt_key[LO_KEY_SIZE];
+ 	int		lo_encrypt_key_size;
+ 	struct loop_func_table *lo_encryption;
++	struct loop_parser *lo_parser;
+ 	__u32           lo_init[2];
+ 	uid_t		lo_key_owner;	/* Who set the key */
+-	int		(*ioctl)(struct loop_device *, int cmd, 
+-				 unsigned long arg); 
++	int		(*ioctl)(struct loop_device *, int cmd,
++				 unsigned long arg);
+ 
+-	struct file *	lo_backing_file;
+ 	struct block_device *lo_device;
+-	unsigned	lo_blocksize;
+-	void		*key_data; 
+-
+-	gfp_t		old_gfp_mask;
++	void		*key_data;
+ 
+ 	spinlock_t		lo_lock;
+ 	struct bio_list		lo_bio_list;
+@@ -64,6 +81,7 @@ struct loop_device {
+ 
+ 	struct request_queue	*lo_queue;
+ 	struct gendisk		*lo_disk;
++	struct lo_file		lo_file;
+ };
+ 
+ #endif /* __KERNEL__ */
+@@ -73,7 +91,6 @@ struct loop_device {
+  */
+ enum {
+ 	LO_FLAGS_READ_ONLY	= 1,
+-	LO_FLAGS_USE_AOPS	= 2,
+ 	LO_FLAGS_AUTOCLEAR	= 4,
+ };
+ 
+@@ -128,14 +145,16 @@ struct loop_info64 {
+ #define LO_CRYPT_CRYPTOAPI	18
+ #define MAX_LO_CRYPT		20
+ 
++typedef int (*loop_xfer)(struct loop_device *lo, int cmd,
++			struct page *raw_page, unsigned raw_off,
++			struct page *loop_page, unsigned loop_off,
++			int size, sector_t real_block);
++
+ #ifdef __KERNEL__
+ /* Support for loadable transfer modules */
+ struct loop_func_table {
+ 	int number;	/* filter type */ 
+-	int (*transfer)(struct loop_device *lo, int cmd,
+-			struct page *raw_page, unsigned raw_off,
+-			struct page *loop_page, unsigned loop_off,
+-			int size, sector_t real_block);
++	loop_xfer transfer;
+ 	int (*init)(struct loop_device *, const struct loop_info64 *); 
+ 	/* release is called from loop_unregister_transfer or clr_fd */
+ 	int (*release)(struct loop_device *); 
+@@ -146,6 +165,31 @@ struct loop_func_table {
+ int loop_register_transfer(struct loop_func_table *funcs);
+ int loop_unregister_transfer(int number); 
+ 
++/* Support for loadable parser modules */
++struct loop_parser {
++	struct list_head list;
++	const char *name;
++	int (*init)(struct loop_device *lo, struct lo_file *lo_file);
++	void (*release)(struct loop_device *lo, struct lo_file *lo_file);
++	int (*sync)(struct loop_device *lo, struct lo_file *lo_file,
++		    unsigned long reqf);
++	loff_t (*size)(struct loop_device *lo, struct lo_file *lo_file);
++	int (*write)(struct loop_device *lo, struct lo_file *lo_file,
++		     struct bio *bio, loff_t pos);
++	int (*read)(struct loop_device *lo, struct lo_file *lo_file,
++		    struct bio *bio, loff_t pos);
++	struct module *owner;
++};
++
++/* Interface between loop and loop parser modules. */
++int loop_register_parser(struct loop_parser *parser);
++int loop_unregister_parser(struct loop_parser *parser);
++int loop_send(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos, loop_xfer transfer);
++int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
++	      struct bio *bio, loff_t pos, loop_xfer transfer);
++int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
++	      unsigned long reqf);
+ #endif
+ /*
+  * IOCTL commands --- we will commandeer 0x4C ('L')
+-- 
+1.7.6.1
+

@@ -19,7 +19,9 @@ implementation:
 VHD spec is of course at:
 http://www.microsoft.com/download/en/details.aspx?id=23850
 
+Patches are now rebased to linux-next (as of 9/26/2011).
+
 Contact Info
 ============
 
-Andrei Warkentin (andrey.warkentin@gmail.com, andreiw@motorola.com)
+Andrei Warkentin (andrey.warkentin@gmail.com, andreiw@vmware.com, andreiw@msalumni.com)
