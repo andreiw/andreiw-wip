@@ -1,7 +1,7 @@
 From f978d6341c1522fda51439b01e65fcadced55abc Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 24 Sep 2011 03:50:49 -0400
-Subject: [PATCH 1/4] MMP2: Enable FIQ support.
+Subject: [PATCH 1/7] MMP2: Enable FIQ support.
 
 Allows FIQ delivery and FIQ handler support.
 

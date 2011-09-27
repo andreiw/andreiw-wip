@@ -1,7 +1,7 @@
 From 5c47acad2e94b7b4a7ebc2a74dda56b13e35d5ef Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 04:06:19 -0400
-Subject: [PATCH 3/4] MMP2: First glimpses of FIQ debugger pdev.
+Subject: [PATCH 3/7] MMP2: First glimpses of FIQ debugger pdev.
 
 Turned on for XO-1.75.
 
