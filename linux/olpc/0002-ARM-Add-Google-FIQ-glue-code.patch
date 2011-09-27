@@ -1,7 +1,7 @@
 From af3b45a4fa2daffb8afb1dc4ec09fed40b2fa68e Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 03:34:39 -0400
-Subject: [PATCH 2/7] ARM: Add Google FIQ glue code.
+Subject: [PATCH 2/8] ARM: Add Google FIQ glue code.
 
 This lets easily write code that runs in FIQ mode.
 

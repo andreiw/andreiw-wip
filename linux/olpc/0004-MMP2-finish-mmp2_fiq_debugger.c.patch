@@ -1,7 +1,7 @@
 From 4dc747d6853ad27de67ceafb0f9ad17dfe32d821 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 26 Sep 2011 03:41:46 -0400
-Subject: [PATCH 4/7] MMP2: finish mmp2_fiq_debugger.c.
+Subject: [PATCH 4/8] MMP2: finish mmp2_fiq_debugger.c.
 
 Adds UART code. Had to add another method to asm/fiq_debugger.h
 to expose UART device to common FIQ debugger code.

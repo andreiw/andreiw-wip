@@ -1,0 +1,108 @@
+From b5689592c389b9296c86c224a5dec4cb003c8742 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Tue, 27 Sep 2011 03:02:51 -0400
+Subject: [PATCH 8/8] Kernel: Rename kdb_syslog_data and separate from KDB
+ config.
+
+The routine is useful for other debuggers as well that need kmesg
+output.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ include/linux/printk.h         |    1 +
+ kernel/debug/kdb/kdb_main.c    |    2 +-
+ kernel/debug/kdb/kdb_private.h |    1 -
+ kernel/printk.c                |    6 +++---
+ lib/Kconfig.kgdb               |    7 +++++++
+ 5 files changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/include/linux/printk.h b/include/linux/printk.h
+index 0101d55..7c1ad84 100644
+--- a/include/linux/printk.h
++++ b/include/linux/printk.h
+@@ -306,4 +306,5 @@ static inline void print_hex_dump_bytes(const char *prefix_str, int prefix_type,
+ 
+ #endif
+ 
++void dbg_syslog_data(char *syslog_data[]);
+ #endif
+diff --git a/kernel/debug/kdb/kdb_main.c b/kernel/debug/kdb/kdb_main.c
+index be14779..8904eb1 100644
+--- a/kernel/debug/kdb/kdb_main.c
++++ b/kernel/debug/kdb/kdb_main.c
+@@ -2063,7 +2063,7 @@ static int kdb_dmesg(int argc, const char **argv)
+ 
+ 	/* syslog_data[0,1] physical start, end+1.  syslog_data[2,3]
+ 	 * logical start, end+1. */
+-	kdb_syslog_data(syslog_data);
++	dbg_syslog_data(syslog_data);
+ 	if (syslog_data[2] == syslog_data[3])
+ 		return 0;
+ 	logsize = syslog_data[1] - syslog_data[0];
+diff --git a/kernel/debug/kdb/kdb_private.h b/kernel/debug/kdb/kdb_private.h
+index 35d69ed..08e1c5d 100644
+--- a/kernel/debug/kdb/kdb_private.h
++++ b/kernel/debug/kdb/kdb_private.h
+@@ -207,7 +207,6 @@ extern char kdb_grep_string[];
+ extern int kdb_grep_leading;
+ extern int kdb_grep_trailing;
+ extern char *kdb_cmds[];
+-extern void kdb_syslog_data(char *syslog_data[]);
+ extern unsigned long kdb_task_state_string(const char *);
+ extern char kdb_task_state_char (const struct task_struct *);
+ extern unsigned long kdb_task_state(const struct task_struct *p,
+diff --git a/kernel/printk.c b/kernel/printk.c
+index 3518539..5aa12bd 100644
+--- a/kernel/printk.c
++++ b/kernel/printk.c
+@@ -486,13 +486,13 @@ SYSCALL_DEFINE3(syslog, int, type, char __user *, buf, int, len)
+ 	return do_syslog(type, buf, len, SYSLOG_FROM_CALL);
+ }
+ 
+-#ifdef	CONFIG_KGDB_KDB
++#ifdef	CONFIG_DBG_SYSLOG_DATA
+ /* kdb dmesg command needs access to the syslog buffer.  do_syslog()
+  * uses locks so it cannot be used during debugging.  Just tell kdb
+  * where the start and end of the physical and logical logs are.  This
+  * is equivalent to do_syslog(3).
+  */
+-void kdb_syslog_data(char *syslog_data[4])
++void dbg_syslog_data(char *syslog_data[4])
+ {
+ 	syslog_data[0] = log_buf;
+ 	syslog_data[1] = log_buf + log_buf_len;
+@@ -500,7 +500,7 @@ void kdb_syslog_data(char *syslog_data[4])
+ 		(logged_chars < log_buf_len ? logged_chars : log_buf_len);
+ 	syslog_data[3] = log_buf + log_end;
+ }
+-#endif	/* CONFIG_KGDB_KDB */
++#endif	/* CONFIG_DGB_SYSLOG_DATA */
+ 
+ /*
+  * Call the console drivers on a range of log_buf
+diff --git a/lib/Kconfig.kgdb b/lib/Kconfig.kgdb
+index 43cb93f..f6fc611 100644
+--- a/lib/Kconfig.kgdb
++++ b/lib/Kconfig.kgdb
+@@ -69,6 +69,7 @@ config KGDB_LOW_LEVEL_TRAP
+ config KGDB_KDB
+ 	bool "KGDB_KDB: include kdb frontend for kgdb"
+ 	default n
++        select DBG_SYSLOG_DATA
+ 	help
+ 	  KDB frontend for kernel
+ 
+@@ -79,4 +80,10 @@ config KDB_KEYBOARD
+ 	help
+ 	  KDB can use a PS/2 type keyboard for an input device
+ 
++config DBG_SYSLOG_DATA
++	bool "DBG_SYSLOG_DATA: Debug access to kmesg"
++	default n
++	help
++	  This is used by various debuggers to get access to kmesg log.
++
+ endif # KGDB
+-- 
+1.7.6.1
+

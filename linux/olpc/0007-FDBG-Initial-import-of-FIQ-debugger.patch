@@ -1,7 +1,7 @@
 From 4fbc8da5a90a2cf202d312972a80aef41fe1dfa0 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Tue, 27 Sep 2011 00:35:25 -0400
-Subject: [PATCH 7/7] FDBG: Initial import of FIQ debugger.
+Subject: [PATCH 7/8] FDBG: Initial import of FIQ debugger.
 
 This is a fixed-up version of the Google FIQ debugger. It uses
 the modified platform fiq platform data to get at the UART clock

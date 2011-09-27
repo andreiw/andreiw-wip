@@ -1,7 +1,7 @@
 From 1f1d268926c95abd0b080332cabf2083c925f3af Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Tue, 27 Sep 2011 00:34:36 -0400
-Subject: [PATCH 6/7] FDBG: Allow platform-specific command execution.
+Subject: [PATCH 6/8] FDBG: Allow platform-specific command execution.
 
 Allows platforms to define their own FIQ debugger commands.
 

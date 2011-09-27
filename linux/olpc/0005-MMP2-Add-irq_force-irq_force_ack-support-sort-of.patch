@@ -1,7 +1,7 @@
 From 0f6657560eddbb3839a84d865ebbaffd996bc573 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 26 Sep 2011 22:51:48 -0400
-Subject: [PATCH 5/7] MMP2: Add irq_force/irq_force_ack support (sort of).
+Subject: [PATCH 5/8] MMP2: Add irq_force/irq_force_ack support (sort of).
 
 Leverages MMP2 IPC support that raises/acks IRQ 56.
 
