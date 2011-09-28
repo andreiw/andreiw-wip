@@ -1,0 +1,76 @@
+OLPC XO 1.75 FIQ debugger support.
+==================================
+
+This is a port of the Android FIQ debugger support.
+FIQ debugger is useful if system is wedged in an IRQ
+storm or otherwise stuck where a KDB/KGDB session is
+not going to help.
+
+FIQ debugger owns a particular serial port. It can
+provide a system console (/dev/ttyFIQn) on that port
+as well.
+
+The FIQ debugger consists of -
+1) Actual FIQ debugger in arch/arm/common/fiq_debugger.c
+2) A platform device providing UART and FIQ control abstractions.
+3) Glue code to enable running normal code in FIQ mode.
+
+Actual effort was -
+1) Getting the platform device.
+2) Porting FIQ debugger code away from Android and
+   forward to 3.0.
+3) Changes the debugger along the way as I see fit.
+
+Running on the XO 1.75
+======================
+
+1) .config should contain:
+CONFIG_MMP2_FIQ_DEBUGGER=y
+CONFIG_FIQ_DEBUGGER=y
+CONFIG_FIQ_DEBUGGER_CONSOLE=y
+CONFIG_FIQ_DEBUGGER_CONSOLE_DEFAULT_ENABLE=y
+
+Your boot parameters should have a console=ttyFIQ0,
+with the UART used corresponding to /dev/ttyS2.
+
+Port is configured as 115200 8n1 - this will be configurable
+through command line eventually.
+
+If you send Ctrl-Break you should be greeted by - 
+debug> 
+debug> help
+FIQ Debugger commands:
+ pc            PC status
+ regs          Register dump
+ allregs       Extended Register dump
+ bt            Stack trace
+ kmesg         Dump kernel messages log
+ reboot        Reboot
+ irqs          Interupt status
+ version       Kerne sleep         Allow sleep while in FIQ
+ nosleep       Disable sleep while in FIQ
+ console       Switch terminal to console
+ cpu           Current CPU
+ cpu <number>  Switch to CPU<number>
+debug>
+debug> 
+
+Keep in mind that when you're "in the debugger", the system continues
+to run normally. It is not "broken in and waiting to continue", but
+happily doing what it's doing (or sitting someplace dead waiting to
+show you the backtrace).
+
+That's probably the beauty of the FIQ debugger.
+
+To-Dos
+====== 
+
+1) Add all the commands that the FIQ debugger could invoke
+   that were present in the kernel_debugger module.
+2) Add some MMP2 platform commands as an example.
+3) Add KGDB support to FIQ debugger (port my existing patch).
+4) Add a simple gdb mode for "seamless" remote kernel introspection
+   (and symbol debugging a wedged system, where KDB once again isn't
+    very useful).
+
+A

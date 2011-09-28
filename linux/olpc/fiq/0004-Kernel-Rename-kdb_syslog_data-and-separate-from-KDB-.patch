@@ -1,7 +1,7 @@
-From b5689592c389b9296c86c224a5dec4cb003c8742 Mon Sep 17 00:00:00 2001
+From ab20626b7e97520625e20aee27d9a0ba9fe27359 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Tue, 27 Sep 2011 03:02:51 -0400
-Subject: [PATCH 8/8] Kernel: Rename kdb_syslog_data and separate from KDB
+Subject: [PATCH 4/5] Kernel: Rename kdb_syslog_data and separate from KDB
  config.
 
 The routine is useful for other debuggers as well that need kmesg
@@ -13,8 +13,9 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
  kernel/debug/kdb/kdb_main.c    |    2 +-
  kernel/debug/kdb/kdb_private.h |    1 -
  kernel/printk.c                |    6 +++---
- lib/Kconfig.kgdb               |    7 +++++++
- 5 files changed, 12 insertions(+), 5 deletions(-)
+ lib/Kconfig.debug              |    6 ++++++
+ lib/Kconfig.kgdb               |    1 +
+ 6 files changed, 12 insertions(+), 5 deletions(-)
 
 diff --git a/include/linux/printk.h b/include/linux/printk.h
 index 0101d55..7c1ad84 100644
@@ -80,8 +81,22 @@ index 3518539..5aa12bd 100644
  
  /*
   * Call the console drivers on a range of log_buf
+diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
+index dd373c8..d13a9b8 100644
+--- a/lib/Kconfig.debug
++++ b/lib/Kconfig.debug
+@@ -1261,3 +1261,9 @@ source "lib/Kconfig.kmemcheck"
+ 
+ config TEST_KSTRTOX
+ 	tristate "Test kstrto*() family of functions at runtime"
++
++config DBG_SYSLOG_DATA
++	bool "DBG_SYSLOG_DATA: Debug access to kmesg"
++	default n
++	help
++	  This is used by various debuggers to get access to kmesg log.
 diff --git a/lib/Kconfig.kgdb b/lib/Kconfig.kgdb
-index 43cb93f..f6fc611 100644
+index 43cb93f..8826f5a 100644
 --- a/lib/Kconfig.kgdb
 +++ b/lib/Kconfig.kgdb
 @@ -69,6 +69,7 @@ config KGDB_LOW_LEVEL_TRAP
@@ -92,17 +107,6 @@ index 43cb93f..f6fc611 100644
  	help
  	  KDB frontend for kernel
  
-@@ -79,4 +80,10 @@ config KDB_KEYBOARD
- 	help
- 	  KDB can use a PS/2 type keyboard for an input device
- 
-+config DBG_SYSLOG_DATA
-+	bool "DBG_SYSLOG_DATA: Debug access to kmesg"
-+	default n
-+	help
-+	  This is used by various debuggers to get access to kmesg log.
-+
- endif # KGDB
 -- 
 1.7.6.1
 
