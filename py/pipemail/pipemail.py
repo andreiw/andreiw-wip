@@ -9,7 +9,7 @@ import markup
 from email.MIMEMultipart import MIMEMultipart
 from email.MIMEBase import MIMEBase
 from email.MIMEText import MIMEText
-from email.header import Header
+from email.Header import Header
 from email import Encoders
 from StringIO import StringIO
 from optparse import OptionParser
@@ -36,8 +36,8 @@ __status__ = "Production"
 #
 
 mail_config = {
-   'user' : 'fjnh84@motorola.com',
-   'server' : 'gmail-smtp-in.l.google.com',
+   'user' : 'andreiw@vmware.com',
+   'server' : '10.16.27.45',
    'tls' : False,
    'auth' : False,
    'pass' : None
@@ -85,7 +85,7 @@ def mail(config, encoding, subject, body, out_data, err_data):
    port = 25
    if config['auth']:
       port = 587
-   mailServer = smtplib.SMTP(config['server'], port)
+   mailServer = smtplib.SMTP(config['server'], port, local_hostname="localhost")
    if config['tls']:
       mailServer.ehlo()
       mailServer.starttls()
@@ -176,7 +176,7 @@ def format_time(seconds):
     seconds -= 3600 * hours
     minutes = int(seconds // 60)
     seconds -= 60 * minutes
-    return "{0}h {1}m {2} seconds".format(hours, minutes, seconds)
+    return "%(h)sh %(m)sm %(s)s seconds" % {'h' : hours, 'm' : minutes, 's' : seconds}
 
 def main():
    encoding = locale.getpreferredencoding()
@@ -194,7 +194,7 @@ def main():
    try:
       process_status, process_out, process_err, time_wall = get_output(process_args, options.separate, options.supress_con)
    except OSError, err:
-      sys.stderr.write("Error while starting child process: {0}\n".format(err.strerror))
+      sys.stderr.write("Error while starting child process: %(strerr)s\n" % { 'strerr' : err.strerror })
       sys.exit(2)
    process_cmd = ' '.join(process_args)
 
@@ -210,9 +210,9 @@ def main():
       process_err_string = process_err.getvalue()
 
    page = markup.page()
-   page.h3("Command: {0}".format(process_cmd))
-   page.h3("Return status: {0}".format(process_status))
-   page.h3("Time: {0}".format(format_time(time_wall)))
+   page.h3("Command: %(cmd)s" % { 'cmd' : process_cmd })
+   page.h3("Return status: %(status)d" % { 'status' : process_status })
+   page.h3("Time: %(time)s" % { 'time' : format_time(time_wall) })
    if options.separate:
       if (process_out_string is None) and (process_err_string is None):
          page.i("... no stdout/stderr output to attach ...")
@@ -223,7 +223,7 @@ def main():
          page.i("... no stdout/stderr output  ...")
       else:
          if cut:
-            page.i("... showing last {0} lines...".format(options.lines))
+            page.i("... showing last %(lines)d lines..." % { 'lines' : options.lines})
          page.hr()
          page.pre(markup.escape(process_out_string))
 
@@ -237,7 +237,7 @@ def main():
          process_out_string = None
          page.hr()
 
-   subject = "{0}@{1}: {2}".format(getpass.getuser(), platform.node(),process_cmd)
+   subject = "%(user)s@%(host)s: %(cmd)s" % { 'user' : getpass.getuser(), 'host' : platform.node(), 'cmd' : process_cmd }
    mail(mail_config, encoding, subject, page(), process_out_string, process_err_string)
 
 if __name__ == '__main__':
