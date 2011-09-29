@@ -33,8 +33,9 @@ CONFIG_FIQ_DEBUGGER_CONSOLE_DEFAULT_ENABLE=y
 Your boot parameters should have a console=ttyFIQ0,
 with the UART used corresponding to /dev/ttyS2.
 
-Port is configured as 115200 8n1 - this will be configurable
-through command line eventually.
+Port is configured as 115200 8n1 by default.
+To change, pass mmp2_fiq_debugger.baud=9600 or 
+desired baud rate.
 
 If you send Ctrl-Break you should be greeted by - 
 debug> 
@@ -44,7 +45,7 @@ FIQ Debugger commands:
  regs          Register dump
  allregs       Extended Register dump
  bt            Stack trace
- kmesg         Dump kernel messages log
+ kmesg         Dump dmesg
  reboot        Reboot
  irqs          Interupt status
  version       Kerne sleep         Allow sleep while in FIQ
