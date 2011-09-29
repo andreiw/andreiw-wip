@@ -7,7 +7,7 @@ storm or otherwise stuck where a KDB/KGDB session is
 not going to help.
 
 FIQ debugger owns a particular serial port. It can
-provide a system console (/dev/ttyFIQn) on that port
+provide a system console (/dev/ttyFIQ0) on that port
 as well.
 
 The FIQ debugger consists of -
@@ -30,6 +30,11 @@ CONFIG_FIQ_DEBUGGER=y
 CONFIG_FIQ_DEBUGGER_CONSOLE=y
 CONFIG_FIQ_DEBUGGER_CONSOLE_DEFAULT_ENABLE=y
 
+For KGDB support also add:
+CONFIG_FIQ_DEBUGGER_KGDB_DEFAULT_ENABLE=y
+CONFIG_FIQ_DEBUGGER_KGDB_INSECURE=y
+CONFIG_FIQ_DEBUGGER_KGDB=y
+
 Your boot parameters should have a console=ttyFIQ0,
 with the UART used corresponding to /dev/ttyS2.
 
@@ -48,12 +53,15 @@ FIQ Debugger commands:
  kmesg         Dump dmesg
  reboot        Reboot
  irqs          Interupt status
- version       Kerne sleep         Allow sleep while in FIQ
+ version       Kernel version
+ sleep         Allow sleep while in FIQ
  nosleep       Disable sleep while in FIQ
  console       Switch terminal to console
  cpu           Current CPU
  cpu <number>  Switch to CPU<number>
-debug>
+ kgdb          Break into or return to KGDB
+ kgdbon        Enable KGDB
+ kgdboff       Disable KGDB
 debug> 
 
 Keep in mind that when you're "in the debugger", the system continues
@@ -66,11 +74,14 @@ That's probably the beauty of the FIQ debugger.
 To-Dos
 ====== 
 
-1) Add all the commands that the FIQ debugger could invoke
-   that were present in the kernel_debugger module.
-2) Add some MMP2 platform commands as an example.
-3) Add KGDB support to FIQ debugger (port my existing patch).
-4) Add a simple gdb mode for "seamless" remote kernel introspection
+1) Add KGDB support to FIQ debugger - done!
+2) Rethink/redo the entire sleep/nosleep cycle, especially in the context
+   of supporting KGDB.
+3) Redo the way commands are dispatched and registered with the FIQ debugger
+   engine.
+4) Using gdb stubs is hard since Ctrl-Break breaks out of KGDB. Need to
+   change to Ctrl-Break x 2 for FIQ debugger.
+5) Add a simple gdb mode for "seamless" remote kernel introspection
    (and symbol debugging a wedged system, where KDB once again isn't
     very useful).
 

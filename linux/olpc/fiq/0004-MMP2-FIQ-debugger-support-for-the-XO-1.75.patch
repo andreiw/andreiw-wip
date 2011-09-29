@@ -1,7 +1,7 @@
 From 95785c0ff63e1c8eca45635af44b8277cb81f303 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Wed, 28 Sep 2011 19:40:19 -0400
-Subject: [PATCH 4/6] MMP2: FIQ debugger support for the XO 1.75.
+Subject: [PATCH 4/7] MMP2: FIQ debugger support for the XO 1.75.
 
 This enables the FIQ debugger on UART3 if the FIQ
 debugger support is compiled in.

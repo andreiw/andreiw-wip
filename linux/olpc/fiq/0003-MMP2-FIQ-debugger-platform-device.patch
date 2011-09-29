@@ -1,7 +1,7 @@
 From 3c9c6df8babe1cb57848dd380afd8dbf2f68c861 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 04:06:19 -0400
-Subject: [PATCH 3/6] MMP2: FIQ debugger platform device.
+Subject: [PATCH 3/7] MMP2: FIQ debugger platform device.
 
 This also adds the interface header between the platform
 device and the FIQ debugger, with some modifications to
