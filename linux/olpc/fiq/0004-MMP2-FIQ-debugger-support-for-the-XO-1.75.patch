@@ -1,0 +1,44 @@
+From 95785c0ff63e1c8eca45635af44b8277cb81f303 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Wed, 28 Sep 2011 19:40:19 -0400
+Subject: [PATCH 4/6] MMP2: FIQ debugger support for the XO 1.75.
+
+This enables the FIQ debugger on UART3 if the FIQ
+debugger support is compiled in.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ arch/arm/mach-mmp/olpc-xo-1-75.c |   10 +++++++++-
+ 1 files changed, 9 insertions(+), 1 deletions(-)
+
+diff --git a/arch/arm/mach-mmp/olpc-xo-1-75.c b/arch/arm/mach-mmp/olpc-xo-1-75.c
+index 7fbdaa5..24f5186 100644
+--- a/arch/arm/mach-mmp/olpc-xo-1-75.c
++++ b/arch/arm/mach-mmp/olpc-xo-1-75.c
+@@ -529,6 +529,7 @@ static void __init olpc_xo_1_75_init(void)
+ {
+ 	u32 twsi6_lcr;
+ 	u32 __iomem *tmp;
++	struct clk *debug_clk;
+ 
+ 	pm_power_off = olpc_xo_1_75_poweroff;
+ 	arm_pm_restart = olpc_xo_1_75_restart;
+@@ -538,7 +539,14 @@ static void __init olpc_xo_1_75_init(void)
+ 	 * an unpopulated (and difficult to install) ribbon cable connector.
+ 	 *  mmp2_add_uart(1);  // ttyS0: on the 20-pin jtag/debug connector
+ 	 */
+-	mmp2_add_uart(3);  // ttyS2: normal console/debug
++
++	debug_clk = clk_get_sys("pxa2xx-uart.2", NULL);
++	if (mmp2_fiq_debug_init(0xd4018000, debug_clk, IRQ_MMP2_UART3,
++				 IRQ_MMP2_IPC, -1)) {
++		clk_put(debug_clk);
++		mmp2_add_uart(3);  // ttyS2: normal console/debug
++	}
++
+ 	/*	
+ 	 * configure ttyS3 by default, since it might be useful under
+ 	 * linux.  this is okay even if cforth is asked to keep control of
+-- 
+1.7.6.1
+

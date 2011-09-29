@@ -1,7 +1,7 @@
-From f2116debec5e59c3f3110b5532deb046619de096 Mon Sep 17 00:00:00 2001
+From 3c9c6df8babe1cb57848dd380afd8dbf2f68c861 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 04:06:19 -0400
-Subject: [PATCH 3/5] MMP2: FIQ debugger platform device.
+Subject: [PATCH 3/6] MMP2: FIQ debugger platform device.
 
 This also adds the interface header between the platform
 device and the FIQ debugger, with some modifications to
@@ -9,18 +9,15 @@ the original Google version - namely, the ability to
 pass struct clk and the ability to invoke platform
 specific FIQ debugger commands.
 
-Turned on for XO-1.75.
-
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- arch/arm/include/asm/fiq_debugger.h   |   72 ++++++++++
- arch/arm/mach-mmp/Kconfig             |    9 +-
+ arch/arm/include/asm/fiq_debugger.h   |   72 +++++++++
+ arch/arm/mach-mmp/Kconfig             |    8 +
  arch/arm/mach-mmp/Makefile            |    1 +
  arch/arm/mach-mmp/include/mach/irqs.h |    1 +
  arch/arm/mach-mmp/include/mach/mmp2.h |   12 ++
- arch/arm/mach-mmp/mmp2_fiq_debugger.c |  253 +++++++++++++++++++++++++++++++++
- arch/arm/mach-mmp/olpc-xo-1-75.c      |    9 +-
- 7 files changed, 355 insertions(+), 2 deletions(-)
+ arch/arm/mach-mmp/mmp2_fiq_debugger.c |  267 +++++++++++++++++++++++++++++++++
+ 6 files changed, 361 insertions(+), 0 deletions(-)
  create mode 100644 arch/arm/include/asm/fiq_debugger.h
  create mode 100644 arch/arm/mach-mmp/mmp2_fiq_debugger.c
 
@@ -103,18 +100,10 @@ index 0000000..c14249e
 +
 +#endif
 diff --git a/arch/arm/mach-mmp/Kconfig b/arch/arm/mach-mmp/Kconfig
-index 9e8514f..e299021 100644
+index 9d285ea..e299021 100644
 --- a/arch/arm/mach-mmp/Kconfig
 +++ b/arch/arm/mach-mmp/Kconfig
-@@ -101,7 +101,6 @@ config CPU_PXA910
- config CPU_MMP2
- 	bool
- 	select CPU_PJ4
--        select FIQ
- 	help
- 	  Select code specific to MMP2. MMP2 is ARMv7 compatible.
- 
-@@ -112,4 +111,12 @@ config MMP2_GPU
+@@ -111,4 +111,12 @@ config MMP2_GPU
          default y
          help
            Say 'Y' here if you want to build the GCx00 support.
@@ -176,10 +165,10 @@ index eb5b57e..03d09a0 100644
  extern struct pxa_device_desc mmp2_device_uart2;
 diff --git a/arch/arm/mach-mmp/mmp2_fiq_debugger.c b/arch/arm/mach-mmp/mmp2_fiq_debugger.c
 new file mode 100644
-index 0000000..9e2b712
+index 0000000..a4388c1
 --- /dev/null
 +++ b/arch/arm/mach-mmp/mmp2_fiq_debugger.c
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,267 @@
 +/*
 + * arch/arm/mach-mmp/mmp2_fiq_debugger.c
 + *
@@ -205,6 +194,8 @@ index 0000000..9e2b712
 +#include <asm/fiq_debugger.h>
 +#include <mach/mmp2.h>
 +#include <mach/addr-map.h>
++
++static unsigned int baud = 115200;
 +
 +struct mmp2_fiq_debugger {
 +	struct fiq_debugger_pdata pdata;
@@ -240,6 +231,9 @@ index 0000000..9e2b712
 +	d = container_of(dev_get_platdata(&pdev->dev), typeof(*d), pdata);
 +
 +	/* No FIFO. */
++	mmp2_out(d, UART_FCR, UART_FCR_ENABLE_FIFO);
++	mmp2_out(d, UART_FCR, UART_FCR_ENABLE_FIFO |
++		 UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT);
 +	mmp2_out(d, UART_FCR, 0);
 +
 +        /* Clear state. */
@@ -248,7 +242,8 @@ index 0000000..9e2b712
 +	mmp2_in(d, UART_IIR);
 +	mmp2_in(d, UART_MSR);
 +
-+	quot = (clk_get_rate(d->clk) + (8 * 115200)) / (16 * 115200);
++        /* Baud. */
++	quot = (clk_get_rate(d->clk) + (8 * baud)) / (16 * baud);
 +	mmp2_out(d, UART_LCR, UART_LCR_DLAB);
 +	mmp2_out(d, UART_DLL, quot & 0xff);
 +	mmp2_out(d, UART_DLM, quot >> 8);
@@ -257,8 +252,15 @@ index 0000000..9e2b712
 +	mmp2_out(d, UART_LCR, UART_LCR_WLEN8);
 +
 +	/* Enable port, RX and LSR interrupt. */
++	mmp2_out(d, UART_MCR, UART_MCR_OUT2);
 +	mmp2_out(d, UART_IER,
 +                 UART_IER_UUE | UART_IER_RLSI | UART_IER_RDI);
++
++	/* Clear state for luck. */
++	mmp2_in(d, UART_LSR);
++	mmp2_in(d, UART_RX);
++	mmp2_in(d, UART_IIR);
++	mmp2_in(d, UART_MSR);
 +
 +	return 0;
 +}
@@ -325,14 +327,14 @@ index 0000000..9e2b712
 +static void debug_force_irq(struct platform_device *pdev,
 +                            unsigned int irq)
 +{
-+	BUG_ON(irq != 56);
++	BUG_ON(irq != IRQ_MMP2_IPC);
 +	writel(0x400, APB_VIRT_BASE + 0x1d008);
 +}
 +
 +static void debug_force_irq_ack(struct platform_device *pdev,
 +                                unsigned int irq)
 +{
-+	BUG_ON(irq != 56);
++	BUG_ON(irq != IRQ_MMP2_IPC);
 +	writel(0x400, APB_VIRT_BASE + 0x1d40c);
 +}
 +
@@ -433,33 +435,7 @@ index 0000000..9e2b712
 +	return -ENXIO;
 +}
 +
-diff --git a/arch/arm/mach-mmp/olpc-xo-1-75.c b/arch/arm/mach-mmp/olpc-xo-1-75.c
-index 7fbdaa5..6a529c9 100644
---- a/arch/arm/mach-mmp/olpc-xo-1-75.c
-+++ b/arch/arm/mach-mmp/olpc-xo-1-75.c
-@@ -528,6 +528,7 @@ static void __init olpc_init_early(void)
- static void __init olpc_xo_1_75_init(void)
- {
- 	u32 twsi6_lcr;
-+        struct clk *debug_clk;
- 	u32 __iomem *tmp;
- 
- 	pm_power_off = olpc_xo_1_75_poweroff;
-@@ -538,7 +539,13 @@ static void __init olpc_xo_1_75_init(void)
- 	 * an unpopulated (and difficult to install) ribbon cable connector.
- 	 *  mmp2_add_uart(1);  // ttyS0: on the 20-pin jtag/debug connector
- 	 */
--	mmp2_add_uart(3);  // ttyS2: normal console/debug
-+	debug_clk = clk_get_sys("pxa2xx-uart.2", NULL);
-+	if (!mmp2_fiq_debug_init(0xd4018000, debug_clk, IRQ_MMP2_UART3,
-+				 IRQ_MMP2_IPC, -1)) {
-+		clk_put(debug_clk);
-+		mmp2_add_uart(3);  // ttyS2: normal console/debug
-+	}
-+
- 	/*	
- 	 * configure ttyS3 by default, since it might be useful under
- 	 * linux.  this is okay even if cforth is asked to keep control of
++module_param(baud, uint, 0);
 -- 
 1.7.6.1
 
