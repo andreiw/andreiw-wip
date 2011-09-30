@@ -1,7 +1,7 @@
-From 3c9c6df8babe1cb57848dd380afd8dbf2f68c861 Mon Sep 17 00:00:00 2001
+From fe35c754991f1d4a6f1394548a572953b51dcf65 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 04:06:19 -0400
-Subject: [PATCH 3/7] MMP2: FIQ debugger platform device.
+Subject: [PATCH 3/8] MMP2: FIQ debugger platform device.
 
 This also adds the interface header between the platform
 device and the FIQ debugger, with some modifications to
@@ -16,8 +16,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
  arch/arm/mach-mmp/Makefile            |    1 +
  arch/arm/mach-mmp/include/mach/irqs.h |    1 +
  arch/arm/mach-mmp/include/mach/mmp2.h |   12 ++
- arch/arm/mach-mmp/mmp2_fiq_debugger.c |  267 +++++++++++++++++++++++++++++++++
- 6 files changed, 361 insertions(+), 0 deletions(-)
+ arch/arm/mach-mmp/mmp2_fiq_debugger.c |  274 +++++++++++++++++++++++++++++++++
+ 6 files changed, 368 insertions(+), 0 deletions(-)
  create mode 100644 arch/arm/include/asm/fiq_debugger.h
  create mode 100644 arch/arm/mach-mmp/mmp2_fiq_debugger.c
 
@@ -165,10 +165,10 @@ index eb5b57e..03d09a0 100644
  extern struct pxa_device_desc mmp2_device_uart2;
 diff --git a/arch/arm/mach-mmp/mmp2_fiq_debugger.c b/arch/arm/mach-mmp/mmp2_fiq_debugger.c
 new file mode 100644
-index 0000000..a4388c1
+index 0000000..1fe1bf5
 --- /dev/null
 +++ b/arch/arm/mach-mmp/mmp2_fiq_debugger.c
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,274 @@
 +/*
 + * arch/arm/mach-mmp/mmp2_fiq_debugger.c
 + *
@@ -285,6 +285,13 @@ index 0000000..a4388c1
 +	lsr = mmp2_read_lsr(d);
 +	if (lsr & UART_LSR_BI || d->break_seen) {
 +		d->break_seen = false;
++
++		/*
++		 * Discard any byte received here - unsure
++		 * if the zero read out next is a PXA thing
++		 * or UART general issue.
++		 */
++		mmp2_in(d, UART_RX);
 +		return FIQ_DEBUGGER_BREAK;
 +	}
 +

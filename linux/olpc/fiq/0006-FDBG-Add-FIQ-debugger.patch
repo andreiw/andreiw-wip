@@ -1,7 +1,7 @@
-From c9bfda2597b0f1075d7327844aad24d62db84016 Mon Sep 17 00:00:00 2001
+From 95bf58f0136b8e54b19b3902e0c8043c175780b1 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Tue, 27 Sep 2011 00:35:25 -0400
-Subject: [PATCH 6/7] FDBG: Add FIQ debugger.
+Subject: [PATCH 6/8] FDBG: Add FIQ debugger.
 
 This is a fixed-up version of the Google FIQ debugger. It uses
 the modified platform fiq platform data to get at the UART clock
@@ -13,9 +13,9 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  arch/arm/common/Kconfig                |   46 ++
  arch/arm/common/Makefile               |    1 +
- arch/arm/common/fiq_debugger.c         |  962 ++++++++++++++++++++++++++++++++
- arch/arm/common/fiq_debugger_ringbuf.h |   94 ++++
- 4 files changed, 1103 insertions(+), 0 deletions(-)
+ arch/arm/common/fiq_debugger.c         |  963 ++++++++++++++++++++++++++++++++
+ arch/arm/common/fiq_debugger_ringbuf.h |   94 +++
+ 4 files changed, 1104 insertions(+), 0 deletions(-)
  create mode 100644 arch/arm/common/fiq_debugger.c
  create mode 100644 arch/arm/common/fiq_debugger_ringbuf.h
 
@@ -85,10 +85,10 @@ index 0ca99bb..101ba0b 100644
 \ No newline at end of file
 diff --git a/arch/arm/common/fiq_debugger.c b/arch/arm/common/fiq_debugger.c
 new file mode 100644
-index 0000000..cc5cc4f
+index 0000000..c187423
 --- /dev/null
 +++ b/arch/arm/common/fiq_debugger.c
-@@ -0,0 +1,962 @@
+@@ -0,0 +1,963 @@
 +/*
 + * arch/arm/common/fiq_debugger.c
 + *
@@ -542,7 +542,7 @@ index 0000000..cc5cc4f
 +
 +static void debug_help(struct fiq_debugger_state *state)
 +{
-+	debug_printf(state,	"FIQ Debugger commands:\n"
++	debug_printf(state,	"FIQ debugger commands:\n"
 +				" pc            PC status\n"
 +				" regs          Register dump\n"
 +				" allregs       Extended Register dump\n"
@@ -551,8 +551,8 @@ index 0000000..cc5cc4f
 +				" reboot        Reboot\n"
 +				" irqs          Interupt status\n"
 +				" version       Kernel version\n");
-+	debug_printf(state,	" sleep         Allow sleep while in FIQ\n"
-+				" nosleep       Disable sleep while in FIQ\n"
++	debug_printf(state,	" sleep         Allow pm sleep\n"
++				" nosleep       Disable pm sleep\n"
 +				" console       Switch terminal to console\n"
 +				" cpu           Current CPU\n"
 +				" cpu <number>  Switch to CPU<number>\n");
@@ -670,6 +670,7 @@ index 0000000..cc5cc4f
 +		pm_stay_awake(&state->pdev->dev);
 +		mod_timer(&state->sleep_timer, jiffies + HZ * 5);
 +	}
++
 +#if defined(CONFIG_FIQ_DEBUGGER_CONSOLE)
 +	if (state->tty) {
 +		int i;

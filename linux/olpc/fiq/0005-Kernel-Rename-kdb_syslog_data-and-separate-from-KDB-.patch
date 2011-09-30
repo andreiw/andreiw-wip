@@ -1,7 +1,7 @@
-From 1f91fd08f630990de3769af487df8e81299d699b Mon Sep 17 00:00:00 2001
+From aa44f64e0fb74c915a3a152025cdbf343e87c71c Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Tue, 27 Sep 2011 03:02:51 -0400
-Subject: [PATCH 5/7] Kernel: Rename kdb_syslog_data and separate from KDB
+Subject: [PATCH 5/8] Kernel: Rename kdb_syslog_data and separate from KDB
  config.
 
 The routine is useful for other debuggers as well that need kmesg

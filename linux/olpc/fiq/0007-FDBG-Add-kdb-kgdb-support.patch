@@ -1,12 +1,12 @@
-From 4b8e746d51dff9a0f5b4182b067a0fc41496125a Mon Sep 17 00:00:00 2001
+From 1847db615d1c35a43636843372b84c92fb6a0aa9 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Wed, 28 Sep 2011 23:25:39 -0400
-Subject: [PATCH 7/7] FIQ debugger: Add KDB/KGDB support.
+Subject: [PATCH 7/8] FDBG: Add kdb/kgdb support.
 
 Control can be passed to kdb/kgdb through the 'break' command.
-FIQ debugger can be enterred while KDB/KGDB is active. KGDB
+FIQ debugger can be enterred while kdb/kgdb is active. kgdb
 may be disabled/enabled through 'kgdb'/'nokgdb' commands and
-debugfs. Interactive control over KGDB from FIQ prompt can
+debugfs. Interactive control over kgdb from FIQ prompt can
 be disabled at compile-time.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
@@ -48,7 +48,7 @@ index 288c806..d2f9cc5 100644
 +	help
 +	  Enables access to KDB/KGDB through the same serial port as the FIQ Mode Serial Debugger
 diff --git a/arch/arm/common/fiq_debugger.c b/arch/arm/common/fiq_debugger.c
-index cc5cc4f..a00b075 100644
+index c187423..c161e8c 100644
 --- a/arch/arm/common/fiq_debugger.c
 +++ b/arch/arm/common/fiq_debugger.c
 @@ -44,12 +44,32 @@
@@ -416,7 +416,7 @@ index cc5cc4f..a00b075 100644
  	}
  	return IRQ_HANDLED;
  }
-@@ -592,25 +831,53 @@ static irqreturn_t debug_irq(int irq, void *dev)
+@@ -593,25 +832,53 @@ static irqreturn_t debug_irq(int irq, void *dev)
  		tty_flip_buffer_push(state->tty);
  	}
  #endif
@@ -487,7 +487,7 @@ index cc5cc4f..a00b075 100644
  	return IRQ_HANDLED;
  }
  
-@@ -626,6 +893,7 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
+@@ -627,6 +894,7 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
  	int c;
  	static int last_c;
  	int count = 0;
@@ -495,7 +495,7 @@ index cc5cc4f..a00b075 100644
  	unsigned int this_cpu = THREAD_INFO(svc_sp)->cpu;
  
  	if (this_cpu != state->current_cpu) {
-@@ -656,12 +924,17 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
+@@ -657,12 +925,17 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
  				debug_prompt(state);
  			}
  		} else if (c == FIQ_DEBUGGER_BREAK) {
@@ -515,7 +515,7 @@ index cc5cc4f..a00b075 100644
  			fiq_debugger_ringbuf_push(state->tty_rbuf, c);
  			debug_force_irq(state);
  #endif
-@@ -685,20 +958,25 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
+@@ -686,20 +959,25 @@ static void debug_fiq(struct fiq_glue_handler *h, void *regs, void *svc_sp)
  			if (state->debug_count) {
  				state->debug_buf[state->debug_count] = 0;
  				state->debug_count = 0;
@@ -544,7 +544,7 @@ index cc5cc4f..a00b075 100644
  		debug_force_irq(state);
  
  	atomic_set(&state->unhandled_fiq_count, 0);
-@@ -729,7 +1007,7 @@ static void debug_console_write(struct console *co,
+@@ -730,7 +1008,7 @@ static void debug_console_write(struct console *co,
  
  	state = container_of(co, struct fiq_debugger_state, console);
  
@@ -553,7 +553,7 @@ index cc5cc4f..a00b075 100644
  		return;
  
  	while (count--) {
-@@ -771,7 +1049,7 @@ int  fiq_tty_write(struct tty_struct *tty, const unsigned char *buf, int count)
+@@ -772,7 +1050,7 @@ int  fiq_tty_write(struct tty_struct *tty, const unsigned char *buf, int count)
  	int i;
  	struct fiq_debugger_state *state = tty->driver_data;
  
@@ -562,7 +562,7 @@ index cc5cc4f..a00b075 100644
  		return count;
  
  	if (state->clk)
-@@ -828,7 +1106,7 @@ static int fiq_debugger_tty_init(struct fiq_debugger_state *state)
+@@ -829,7 +1107,7 @@ static int fiq_debugger_tty_init(struct fiq_debugger_state *state)
  
  	state->tty_rbuf = fiq_debugger_ringbuf_alloc(1024);
  	if (!state->tty_rbuf) {
@@ -571,7 +571,7 @@ index cc5cc4f..a00b075 100644
  		ret = -ENOMEM;
  		goto err;
  	}
-@@ -862,7 +1140,9 @@ static int fiq_debugger_probe(struct platform_device *pdev)
+@@ -863,7 +1141,9 @@ static int fiq_debugger_probe(struct platform_device *pdev)
  	state->pdev = pdev;
  	state->no_sleep = initial_no_sleep;
  	state->debug_enable = initial_debug_enable;
@@ -582,7 +582,7 @@ index cc5cc4f..a00b075 100644
  
  	state->fiq = platform_get_irq_byname(pdev, "fiq");
  	state->signal_irq = platform_get_irq_byname(pdev, "signal");
-@@ -892,6 +1172,28 @@ static int fiq_debugger_probe(struct platform_device *pdev)
+@@ -893,6 +1173,28 @@ static int fiq_debugger_probe(struct platform_device *pdev)
  			goto err_uart_init;
  	}
  
@@ -611,7 +611,7 @@ index cc5cc4f..a00b075 100644
  	debug_printf_nfiq(state, "<hit enter %sto activate fiq debugger>\n",
  				state->no_sleep ? "" : "twice ");
  
-@@ -936,9 +1238,26 @@ static int fiq_debugger_probe(struct platform_device *pdev)
+@@ -937,9 +1239,26 @@ static int fiq_debugger_probe(struct platform_device *pdev)
  	register_console(&state->console);
  	fiq_debugger_tty_init(state);
  #endif
