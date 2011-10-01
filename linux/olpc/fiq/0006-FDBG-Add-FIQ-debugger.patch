@@ -1,7 +1,7 @@
 From 95bf58f0136b8e54b19b3902e0c8043c175780b1 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Tue, 27 Sep 2011 00:35:25 -0400
-Subject: [PATCH 6/8] FDBG: Add FIQ debugger.
+Subject: [PATCH 6/7] FDBG: Add FIQ debugger.
 
 This is a fixed-up version of the Google FIQ debugger. It uses
 the modified platform fiq platform data to get at the UART clock
