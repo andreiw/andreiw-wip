@@ -1,0 +1,76 @@
+From 344e1713696a2d3fcb5a586641f72052ff864045 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@vmware.com>
+Date: Fri, 14 Oct 2011 17:46:04 -0400
+Subject: [PATCH] Git-p4: git-p4.changeOnSubmit to do 'change' instead of 'submit'.
+
+Many users of p4/sd use changelists for review, regression
+tests and batch builds, thus changes are almost never directly
+submitted.
+
+This new config option lets a 'p4 change -i' run instead of
+the 'p4 submit -i'.
+
+Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
+---
+ contrib/fast-import/git-p4     |   16 ++++++++++++----
+ contrib/fast-import/git-p4.txt |   10 ++++++++++
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/contrib/fast-import/git-p4 b/contrib/fast-import/git-p4
+index 2f7b270..19c295b 100755
+--- a/contrib/fast-import/git-p4
++++ b/contrib/fast-import/git-p4
+@@ -959,7 +959,10 @@ class P4Submit(Command, P4UserMap):
+                 submitTemplate = message[:message.index(separatorLine)]
+                 if self.isWindows:
+                     submitTemplate = submitTemplate.replace("\r\n", "\n")
+-                p4_write_pipe("submit -i", submitTemplate)
++                if gitConfig("git-p4.changeOnSubmit"):
++                    p4_write_pipe("change -i", submitTemplate)
++                else:
++                    p4_write_pipe("subadasdmit -i", submitTemplate)
+ 
+                 if self.preserveUser:
+                     if p4User:
+@@ -981,9 +984,14 @@ class P4Submit(Command, P4UserMap):
+             file = open(fileName, "w+")
+             file.write(self.prepareLogMessage(template, logMessage))
+             file.close()
+-            print ("Perforce submit template written as %s. "
+-                   + "Please review/edit and then use p4 submit -i < %s to submit directly!"
+-                   % (fileName, fileName))
++            if gitConfig("git-p4.changeOnSubmit"):
++                print ("Perforce submit template written as %s. "
++                       + "Please review/edit and then use p4 change -i < %s to create changelist!"
++                       % (fileName, fileName))
++            else:
++                print ("Perforce submit template written as %s. "
++                       + "Please review/edit and then use p4 submit -i < %s to submit directly!"
++                       % (fileName, fileName))
+ 
+     def run(self, args):
+         if len(args) == 0:
+diff --git a/contrib/fast-import/git-p4.txt b/contrib/fast-import/git-p4.txt
+index 52003ae..3a3a815 100644
+--- a/contrib/fast-import/git-p4.txt
++++ b/contrib/fast-import/git-p4.txt
+@@ -180,6 +180,16 @@ git-p4.allowSubmit
+ 
+   git config [--global] git-p4.allowSubmit false
+ 
++git-p4.changeOnSubmit
++
++  git config [--global] git-p4.changeOnSubmit false
++
++Most places using p4/sourcedepot don't actually want you submit
++changes directly, and changelists are used to do regression testing,
++batch builds and review, hence, by setting this parameter to
++true you acknowledge you end up creating a changelist which you
++must then manually commit.
++
+ git-p4.syncFromOrigin
+ 
+ A useful setup may be that you have a periodically updated git repository
+-- 
+1.7.4.1
+
