@@ -1,29 +1,30 @@
-From 51f497328e5c6fb6e756f2fb5551dec16befd1d9 Mon Sep 17 00:00:00 2001
+From 671118a2e82c1c92bdc0d6b98f25087b1b19cb64 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
-Subject: [PATCH 2/2] Loop: VHD loop parser implementation.
+Subject: [PATCH 3/3] Loop: VHD loop parser implementation.
 
 This VHD parser supports fixed-size and dynamic disks.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- drivers/block/Kconfig   |    7 +
+ drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  867 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 875 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  760 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 769 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
-index 6f07ec1..0c3e982 100644
+index 326fd90..c7f391e 100644
 --- a/drivers/block/Kconfig
 +++ b/drivers/block/Kconfig
-@@ -286,6 +286,13 @@ config BLK_DEV_CRYPTOLOOP
- 	  instead, which can be configured to be on-disk compatible with the
- 	  cryptoloop device.
+@@ -290,6 +290,14 @@ config BLK_DEV_LOOP_UTIL
+ 	bool
+ 	depends on BLK_DEV_LOOP
  
 +config BLK_DEV_VHDLOOP
 +	tristate "VHD loop support"
 +	depends on BLK_DEV_LOOP
++	select BLK_DEV_LOOP_UTIL
 +	---help---
 +	  Say Y here if you want to be able to use VHD images
 +	  as disks using the loop device.
@@ -32,27 +33,27 @@ index 6f07ec1..0c3e982 100644
  
  config BLK_DEV_NBD
 diff --git a/drivers/block/Makefile b/drivers/block/Makefile
-index 76646e9..803a330 100644
+index eb3df97..caf5b8e 100644
 --- a/drivers/block/Makefile
 +++ b/drivers/block/Makefile
-@@ -28,6 +28,7 @@ obj-$(CONFIG_BLK_DEV_OSD)	+= osdblk.o
- obj-$(CONFIG_BLK_DEV_UMEM)	+= umem.o
+@@ -29,6 +29,7 @@ obj-$(CONFIG_BLK_DEV_UMEM)	+= umem.o
  obj-$(CONFIG_BLK_DEV_NBD)	+= nbd.o
  obj-$(CONFIG_BLK_DEV_CRYPTOLOOP) += cryptoloop.o
+ obj-$(CONFIG_BLK_DEV_LOOP_UTIL)	+= looputil.o
 +obj-$(CONFIG_BLK_DEV_VHDLOOP)	+= vhdloop.o
  obj-$(CONFIG_VIRTIO_BLK)	+= virtio_blk.o
  
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..1d6ede65b
+index 0000000..8364791
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,867 @@
+@@ -0,0 +1,760 @@
 +/*
 +   Linux loop VHD support.
 +
-+   Copyright (C) 2011 Andrei Warkentin <andreiw@motorola.com>
++   Copyright (C) 2011 Andrei Warkentin <andreiw@vmware.com>
 +
 +   This module is free software; you can redistribute it and/or modify
 +   it under the terms of the GNU General Public License as published by
@@ -219,113 +220,6 @@ index 0000000..1d6ede65b
 +	unsigned flags;
 +};
 +
-+static int vhd_kbuf_to_bio(struct bio *bio,
-+			  u8 *kbuf,
-+			  size_t len)
-+{
-+	unsigned int bv_len;
-+	unsigned int bv_offset;
-+	struct bio_vec *bvec;
-+
-+	/*
-+	 * Fake a BIO containing bvec's describing a physically
-+	 * contiguous kernel buffer. bio_add_page is too smart
-+	 * and relies on a present rq. In our case, we just want
-+	 * to use the same file I/O logic, which just happens to
-+	 * use BIO. It might be nicer to redo everything in loop-ng
-+	 * to use sg's and convert BIO nvecs to sg inside
-+	 * do_bio_filebacked.
-+	 */
-+	while (len) {
-+		bv_offset = ((uintptr_t) kbuf) & ~PAGE_MASK;
-+		bv_len = min(len, (unsigned int) PAGE_SIZE - bv_offset);
-+		bvec = &bio->bi_io_vec[bio->bi_vcnt];
-+		bvec->bv_page = virt_to_page(kbuf);
-+		bvec->bv_len = bv_len;
-+		bvec->bv_offset = bv_offset;
-+		bio->bi_vcnt++;
-+		len -= bv_len;
-+		kbuf += bv_len;
-+	}
-+	return 0;
-+}
-+
-+int vhd_write_kbuf(struct loop_device *lo,
-+		   struct lo_file *lo_file,
-+		   void *kbuf,
-+		   size_t len,
-+		   loff_t pos)
-+{
-+	int ret;
-+	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
-+	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
-+
-+	ret = vhd_kbuf_to_bio(bio, (u8 *) kbuf, len);
-+	if (ret)
-+		goto out;
-+
-+	ret = loop_send(lo, lo_file, bio, pos, NULL);
-+out:
-+	bio_put(bio);
-+	return ret;
-+}
-+
-+int vhd_read_kbuf(struct loop_device *lo,
-+		  struct lo_file *lo_file,
-+		  void *kbuf,
-+		  size_t len,
-+		  loff_t pos)
-+{
-+	int ret;
-+	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
-+	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
-+
-+	ret = vhd_kbuf_to_bio(bio, (u8 *) kbuf, len);
-+	if (ret)
-+		goto out;
-+
-+	ret = loop_recv(lo, lo_file, bio, pos, NULL);
-+out:
-+	bio_put(bio);
-+	return ret;
-+}
-+
-+int vhd_read_page(struct loop_device *lo,
-+		  struct lo_file *lo_file,
-+		  struct page *page,
-+		  unsigned int offset,
-+		  unsigned int len,
-+		  loff_t pos)
-+{
-+	int ret;
-+	struct bio *bio = bio_alloc(GFP_KERNEL, 1);
-+	bio->bi_io_vec->bv_page = page;
-+	bio->bi_io_vec->bv_offset = offset;
-+	bio->bi_io_vec->bv_len = len;
-+	bio->bi_vcnt = 1;
-+	ret = loop_recv(lo, lo_file, bio, pos, NULL);
-+	bio_put(bio);
-+	return ret;
-+}
-+
-+int vhd_write_page(struct loop_device *lo,
-+		   struct lo_file *lo_file,
-+		   struct page *page,
-+		   unsigned int offset,
-+		   unsigned int len,
-+		   loff_t pos)
-+{
-+	int ret;
-+	struct bio *bio = bio_alloc(GFP_KERNEL, 1);
-+	bio->bi_io_vec->bv_page = page;
-+	bio->bi_io_vec->bv_offset = offset;
-+	bio->bi_io_vec->bv_len = len;
-+	bio->bi_vcnt = 1;
-+	ret = loop_send(lo, lo_file, bio, pos, NULL);
-+	bio_put(bio);
-+	return ret;
-+}
-+
 +static int vhd_chs(struct vhd *vhd)
 +{
 +	u64 temp;
@@ -446,9 +340,9 @@ index 0000000..1d6ede65b
 +	    data_offset + sizeof(vhd->dyn) > vhd->file_size)
 +		return -EINVAL;
 +
-+	ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, &vhd->mirror,
-+			    sizeof(vhd->mirror),
-+			    0);
++	ret = loop_read_kbuf(vhd->lo, vhd->lo_file, &vhd->mirror,
++			     sizeof(vhd->mirror),
++			     0);
 +	if (ret)
 +		return ret;
 +
@@ -458,9 +352,9 @@ index 0000000..1d6ede65b
 +		return -EINVAL;
 +	}
 +
-+	ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, &vhd->dyn,
-+			    sizeof(vhd->dyn),
-+			    data_offset);
++	ret = loop_read_kbuf(vhd->lo, vhd->lo_file, &vhd->dyn,
++			     sizeof(vhd->dyn),
++			     data_offset);
 +	if (ret)
 +		return ret;
 +
@@ -526,9 +420,9 @@ index 0000000..1d6ede65b
 +	if (!vhd->bmps)
 +		return -ENOMEM;
 +
-+	ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
-+			    BAT_SZ(vhd->bat_entries),
-+			    vhd->table_offset);
++	ret = loop_read_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
++			     BAT_SZ(vhd->bat_entries),
++			     vhd->table_offset);
 +	if (ret)
 +		return ret;
 +
@@ -611,9 +505,9 @@ index 0000000..1d6ede65b
 +	for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
 +		bmp = vhd->bmps[bat_index];
 +		if (bmp && (bmp->flags & VHD_BMP_DIRTY)) {
-+			ret = vhd_write_kbuf(vhd->lo, vhd->lo_file, &bmp->bmp,
-+					     SECTOR_BMP_SZ(vhd->block_unit),
-+					     be32_to_cpu(vhd->bat[bat_index]) << SEC_SHIFT);
++			ret = loop_write_kbuf(vhd->lo, vhd->lo_file, &bmp->bmp,
++					      SECTOR_BMP_SZ(vhd->block_unit),
++					      be32_to_cpu(vhd->bat[bat_index]) << SEC_SHIFT);
 +			if (ret) {
 +				printk(KERN_ERR "%s: failed to flush bitmap for block %d\n",
 +				       VHD_DNAME(vhd), bat_index);
@@ -624,18 +518,18 @@ index 0000000..1d6ede65b
 +	}
 +
 +	if (vhd->flags & VHD_BAT_DIRTY) {
-+		ret = vhd_write_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
-+				     BAT_SZ(vhd->bat_entries),
-+				     vhd->table_offset);
++		ret = loop_write_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
++				      BAT_SZ(vhd->bat_entries),
++				      vhd->table_offset);
 +		if (ret) {
 +			printk(KERN_ERR "%s: failed to flush BAT\n",
 +			       VHD_DNAME(vhd));
 +			return ret;
 +		}
 +
-+		ret = vhd_write_kbuf(vhd->lo, vhd->lo_file, vhd->footer,
-+				     FOOTER_SZ(vhd),
-+				     vhd->file_size - FOOTER_SZ(vhd));
++		ret = loop_write_kbuf(vhd->lo, vhd->lo_file, vhd->footer,
++				      FOOTER_SZ(vhd),
++				      vhd->file_size - FOOTER_SZ(vhd));
 +		if (ret) {
 +			printk(KERN_ERR "%s: failed to flush footer\n",
 +			       VHD_DNAME(vhd));
@@ -684,9 +578,9 @@ index 0000000..1d6ede65b
 +	vhd->lo = lo;
 +	vhd->lo_file = lo_file;
 +	vhd->file_size = i_size_read(lo_file->file->f_mapping->host);
-+	ret = vhd_read_kbuf(lo, lo_file, &vhd->footer_data,
-+			    sizeof(vhd->footer_data),
-+			    vhd->file_size - sizeof(vhd->footer_data));
++	ret = loop_read_kbuf(lo, lo_file, &vhd->footer_data,
++			     sizeof(vhd->footer_data),
++			     vhd->file_size - sizeof(vhd->footer_data));
 +	if (ret)
 +		goto out;
 +
@@ -768,8 +662,8 @@ index 0000000..1d6ede65b
 +		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache, GFP_KERNEL);
 +		if (!vhd->bmps[bat_entry])
 +			return -ENOMEM;
-+		ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, &vhd->bmps[bat_entry]->bmp,
-+				    SECTOR_BMP_SZ(vhd->block_unit), block_fpos);
++		ret = loop_read_kbuf(vhd->lo, vhd->lo_file, &vhd->bmps[bat_entry]->bmp,
++				     SECTOR_BMP_SZ(vhd->block_unit), block_fpos);
 +		if (ret)
 +			return ret;
 +	}
@@ -824,10 +718,10 @@ index 0000000..1d6ede65b
 +			kunmap_atomic(raw_buf, KM_USER0);
 +		} else if (!ret) {
 +			if (cmd == READ)
-+				ret = vhd_read_page(vhd->lo, vhd->lo_file, bvec->bv_page,
++				ret = loop_read_page(vhd->lo, vhd->lo_file, bvec->bv_page,
 +						    bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
 +			else
-+				ret = vhd_write_page(vhd->lo, vhd->lo_file, bvec->bv_page,
++				ret = loop_write_page(vhd->lo, vhd->lo_file, bvec->bv_page,
 +						     bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
 +		}
 +

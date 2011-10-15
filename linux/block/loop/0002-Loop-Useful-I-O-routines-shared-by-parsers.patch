@@ -1,0 +1,218 @@
+From 38c440eea2fc9e0f14e40d893f2ea0d048667545 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sat, 15 Oct 2011 02:21:45 -0400
+Subject: [PATCH 2/3] Loop: Useful I/O routines shared by parsers.
+
+This is basic functionality otherwise duplicated, like
+reading/writing a kernel buffer or struct page.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ drivers/block/Kconfig    |    4 ++
+ drivers/block/Makefile   |    1 +
+ drivers/block/looputil.c |  128 ++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/loop.h     |   26 +++++++++
+ 4 files changed, 159 insertions(+), 0 deletions(-)
+ create mode 100644 drivers/block/looputil.c
+
+diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
+index 6f07ec1..326fd90 100644
+--- a/drivers/block/Kconfig
++++ b/drivers/block/Kconfig
+@@ -286,6 +286,10 @@ config BLK_DEV_CRYPTOLOOP
+ 	  instead, which can be configured to be on-disk compatible with the
+ 	  cryptoloop device.
+ 
++config BLK_DEV_LOOP_UTIL
++	bool
++	depends on BLK_DEV_LOOP
++
+ source "drivers/block/drbd/Kconfig"
+ 
+ config BLK_DEV_NBD
+diff --git a/drivers/block/Makefile b/drivers/block/Makefile
+index 76646e9..eb3df97 100644
+--- a/drivers/block/Makefile
++++ b/drivers/block/Makefile
+@@ -28,6 +28,7 @@ obj-$(CONFIG_BLK_DEV_OSD)	+= osdblk.o
+ obj-$(CONFIG_BLK_DEV_UMEM)	+= umem.o
+ obj-$(CONFIG_BLK_DEV_NBD)	+= nbd.o
+ obj-$(CONFIG_BLK_DEV_CRYPTOLOOP) += cryptoloop.o
++obj-$(CONFIG_BLK_DEV_LOOP_UTIL)	+= looputil.o
+ obj-$(CONFIG_VIRTIO_BLK)	+= virtio_blk.o
+ 
+ obj-$(CONFIG_VIODASD)		+= viodasd.o
+diff --git a/drivers/block/looputil.c b/drivers/block/looputil.c
+new file mode 100644
+index 0000000..7523fa9
+--- /dev/null
++++ b/drivers/block/looputil.c
+@@ -0,0 +1,128 @@
++/*
++   Useful routines shared by loop parsers.
++
++   Copyright (C) 2011 Andrei Warkentin <andreiw@vmware.com>
++
++   This module is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This module is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this module; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++#include <linux/loop.h>
++
++static int loop_kbuf_to_bio(struct bio *bio,
++			    u8 *kbuf,
++			    size_t len)
++{
++	unsigned int bv_len;
++	unsigned int bv_offset;
++	struct bio_vec *bvec;
++
++	/*
++	 * Fake a BIO containing bvec's describing a physically
++	 * contiguous kernel buffer. bio_add_page is too smart
++	 * and relies on a present rq. In our case, we just want
++	 * to use the same file I/O logic, which just happens to
++	 * use BIO. It might be nicer to redo everything in loop-ng
++	 * to use sg's and convert BIO nvecs to sg inside
++	 * do_bio_filebacked.
++	 */
++	while (len) {
++		bv_offset = ((uintptr_t) kbuf) & ~PAGE_MASK;
++		bv_len = min(len, (unsigned int) PAGE_SIZE - bv_offset);
++		bvec = &bio->bi_io_vec[bio->bi_vcnt];
++		bvec->bv_page = virt_to_page(kbuf);
++		bvec->bv_len = bv_len;
++		bvec->bv_offset = bv_offset;
++		bio->bi_vcnt++;
++		len -= bv_len;
++		kbuf += bv_len;
++	}
++	return 0;
++}
++
++int loop_write_kbuf(struct loop_device *lo,
++		    struct lo_file *lo_file,
++		    void *kbuf,
++		    size_t len,
++		    loff_t pos)
++{
++	int ret;
++	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++
++	ret = loop_kbuf_to_bio(bio, (u8 *) kbuf, len);
++	if (ret)
++		goto out;
++
++	ret = loop_send(lo, lo_file, bio, pos, NULL);
++out:
++	bio_put(bio);
++	return ret;
++}
++
++int loop_read_kbuf(struct loop_device *lo,
++		   struct lo_file *lo_file,
++		   void *kbuf,
++		   size_t len,
++		   loff_t pos)
++{
++	int ret;
++	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++
++	ret = loop_kbuf_to_bio(bio, (u8 *) kbuf, len);
++	if (ret)
++		goto out;
++
++	ret = loop_recv(lo, lo_file, bio, pos, NULL);
++out:
++	bio_put(bio);
++	return ret;
++}
++
++int loop_read_page(struct loop_device *lo,
++		   struct lo_file *lo_file,
++		   struct page *page,
++		   unsigned int offset,
++		   unsigned int len,
++		   loff_t pos)
++{
++	int ret;
++	struct bio *bio = bio_alloc(GFP_KERNEL, 1);
++	bio->bi_io_vec->bv_page = page;
++	bio->bi_io_vec->bv_offset = offset;
++	bio->bi_io_vec->bv_len = len;
++	bio->bi_vcnt = 1;
++	ret = loop_recv(lo, lo_file, bio, pos, NULL);
++	bio_put(bio);
++	return ret;
++}
++
++int loop_write_page(struct loop_device *lo,
++		    struct lo_file *lo_file,
++		    struct page *page,
++		    unsigned int offset,
++		    unsigned int len,
++		    loff_t pos)
++{
++	int ret;
++	struct bio *bio = bio_alloc(GFP_KERNEL, 1);
++	bio->bi_io_vec->bv_page = page;
++	bio->bi_io_vec->bv_offset = offset;
++	bio->bi_io_vec->bv_len = len;
++	bio->bi_vcnt = 1;
++	ret = loop_send(lo, lo_file, bio, pos, NULL);
++	bio_put(bio);
++	return ret;
++}
+diff --git a/include/linux/loop.h b/include/linux/loop.h
+index ff8f201..98a15dd 100644
+--- a/include/linux/loop.h
++++ b/include/linux/loop.h
+@@ -190,6 +190,32 @@ int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
+ 	      struct bio *bio, loff_t pos, loop_xfer transfer);
+ int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
+ 	      unsigned long reqf);
++
++#ifdef CONFIG_BLK_DEV_LOOP_UTIL
++int loop_write_kbuf(struct loop_device *lo,
++		    struct lo_file *lo_file,
++		    void *kbuf,
++		    size_t len,
++		    loff_t pos);
++int loop_read_kbuf(struct loop_device *lo,
++		   struct lo_file *lo_file,
++		   void *kbuf,
++		   size_t len,
++		   loff_t pos);
++int loop_read_page(struct loop_device *lo,
++		   struct lo_file *lo_file,
++		   struct page *page,
++		   unsigned int offset,
++		   unsigned int len,
++		   loff_t pos);
++int loop_write_page(struct loop_device *lo,
++		    struct lo_file *lo_file,
++		    struct page *page,
++		    unsigned int offset,
++		    unsigned int len,
++		    loff_t pos);
++#endif /* CONFIG_BLK_DEV_LOOP_UTIL */
++
+ #endif
+ /*
+  * IOCTL commands --- we will commandeer 0x4C ('L')
+-- 
+1.7.7
+
