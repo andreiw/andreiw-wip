@@ -6,18 +6,23 @@ VHD/VMDK/qcow and other-virtual-disk support in loop device via
 the addition of loop parser support and parser implementations.
 
 The first parser will be for VHD, in the following order of
-implementation:
+implementation, time permitting:
 1) Fixed-size VHDs (Done!)
-2) Dynamic VHDs (Needs write testing for larger images, RO works)
+2) Dynamic VHDs (Seemingly done!)
 3) Differencing VHDs (Should be trivial, since it's a special
    case of dynamic VHDs)
 4) Benching against exsting nbd/fuse-based solutions.
-5) Optimizations of read/write path.
-6) LRU/shrink enhancements for block bitmap cache.
+5) LRU/shrink enhancements for block bitmap cache.
+6) Optimizations of read/write path.
 7) Parser options and backwards-compat loop_info changes.
 
 VHD spec is of course at:
 http://www.microsoft.com/download/en/details.aspx?id=23850
+
+The next parser will be QCOW, and meant to validate the parser
+interface.
+
+After that - VMDK.
 
 Patches are now rebased to linux-next (as of 9/26/2011).
 

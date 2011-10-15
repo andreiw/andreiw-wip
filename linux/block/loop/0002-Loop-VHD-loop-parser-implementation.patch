@@ -1,4 +1,4 @@
-From b8302875cc0249c09979deb46847917984a1f396 Mon Sep 17 00:00:00 2001
+From 51f497328e5c6fb6e756f2fb5551dec16befd1d9 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
 Subject: [PATCH 2/2] Loop: VHD loop parser implementation.
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    7 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  852 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 860 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  867 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 875 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -45,10 +45,10 @@ index 76646e9..803a330 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..8f94fce
+index 0000000..1d6ede65b
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,852 @@
+@@ -0,0 +1,867 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -76,9 +76,10 @@ index 0000000..8f94fce
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("loop VHD parser");
-+MODULE_AUTHOR("Andrei Warkentin <andreiw@motorola.com>");
++MODULE_AUTHOR("Andrei Warkentin <andreiw@vmware.com>");
 +
-+#define COOKIE(x)           (*(uint64_t *) x)
++#define COOKIE(x)           (*(u64 *) x)
++#define FOOTER_COOKIE       COOKIE("conectix")
 +#define CXSPARSE_COOKIE     COOKIE("cxsparse")
 +#define FOOTER_FEAT_RSVD    (2)
 +#define VHD_VERSION_1       (0x00010000UL)
@@ -209,6 +210,11 @@ index 0000000..8f94fce
 +	u32 bat_entries;
 +	size_t block_unit;
 +	vhd_batent *bat;
++
++	/*
++	 * Note: the bitmaps should be in a LRU list,
++	 * and should respond to memory pressure.
++	 */
 +	struct vhd_bmp **bmps;
 +	unsigned flags;
 +};
@@ -221,7 +227,8 @@ index 0000000..8f94fce
 +	unsigned int bv_offset;
 +	struct bio_vec *bvec;
 +
-+	/* Fake a BIO containing bvec's describing a physically
++	/*
++	 * Fake a BIO containing bvec's describing a physically
 +	 * contiguous kernel buffer. bio_add_page is too smart
 +	 * and relies on a present rq. In our case, we just want
 +	 * to use the same file I/O logic, which just happens to
@@ -381,9 +388,9 @@ index 0000000..8f94fce
 +	return 0;
 +}
 +
-+static u32 vhd_checksum(uint8_t *data, off_t size)
++static u32 vhd_checksum(u8 *data, off_t size)
 +{
-+	uint32_t csum = 0;
++	u32 csum = 0;
 +	while (size--) {
 +		csum += *data++;
 +	}
@@ -407,7 +414,7 @@ index 0000000..8f94fce
 +	u32 nsum;
 +	u32 csum = dyn->checksum;
 +	dyn->checksum = 0;
-+	nsum = vhd_checksum((uint8_t *) dyn, sizeof(*dyn));
++	nsum = vhd_checksum((u8 *) dyn, sizeof(*dyn));
 +	dyn->checksum = csum;
 +	if (nsum != be32_to_cpu(csum))
 +		return -EINVAL;
@@ -547,6 +554,12 @@ index 0000000..8f94fce
 +static int vhd_verify(struct vhd *vhd)
 +{
 +	int ret;
++
++	if (vhd->footer->cookie != FOOTER_COOKIE) {
++		printk(KERN_ERR "%s: corrupt footer\n",
++		       VHD_DNAME(vhd));
++		return -EINVAL;
++	}
 +
 +	if (!(be32_to_cpu(vhd->footer->features) & FOOTER_FEAT_RSVD)) {
 +		printk(KERN_ERR "%s: corrupt (bad features 0x%x)\n",
@@ -735,12 +748,11 @@ index 0000000..8f94fce
 +	loff_t bat_entry = pos;
 +	u32 offset = do_div(bat_entry, vhd->block_unit);
 +
-+	block_fpos = be32_to_cpu(vhd->bat[bat_entry]) << SEC_SHIFT;
-+	if (block_fpos >> SEC_SHIFT == 0xFFFFFFF) {
++	block_fpos = be32_to_cpu(vhd->bat[bat_entry]);;
++	if (block_fpos == 0xFFFFFFFF) {
 +		if (cmd == READ)
 +			return -ENOENT;
 +
-+		printk("allocating block\n");
 +		block_fpos = round_up(vhd->file_size - FOOTER_SZ(vhd), SEC_SZ);
 +		vhd->file_size = block_fpos + vhd->block_unit + FOOTER_SZ(vhd);
 +		vhd->bat[bat_entry] = cpu_to_be32(block_fpos >> SEC_SHIFT);
@@ -749,11 +761,11 @@ index 0000000..8f94fce
 +			return -ENOMEM;
 +		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
 +		vhd->flags |= VHD_BAT_DIRTY;
-+		printk("allocated block @ fpos 0x%llx\n", block_fpos);
-+	}
++	} else
++		block_fpos <<= SEC_SHIFT;
 +
 +	if (!vhd->bmps[bat_entry]) {
-+		vhd->bmps[bat_entry] = kmem_cache_alloc(vhd->bmp_cache, GFP_KERNEL);
++		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache, GFP_KERNEL);
 +		if (!vhd->bmps[bat_entry])
 +			return -ENOMEM;
 +		ret = vhd_read_kbuf(vhd->lo, vhd->lo_file, &vhd->bmps[bat_entry]->bmp,
@@ -762,23 +774,25 @@ index 0000000..8f94fce
 +			return ret;
 +	}
 +
++	/*
++	 * Bits within byte actually have a reversed meaning,
++	 * where MSB is the lower sector number.
++	 */
 +	if (cmd == READ) {
-+		if (!(vhd->bmps[bat_entry]->bmp[pos >> (SEC_SHIFT + 3)] &
-+		      (1 << (pos << SEC_SHIFT & 7))))
++		if (!(vhd->bmps[bat_entry]->bmp[offset >> (SEC_SHIFT + 3)] &
++		      (1 << (7 - ((offset >> SEC_SHIFT) & 7)))))
 +			return -ENOENT;
 +	} else {
-+		printk("updating meta\n");
-+		vhd->bmps[bat_entry]->bmp[pos >> (SEC_SHIFT + 3)] |=
-+			1 << ((pos << SEC_SHIFT) & 7);
++		vhd->bmps[bat_entry]->bmp[offset >> (SEC_SHIFT + 3)] |=
++			1 << (7 - (((offset >> SEC_SHIFT) & 7)));
 +		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
-+		printk("updated meta\n");
 +	}
 +
 +	block_fpos += SECTOR_BMP_SZ(vhd->block_unit) + offset;
 +	if (block_fpos > vhd->file_size || (block_fpos + len) > vhd->file_size)
 +		return -EINVAL;
-+	*fpos = block_fpos;
 +
++	*fpos = block_fpos;
 +	return 0;
 +}
 +
@@ -815,13 +829,14 @@ index 0000000..8f94fce
 +			else
 +				ret = vhd_write_page(vhd->lo, vhd->lo_file, bvec->bv_page,
 +						     bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
-+		} else
++		}
++
++		if (ret) {
 +			printk(KERN_ERR "%s: failed to %s: %d\n",
 +			       VHD_DNAME(vhd), cmd == READ ? "read" : "write",
 +			       ret);
-+
-+		if (ret)
 +			break;
++		}
 +
 +		bv_len -= len;
 +		pos += len;
@@ -902,5 +917,5 @@ index 0000000..8f94fce
 +module_init(init_vhdloop);
 +module_exit(cleanup_vhdloop);
 -- 
-1.7.6.1
+1.7.7
 

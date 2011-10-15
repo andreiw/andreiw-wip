@@ -128,15 +128,14 @@ index 4720c7a..6eb8a8a 100644
   */
 -static int do_lo_send_write(struct loop_device *lo, struct bio_vec *bvec,
 -		loff_t pos, struct page *page)
--{
--	int ret = lo_do_transfer(lo, WRITE, page, 0, bvec->bv_page,
--			bvec->bv_offset, bvec->bv_len, pos >> 9);
 +static int do_lo_send_write(struct loop_device *lo,
 +			    struct lo_file *lo_file,
 +			    loop_xfer transfer,
 +			    struct bio_vec *bvec, loff_t pos,
 +			    struct page *page)
-+{
+ {
+-	int ret = lo_do_transfer(lo, WRITE, page, 0, bvec->bv_page,
+-			bvec->bv_offset, bvec->bv_len, pos >> 9);
 +	int ret = transfer(lo, WRITE, page, 0, bvec->bv_page,
 +			   bvec->bv_offset, bvec->bv_len, pos >> 9);
  	if (likely(!ret))
@@ -812,5 +811,5 @@ index 683d698..ff8f201 100644
  /*
   * IOCTL commands --- we will commandeer 0x4C ('L')
 -- 
-1.7.6.1
+1.7.7
 
