@@ -5,8 +5,7 @@ These are my work-in-progress patches for developing
 VHD/VMDK/qcow and other-virtual-disk support in loop device via
 the addition of loop parser support and parser implementations.
 
-The first parser will be for VHD, in the following order of
-implementation, time permitting:
+VHD parser to-do:
 1) Fixed-size VHDs (Done!)
 2) Dynamic VHDs (Seemingly done!)
 3) Differencing VHDs (Should be trivial, since it's a special
@@ -14,15 +13,35 @@ implementation, time permitting:
 4) Benching against exsting nbd/fuse-based solutions.
 5) LRU/shrink enhancements for block bitmap cache.
 6) Optimizations of read/write path.
-7) Parser options and backwards-compat loop_info changes.
+7) Deal with HUGE VHDs - i.e. deal with not being able
+   to keep BAT/bitmaps in memory at all.
+8) Parser options and backwards-compat loop_info changes.
 
 VHD spec is of course at:
 http://www.microsoft.com/download/en/details.aspx?id=23850
 
-The next parser will be QCOW, and meant to validate the parser
-interface.
+QCOW parser to-do:
+1) Support RW on v1.
+2) Support v2.
+3) Support COW disks (painful, since there is no parent
+   UUID to match against, necessitating some loop changes).
+4) LRU/shrink enhancements for L2 tabs.
+5) Deal with HUGE images - i.e. deal with not being able to
+   keep L1 or L2s in memory at all.
 
-After that - VMDK.
+Common:
+1) Think about and split out common functionality: it's
+   painful how similar both the VHD and QCOW parsers look,
+   from an internal data structure POV.
+2) The shrinking LRU cache is a common neccesity for both VHD
+   and QCOW,
+3) Think about a common interface for dealing with COW/differencing
+   disks. It looks like change_fd is the right mechanism, just need
+   to figure out how to prevent silly things from happening (or not?)
+4) Deal with mounting same image multiple times on different loop
+   devices - from a metadata point of view.
+
+VMDK is coming next.
 
 Patches are now rebased to linux-next (as of 9/26/2011).
 

@@ -1,7 +1,7 @@
-From 671118a2e82c1c92bdc0d6b98f25087b1b19cb64 Mon Sep 17 00:00:00 2001
+From c631d1e10cdd6e80b74846c09dd117f8a5310a1f Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
-Subject: [PATCH 3/3] Loop: VHD loop parser implementation.
+Subject: [PATCH 3/4] Loop: VHD loop parser implementation.
 
 This VHD parser supports fixed-size and dynamic disks.
 
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  760 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 769 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  785 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 794 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..8364791
+index 0000000..f296ce6
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,760 @@
+@@ -0,0 +1,785 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -79,31 +79,29 @@ index 0000000..8364791
 +MODULE_DESCRIPTION("loop VHD parser");
 +MODULE_AUTHOR("Andrei Warkentin <andreiw@vmware.com>");
 +
-+#define COOKIE(x)           (*(u64 *) x)
-+#define FOOTER_COOKIE       COOKIE("conectix")
-+#define CXSPARSE_COOKIE     COOKIE("cxsparse")
-+#define FOOTER_FEAT_RSVD    (2)
-+#define VHD_VERSION_1       (0x00010000UL)
-+#define VHD_VMAJ_MASK       (0xFFFF0000UL)
-+#define VHD_VMIN_MASK       (0x0000FFFFUL)
-+#define DYN_VERSION_1       (0x00010000UL)
-+#define DYN_VMAJ_MASK       (0xFFFF0000UL)
-+#define DYN_VMIN_MASK       (0x0000FFFFUL)
-+#define FOOTER_DOFF_FIXED   (0xFFFFFFFFFFFFFFFFULL)
-+#define DYN_DOFF_DYN        (0xFFFFFFFFFFFFFFFFULL)
-+#define FOOTER_TYPE_FIXED   (2)
-+#define FOOTER_TYPE_DYN     (3)
-+#define FOOTER_TYPE_DIFF    (4)
-+#define SEC_SHIFT           (9)
-+#define SEC_SZ              (1 << SEC_SHIFT)
-+#define SEC_MASK            (SEC_SZ - 1)
-+#define VHD_DNAME(vhd)      ((vhd)->lo->lo_disk->disk_name)
-+#define BAT_SZ(entries)     round_up(sizeof(vhd_batent) * (entries), SEC_SZ)
-+#define SECTOR_BMP_SZ(usz)  round_up((usz) >> (SEC_SHIFT + 3), SEC_SZ)
-+#define FOOTER_SZ(vhd)      (sizeof(struct vhd_footer) - ((vhd)->footer -\
-+			     &(vhd)->footer_data))
-+
-+#define BMP_CACHE_PREFIX ("vhdbmp")
++#define COOKIE(x)		(*(u64 *) x)
++#define FOOTER_COOKIE		COOKIE("conectix")
++#define CXSPARSE_COOKIE		COOKIE("cxsparse")
++#define FOOTER_FEAT_RSVD	(2)
++#define VHD_VERSION_1		(0x00010000UL)
++#define VHD_VMAJ_MASK		(0xFFFF0000UL)
++#define VHD_VMIN_MASL		(0x0000FFFFUL)
++#define DYN_VERSION_1		(0x00010000UL)
++#define DYN_VMAJ_MASK		(0xFFFF0000UL)
++#define DYN_VMIN_MASK		(0x0000FFFFUL)
++#define FOOTER_DOFF_FIXED	(0xFFFFFFFFFFFFFFFFULL)
++#define DYN_DOFF_DYN		(0xFFFFFFFFFFFFFFFFULL)
++#define FOOTER_TYPE_FIXED	(2)
++#define FOOTER_TYPE_DYN		(3)
++#define FOOTER_TYPE_DIFF	(4)
++#define SEC_SHIFT		(9)
++#define SEC_SZ			(1 << SEC_SHIFT)
++#define VHD_DNAME(vhd)		((vhd)->lo->lo_disk->disk_name)
++#define BAT_SZ(entries)		round_up(sizeof(vhd_batent) * (entries), SEC_SZ)
++#define SECTOR_BMP_SZ(usz)	round_up((usz) >> (SEC_SHIFT + 3), SEC_SZ)
++#define FOOTER_SZ(vhd)		(sizeof(struct vhd_footer) - ((vhd)->footer -\
++				&(vhd)->footer_data))
++#define BMP_CACHE_PREFIX	("vhdbmp")
 +
 +/* All fields Big-Endian */
 +struct vhd_id
@@ -402,6 +400,12 @@ index 0000000..8364791
 +	if (!vhd->bat)
 +		return -ENOMEM;
 +
++	ret = loop_read_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
++			     BAT_SZ(vhd->bat_entries),
++			     vhd->table_offset);
++	if (ret)
++		return ret;
++
 +	len = sizeof(BMP_CACHE_PREFIX) + strlen(VHD_DNAME(vhd));
 +	vhd->bmp_cache_name = kzalloc(len, GFP_KERNEL);
 +	if (!vhd->bmp_cache_name)
@@ -419,12 +423,6 @@ index 0000000..8364791
 +	vhd->bmps = kzalloc(vhd->bat_entries * sizeof(struct vhd_bmp *), GFP_KERNEL);
 +	if (!vhd->bmps)
 +		return -ENOMEM;
-+
-+	ret = loop_read_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
-+			     BAT_SZ(vhd->bat_entries),
-+			     vhd->table_offset);
-+	if (ret)
-+		return ret;
 +
 +	return 0;
 +}
@@ -502,18 +500,20 @@ index 0000000..8364791
 +	u32 bat_index;
 +	struct vhd_bmp *bmp;
 +
-+	for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
-+		bmp = vhd->bmps[bat_index];
-+		if (bmp && (bmp->flags & VHD_BMP_DIRTY)) {
-+			ret = loop_write_kbuf(vhd->lo, vhd->lo_file, &bmp->bmp,
-+					      SECTOR_BMP_SZ(vhd->block_unit),
-+					      be32_to_cpu(vhd->bat[bat_index]) << SEC_SHIFT);
-+			if (ret) {
-+				printk(KERN_ERR "%s: failed to flush bitmap for block %d\n",
-+				       VHD_DNAME(vhd), bat_index);
-+				return ret;
++	if (vhd->bmps) {
++		for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
++			bmp = vhd->bmps[bat_index];
++			if (bmp && (bmp->flags & VHD_BMP_DIRTY)) {
++				ret = loop_write_kbuf(vhd->lo, vhd->lo_file, &bmp->bmp,
++						      SECTOR_BMP_SZ(vhd->block_unit),
++						      be32_to_cpu(vhd->bat[bat_index]) << SEC_SHIFT);
++				if (ret) {
++					printk(KERN_ERR "%s: failed to flush bitmap for block %d\n",
++					       VHD_DNAME(vhd), bat_index);
++					return ret;
++				} else
++					bmp->flags ^= VHD_BMP_DIRTY;
 +			}
-+			bmp->flags ^= VHD_BMP_DIRTY;
 +		}
 +	}
 +
@@ -525,7 +525,8 @@ index 0000000..8364791
 +			printk(KERN_ERR "%s: failed to flush BAT\n",
 +			       VHD_DNAME(vhd));
 +			return ret;
-+		}
++		} else
++			vhd->flags ^= VHD_BAT_DIRTY;
 +
 +		ret = loop_write_kbuf(vhd->lo, vhd->lo_file, vhd->footer,
 +				      FOOTER_SZ(vhd),
@@ -535,9 +536,8 @@ index 0000000..8364791
 +			       VHD_DNAME(vhd));
 +			return ret;
 +		}
-+		vhd->flags ^= VHD_BAT_DIRTY;
 +	}
-+	return ret;
++	return 0;
 +}
 +
 +static void vhd_free(struct vhd *vhd)
@@ -550,17 +550,31 @@ index 0000000..8364791
 +
 +	if (vhd->bmps) {
 +		for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
-+			if (vhd->bmps[bat_index])
++			if (vhd->bmps[bat_index]) {
 +				kmem_cache_free(vhd->bmp_cache, vhd->bmps[bat_index]);
++				vhd->bmps[bat_index] = NULL;
++			}
 +		}
++
 +		kfree(vhd->bmps);
++                vhd->bmps = NULL;
 +	}
-+	if (vhd->bmp_cache)
++
++	if (vhd->bmp_cache) {
 +		kmem_cache_destroy(vhd->bmp_cache);
-+	if (vhd->bmp_cache_name)
++		vhd->bmp_cache = NULL;
++	}
++
++	if (vhd->bmp_cache_name) {
 +		kfree(vhd->bmp_cache_name);
-+	if (vhd->bat)
++		vhd->bmp_cache_name = NULL;
++	}
++
++	if (vhd->bat) {
 +		kfree(vhd->bat);
++		vhd->bat = NULL;
++	}
++
 +	kfree(vhd);
 +}
 +
@@ -625,8 +639,8 @@ index 0000000..8364791
 +		    unsigned long reqf)
 +{
 +	int ret;
-+
 +	struct vhd *vhd = lo_file->parser_priv;
++
 +	ret = vhd_meta_flush(vhd);
 +	if (ret)
 +		return ret;
@@ -659,13 +673,22 @@ index 0000000..8364791
 +		block_fpos <<= SEC_SHIFT;
 +
 +	if (!vhd->bmps[bat_entry]) {
++		if (block_fpos > vhd->file_size ||
++		    (block_fpos + SECTOR_BMP_SZ(vhd->block_unit)) > vhd->file_size)
++			return -EINVAL;
++
 +		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache, GFP_KERNEL);
 +		if (!vhd->bmps[bat_entry])
 +			return -ENOMEM;
++
 +		ret = loop_read_kbuf(vhd->lo, vhd->lo_file, &vhd->bmps[bat_entry]->bmp,
 +				     SECTOR_BMP_SZ(vhd->block_unit), block_fpos);
-+		if (ret)
++		if (ret) {
++			kmem_cache_free(vhd->bmp_cache,
++					vhd->bmps[bat_entry]);
++			vhd->bmps[bat_entry] = NULL;
 +			return ret;
++		}
 +	}
 +
 +	/*
@@ -683,7 +706,8 @@ index 0000000..8364791
 +	}
 +
 +	block_fpos += SECTOR_BMP_SZ(vhd->block_unit) + offset;
-+	if (block_fpos > vhd->file_size || (block_fpos + len) > vhd->file_size)
++	if (block_fpos > vhd->file_size ||
++	    (block_fpos + len) > vhd->file_size)
 +		return -EINVAL;
 +
 +	*fpos = block_fpos;
@@ -735,6 +759,7 @@ index 0000000..8364791
 +		bv_len -= len;
 +		pos += len;
 +	}
++
 +	return ret;
 +}
 +
