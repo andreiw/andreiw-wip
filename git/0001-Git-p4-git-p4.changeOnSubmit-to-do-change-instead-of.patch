@@ -28,7 +28,7 @@ index 2f7b270..19c295b 100755
 +                if gitConfig("git-p4.changeOnSubmit"):
 +                    p4_write_pipe("change -i", submitTemplate)
 +                else:
-+                    p4_write_pipe("subadasdmit -i", submitTemplate)
++                    p4_write_pipe("submit -i", submitTemplate)
  
                  if self.preserveUser:
                      if p4User:
