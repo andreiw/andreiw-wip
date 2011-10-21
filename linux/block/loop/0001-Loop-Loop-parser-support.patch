@@ -1,7 +1,7 @@
 From 9acd33daf17f8fb3fe4c78292a343d058dd43bcf Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:36:19 -0400
-Subject: [PATCH 1/5] Loop: Loop parser support.
+Subject: [PATCH 1/4] Loop: Loop parser support.
 
 Loop parsers allow the loop device to understand sparse
 disk image formats, such as VMDK, VHD and QCOW.

@@ -1,7 +1,7 @@
-From f03583c29dd7f30aba82f79882ca6bdb984f0c27 Mon Sep 17 00:00:00 2001
+From 3d34dee2bd1e2f8b7042faeb7186415fcf39e241 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
-Subject: [PATCH 4/5] Loop: QCOW loop parser implementation.
+Subject: [PATCH 4/4] Loop: QCOW loop parser implementation.
 
 Beginnings of QCOW support (v1, read/write).
 
@@ -22,8 +22,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  477 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 486 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  420 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 429 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -59,10 +59,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..fe93765
+index 0000000..28b0ebe
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,420 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -141,6 +141,7 @@ index 0000000..fe93765
 +	u64 l1_entries;
 +	u64 l2_entries;
 +	loff_t cluster_size;
++	unsigned int access_size;
 +	struct kmem_cache *l2_cache;
 +	char *l2_cache_name;
 +
@@ -185,6 +186,7 @@ index 0000000..fe93765
 +	qcow->header.l1_table_offset = be64_to_cpu(qcow->header.l1_table_offset);
 +
 +	qcow->cluster_size = 1 << qcow->header.cluster_bits;
++	qcow->access_size = (unsigned int) min(qcow->cluster_size, (loff_t) PAGE_SIZE);
 +	qcow->l2_entries = 1 << qcow->header.l2_bits;
 +	qcow->l1_entries = qcow->header.size;
 +	qcow->l1_entries = round_up(qcow->l1_entries, qcow->l2_entries * qcow->cluster_size);
@@ -362,21 +364,27 @@ index 0000000..fe93765
 +	return loop_sync(lo, &lo->lo_file);
 +}
 +
-+static int qcow_pos_to_fpos(struct qcow *qcow, loff_t pos,
-+			    loff_t len, loff_t *fpos, int cmd)
++static int qcow_sparse_to(struct lo_file **lo_file,
++			  struct bio *bio,
++			  loff_t pos,
++			  unsigned int *len,
++			  loff_t *fpos)
 +{
 +	int ret;
 +	loff_t ffpos;
 +	u64 l2_index;
++	struct qcow *qcow = (*lo_file)->parser_priv;
 +	u64 l1_index = pos >> (qcow->header.l2_bits +
 +			       qcow->header.cluster_bits);
++	*len = min(*len, (unsigned int) ((qcow->access_size -
++					  (pos & (qcow->access_size - 1)))));
 +
 +	if (l1_index >= qcow->l1_entries)
 +		return -EINVAL;
 +
 +	ffpos = be64_to_cpu(qcow->l1[l1_index]);
 +	if (!ffpos) {
-+		if (cmd == READ)
++		if (bio_rw(bio) != WRITE)
 +			return -ENOENT;
 +
 +		qcow->l2s[l1_index] = kmem_cache_zalloc(qcow->l2_cache,
@@ -417,97 +425,32 @@ index 0000000..fe93765
 +
 +	ffpos = be64_to_cpu(qcow->l2s[l1_index]->offsets[l2_index]);
 +	if (!ffpos) {
-+		if (cmd == READ)
++		if (bio_rw(bio) != WRITE)
 +			return -ENOENT;
 +
 +		ffpos = qcow->file_size;
-+		qcow->file_size += 1 << qcow->header.cluster_bits;
++		qcow->file_size += qcow->cluster_size;
 +		qcow->l2s[l1_index]->offsets[l2_index] =
 +			cpu_to_be64(ffpos);
 +	}
 +
-+	*fpos = ffpos + (pos & B2M(qcow->header.cluster_bits));
++	ffpos += pos & B2M(qcow->header.cluster_bits);
++	if (ffpos > qcow->file_size ||
++	    (ffpos + *len) > qcow->file_size)
++		return -EINVAL;
++
++	*fpos = ffpos;
 +	return 0;
 +}
 +
-+static int qcow_do_bvec(struct qcow *qcow, struct bio_vec *bvec,
-+			loff_t pos, int cmd)
++static int qcow_read(struct loop_device *lo, struct bio *bio)
 +{
-+	u8 *raw_buf;
-+	unsigned int len;
-+	int ret = 0;
-+	loff_t fpos = 0;
-+	loff_t access_size = min(qcow->cluster_size, (loff_t) PAGE_SIZE);
-+	unsigned int bv_len = bvec->bv_len;
-+
-+	while (bv_len) {
-+		len = min(bv_len, (unsigned int)
-+			  (access_size - (pos & (access_size - 1))));
-+
-+		ret = qcow_pos_to_fpos(qcow, pos, len, &fpos, cmd);
-+		if (ret == -ENOENT && cmd == READ) {
-+			ret = 0;
-+			raw_buf = kmap_atomic(bvec->bv_page, KM_USER0) +
-+				bvec->bv_offset + bvec->bv_len - bv_len;
-+			memset(raw_buf, 0, len);
-+			kunmap_atomic(raw_buf, KM_USER0);
-+		} else if (!ret) {
-+			if (cmd == READ)
-+				ret = loop_read_page(qcow->lo, qcow->lo_file, bvec->bv_page,
-+						     bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
-+			else
-+				ret = loop_write_page(qcow->lo, qcow->lo_file, bvec->bv_page,
-+						      bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
-+		}
-+
-+		if (ret) {
-+			printk(KERN_ERR "%s: failed to %s: %d\n",
-+			       QCOW_DNAME(qcow), cmd == READ ? "read" : "write",
-+			       ret);
-+			break;
-+		}
-+
-+		bv_len -= len;
-+		pos += len;
-+	}
-+
-+	return ret;
++	return loop_sparse_io(lo, bio, qcow_sparse_to);
 +}
 +
-+int qcow_read(struct loop_device *lo, struct bio *bio)
++static int qcow_write(struct loop_device *lo, struct bio *bio)
 +{
-+	int i;
-+	struct bio_vec *bvec;
-+	int ret = 0;
-+        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
-+	struct qcow *qcow = lo->lo_file.parser_priv;
-+
-+	bio_for_each_segment(bvec, bio, i) {
-+		ret = qcow_do_bvec(qcow, bvec, pos, READ);
-+		if (ret)
-+			break;
-+		pos += bvec->bv_len;
-+	}
-+
-+	return ret;
-+}
-+
-+int qcow_write(struct loop_device *lo, struct bio *bio)
-+{
-+	int i;
-+	struct bio_vec *bvec;
-+	int ret = 0;
-+        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
-+	struct qcow *qcow = lo->lo_file.parser_priv;
-+
-+	bio_for_each_segment(bvec, bio, i) {
-+		ret = qcow_do_bvec(qcow, bvec, pos, WRITE);
-+		if (ret)
-+			break;
-+		pos += bvec->bv_len;
-+	}
-+
-+	return ret;
++	return loop_sparse_io(lo, bio, qcow_sparse_to);
 +}
 +
 +static struct loop_parser qcow_parser =

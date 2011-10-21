@@ -1,18 +1,20 @@
-From 21f2ad6023e3594e903b300354042629d27ec8d0 Mon Sep 17 00:00:00 2001
+From 9b37a27f28d61af7dea6424ec126a5cbbc81e072 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
-Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
+Subject: [PATCH 2/4] Loop: Useful I/O routines shared by parsers.
 
 This is basic functionality otherwise duplicated, like
-reading/writing a kernel buffer or struct page.
+reading/writing a kernel buffer or struct page. Also
+provides a generic sparse I/O routine currently
+shared by VHD and QCOW parsers.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- drivers/block/Kconfig    |    4 ++
+ drivers/block/Kconfig    |    4 +
  drivers/block/Makefile   |    1 +
- drivers/block/looputil.c |  128 ++++++++++++++++++++++++++++++++++++++++++++++
- include/linux/loop.h     |   25 +++++++++
- 4 files changed, 158 insertions(+), 0 deletions(-)
+ drivers/block/looputil.c |  194 ++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/loop.h     |   33 ++++++++
+ 4 files changed, 232 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/looputil.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -44,10 +46,10 @@ index 76646e9..eb3df97 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/looputil.c b/drivers/block/looputil.c
 new file mode 100644
-index 0000000..7523fa9
+index 0000000..ab67a5e
 --- /dev/null
 +++ b/drivers/block/looputil.c
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,194 @@
 +/*
 +   Useful routines shared by loop parsers.
 +
@@ -176,11 +178,77 @@ index 0000000..7523fa9
 +	bio_put(bio);
 +	return ret;
 +}
++
++static int loop_sparse_bvec(struct loop_device *lo,
++			    struct bio *bio,
++			    struct bio_vec *bvec,
++			    loff_t pos,
++			    loop_sparse_to sparse_to)
++{
++	u8 *raw_buf;
++	unsigned int len;
++	int ret = 0;
++	loff_t fpos = 0;
++	struct lo_file *lo_file = &lo->lo_file;
++	unsigned int bv_len = bvec->bv_len;
++
++	while (bv_len) {
++		len = bv_len;
++		ret  = sparse_to(&lo_file, bio, pos, &len, &fpos);
++
++		if (ret == -ENOENT && bio_rw(bio) != WRITE) {
++			ret = 0;
++			raw_buf = kmap_atomic(bvec->bv_page, KM_USER0) +
++				bvec->bv_offset + bvec->bv_len - bv_len;
++			memset(raw_buf, 0, len);
++			kunmap_atomic(raw_buf, KM_USER0);
++		} else if (!ret) {
++			if (bio_rw(bio) == WRITE)
++				ret = loop_write_page(lo, lo_file, bvec->bv_page,
++						      bvec->bv_offset + bvec->bv_len -
++						      bv_len, len, fpos);
++			else
++				ret = loop_read_page(lo, lo_file, bvec->bv_page,
++						     bvec->bv_offset + bvec->bv_len -
++						     bv_len, len, fpos);
++		}
++
++		if (ret) {
++			printk(KERN_ERR "%s: failed to %s: %d\n",
++			       lo->lo_disk->disk_name,
++                               bio_rw(bio) == WRITE ? "write" : "read",
++			       ret);
++			break;
++		}
++
++		bv_len -= len;
++		pos += len;
++	}
++
++	return ret;
++}
++
++int loop_sparse_io(struct loop_device *lo,
++		   struct bio *bio,
++		   loop_sparse_to sparse_to)
++{
++	struct bio_vec *bvec;
++	int i = 0;
++	int ret = 0;
++	loff_t pos = ((loff_t) bio->bi_sector << 9);
++
++	bio_for_each_segment(bvec, bio, i) {
++		ret = loop_sparse_bvec(lo, bio, bvec, pos, sparse_to);
++		pos += bvec->bv_len;
++	}
++
++	return ret;
++}
 diff --git a/include/linux/loop.h b/include/linux/loop.h
-index 222534f..a9cf186 100644
+index 222534f..4ffde53 100644
 --- a/include/linux/loop.h
 +++ b/include/linux/loop.h
-@@ -186,6 +186,31 @@ int loop_send(struct loop_device *lo, struct lo_file *lo_file,
+@@ -186,6 +186,39 @@ int loop_send(struct loop_device *lo, struct lo_file *lo_file,
  int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
  	      struct bio *bio, loff_t pos, loop_xfer transfer);
  int loop_sync(struct loop_device *lo, struct lo_file *lo_file);
@@ -208,6 +276,14 @@ index 222534f..a9cf186 100644
 +		    unsigned int offset,
 +		    unsigned int len,
 +		    loff_t pos);
++typedef int (*loop_sparse_to)(struct lo_file **lo_file,
++			      struct bio *bio,
++			      loff_t pos,
++			      unsigned int *len,
++			      loff_t *fpos);
++int loop_sparse_io(struct loop_device *lo,
++		   struct bio *bio,
++		   loop_sparse_to sparse_to);
 +#endif /* CONFIG_BLK_DEV_LOOP_UTIL */
  #endif
  /*

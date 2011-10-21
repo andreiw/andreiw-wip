@@ -1,7 +1,7 @@
-From b85a910dc0762f131ceac260ceb1d8f21f12fbdb Mon Sep 17 00:00:00 2001
+From 60dbd7ff4c72a5c5df2f9d502837cf7c4f5ce0bb Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
-Subject: [PATCH 3/5] Loop: VHD loop parser implementation.
+Subject: [PATCH 3/4] Loop: VHD loop parser implementation.
 
 This VHD parser supports fixed-size and dynamic disks.
 
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  786 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 795 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  724 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 733 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..7165e81
+index 0000000..36c841d
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,786 @@
+@@ -0,0 +1,724 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -647,17 +647,22 @@ index 0000000..7165e81
 +	return loop_sync(lo, &lo->lo_file);
 +}
 +
-+static int vhd_pos_to_fpos(struct vhd *vhd, loff_t pos,
-+			   loff_t len, loff_t *fpos, int cmd)
++static int vhd_sparse_to(struct lo_file **lo_file,
++			 struct bio *bio,
++			 loff_t pos,
++			 unsigned int *len,
++			 loff_t *fpos)
 +{
 +	int ret;
 +	loff_t block_fpos;
 +	loff_t bat_entry = pos;
++	struct vhd *vhd = (*lo_file)->parser_priv;
 +	u32 offset = do_div(bat_entry, vhd->block_unit);
++	*len = min(*len, (unsigned int) ((SEC_SZ - (pos & (SEC_SZ - 1)))));
 +
 +	block_fpos = be32_to_cpu(vhd->bat[bat_entry]);;
 +	if (block_fpos == 0xFFFFFFFF) {
-+		if (cmd == READ)
++		if (bio_rw(bio) != WRITE)
 +			return -ENOENT;
 +
 +		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache,
@@ -696,7 +701,7 @@ index 0000000..7165e81
 +	 * Bits within byte actually have a reversed meaning,
 +	 * where MSB is the lower sector number.
 +	 */
-+	if (cmd == READ) {
++	if (bio_rw(bio) != WRITE) {
 +		if (!(vhd->bmps[bat_entry]->bmp[offset >> (SEC_SHIFT + 3)] &
 +		      (1 << (7 - ((offset >> SEC_SHIFT) & 7)))))
 +			return -ENOENT;
@@ -708,102 +713,35 @@ index 0000000..7165e81
 +
 +	block_fpos += SECTOR_BMP_SZ(vhd->block_unit) + offset;
 +	if (block_fpos > vhd->file_size ||
-+	    (block_fpos + len) > vhd->file_size)
++	    (block_fpos + *len) > vhd->file_size)
 +		return -EINVAL;
 +
 +	*fpos = block_fpos;
 +	return 0;
 +}
 +
-+static int vhd_do_bvec(struct vhd *vhd, struct bio_vec *bvec,
-+		       loff_t pos, int cmd)
++static int vhd_read(struct loop_device *lo, struct bio *bio)
 +{
-+	u8 *raw_buf;
-+	unsigned int len;
-+	int ret = 0;
-+	loff_t fpos = 0;
-+	unsigned int bv_len = bvec->bv_len;
-+
-+	while (bv_len) {
-+
-+		/* Should optimize this so that access to contiguous
-+		 * sectors inside block don't involve multiple calls
-+		 * to vhd_*_page.
-+		 */
-+		len = min(bv_len, (unsigned int)
-+			  (SEC_SZ - (pos & (SEC_SZ - 1))));
-+
-+		ret  = vhd_pos_to_fpos(vhd, pos, len, &fpos, cmd);
-+
-+		if (ret == -ENOENT && cmd == READ) {
-+			ret = 0;
-+			raw_buf = kmap_atomic(bvec->bv_page, KM_USER0) +
-+				bvec->bv_offset + bvec->bv_len - bv_len;
-+			memset(raw_buf, 0, len);
-+			kunmap_atomic(raw_buf, KM_USER0);
-+		} else if (!ret) {
-+			if (cmd == READ)
-+				ret = loop_read_page(vhd->lo, vhd->lo_file, bvec->bv_page,
-+						    bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
-+			else
-+				ret = loop_write_page(vhd->lo, vhd->lo_file, bvec->bv_page,
-+						     bvec->bv_offset + bvec->bv_len - bv_len, len, fpos);
-+		}
-+
-+		if (ret) {
-+			printk(KERN_ERR "%s: failed to %s: %d\n",
-+			       VHD_DNAME(vhd), cmd == READ ? "read" : "write",
-+			       ret);
-+			break;
-+		}
-+
-+		bv_len -= len;
-+		pos += len;
-+	}
-+
-+	return ret;
-+}
-+
-+int vhd_read(struct loop_device *lo, struct bio *bio)
-+{
-+	int i;
-+	struct bio_vec *bvec;
-+	int ret = 0;
-+        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
 +	struct vhd *vhd = lo->lo_file.parser_priv;
 +
 +	if (vhd->type == FOOTER_TYPE_FIXED)
-+		return loop_recv(lo, &lo->lo_file, bio, pos, NULL);
++		return loop_recv(lo, &lo->lo_file, bio,
++				 ((loff_t) bio->bi_sector << SEC_SHIFT),
++				 NULL);
 +
-+	bio_for_each_segment(bvec, bio, i) {
-+		ret = vhd_do_bvec(vhd, bvec, pos, READ);
-+		if (ret)
-+			break;
-+		pos += bvec->bv_len;
-+	}
-+
-+	return ret;
++	return loop_sparse_io(lo, bio, vhd_sparse_to);
 +}
 +
-+int vhd_write(struct loop_device *lo, struct bio *bio)
++static int vhd_write(struct loop_device *lo, struct bio *bio)
 +{
-+	int i = 0;
-+	struct bio_vec *bvec;
-+	int ret = 0;
-+        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
 +	struct vhd *vhd = lo->lo_file.parser_priv;
 +
 +	if (vhd->type == FOOTER_TYPE_FIXED)
-+		return loop_send(lo, &lo->lo_file, bio, pos, NULL);
++		return loop_send(lo, &lo->lo_file, bio,
++				 ((loff_t) bio->bi_sector << SEC_SHIFT),
++				 NULL);
 +
-+	bio_for_each_segment(bvec, bio, i) {
-+		ret = vhd_do_bvec(vhd, bvec, pos, WRITE);
-+		if (ret)
-+			break;
-+		pos += bvec->bv_len;
-+	}
-+
-+	return ret;
++	return loop_sparse_io(lo, bio, vhd_sparse_to);
 +}
 +
 +static struct loop_parser vhd_parser =
