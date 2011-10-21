@@ -21,7 +21,7 @@ VHD spec is of course at:
 http://www.microsoft.com/download/en/details.aspx?id=23850
 
 QCOW parser to-do:
-1) Support RW on v1.
+1) Support RW on v1 (done!)
 2) Support v2.
 3) Support COW disks (painful, since there is no parent
    UUID to match against, necessitating some loop changes).
@@ -42,6 +42,19 @@ Common:
    devices - from a metadata point of view.
 
 VMDK is coming next.
+
+I think a hallmark of good design isn't just
+time and space considerations, but also ease
+of implementation. It's roughly 3 hours to
+implement the QCOW (v1) logic and test. It's
+been about 8 to implement and test dynamic
+VHD - and you get better use of unallocated
+space for QCOW.
+
+Ex: for 100m qcow and VHD at default settings,
+empty disks take up 448 and 2.5k respectively.
+Formatted with mkfs.ext2, they take up 3.3m
+and 24.3m respectively. Astounding.
 
 Patches are now rebased to linux-next (as of 9/26/2011).
 

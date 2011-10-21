@@ -1,4 +1,4 @@
-From c631d1e10cdd6e80b74846c09dd117f8a5310a1f Mon Sep 17 00:00:00 2001
+From 748b36b748942406ef55e5cda05e0eddf48ce99e Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
 Subject: [PATCH 3/4] Loop: VHD loop parser implementation.
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  785 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 794 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  787 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 796 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..f296ce6
+index 0000000..46d9212
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,785 @@
+@@ -0,0 +1,787 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -661,13 +661,15 @@ index 0000000..f296ce6
 +		if (cmd == READ)
 +			return -ENOENT;
 +
-+		block_fpos = round_up(vhd->file_size - FOOTER_SZ(vhd), SEC_SZ);
-+		vhd->file_size = block_fpos + vhd->block_unit + FOOTER_SZ(vhd);
-+		vhd->bat[bat_entry] = cpu_to_be32(block_fpos >> SEC_SHIFT);
-+		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache, GFP_KERNEL);
++		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache,
++                                                         GFP_KERNEL);
 +		if (!vhd->bmps[bat_entry])
 +			return -ENOMEM;
 +		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
++
++		block_fpos = round_up(vhd->file_size - FOOTER_SZ(vhd), SEC_SZ);
++		vhd->file_size = block_fpos + vhd->block_unit + FOOTER_SZ(vhd);
++		vhd->bat[bat_entry] = cpu_to_be32(block_fpos >> SEC_SHIFT);
 +		vhd->flags |= VHD_BAT_DIRTY;
 +	} else
 +		block_fpos <<= SEC_SHIFT;

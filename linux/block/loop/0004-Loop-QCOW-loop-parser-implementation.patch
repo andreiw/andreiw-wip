@@ -1,16 +1,29 @@
-From 97fe7453fcb7521cb5887bdae4cdeb151c6dcf78 Mon Sep 17 00:00:00 2001
+From 0ac7b1d6be162c9b9cde8c2bf678b54d6e6a2eca Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
 Subject: [PATCH 4/4] Loop: QCOW loop parser implementation.
 
-Beginnings of QCOW support (v1, read-only).
+Beginnings of QCOW support (v1, read/write).
+
+I think a hallmark of good design isn't just
+time and space considerations, but also ease
+of implementation. It's roughly 3 hours to
+implement the QCOW (v1) logic and test. It's
+been about 8 to implement and test dynamic
+VHD - and you get better use of unallocated
+space for QCOW.
+
+Ex: for 100m qcow and VHD at default settings,
+empty disks take up 448 and 2.5k respectively.
+Formatted with mkfs.ext2, they take up 3.3m
+and 24.3m respectively. Astounding.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  450 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 459 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  478 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 487 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +59,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..5ea06f7
+index 0000000..c6991ef
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,478 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -362,13 +375,22 @@ index 0000000..5ea06f7
 +	if (l1_index >= qcow->l1_entries)
 +		return -EINVAL;
 +
-+	/* Ugh... */
-+	if (cmd != READ)
-+		return -EIO;
++	ffpos = be64_to_cpu(qcow->l1[l1_index]);
++	if (!ffpos) {
++		if (cmd == READ)
++			return -ENOENT;
 +
-+	ffpos = qcow->l1[l1_index];
-+	if (!ffpos)
-+		return -ENOENT;
++		qcow->l2s[l1_index] = kmem_cache_zalloc(qcow->l2_cache,
++							GFP_KERNEL);
++		if (!qcow->l2s[l1_index])
++			return -ENOMEM;
++		qcow->l2s[l1_index]->flags |= QCOW_L2_DIRTY;
++
++		ffpos = qcow->file_size;
++		qcow->file_size += L2_SIZE(qcow->l2_entries);
++		qcow->l1[l1_index] = cpu_to_be64(ffpos);
++		qcow->flags |= QCOW_L1_DIRTY;
++        }
 +
 +	if (!qcow->l2s[l1_index]) {
 +		if (ffpos > qcow->file_size ||
@@ -394,9 +416,16 @@ index 0000000..5ea06f7
 +	l2_index = pos >> qcow->header.cluster_bits &
 +		B2M(qcow->header.l2_bits);
 +
-+	ffpos = qcow->l2s[l1_index]->offsets[l2_index];
-+	if (!ffpos)
-+		return -ENOENT;
++	ffpos = be64_to_cpu(qcow->l2s[l1_index]->offsets[l2_index]);
++	if (!ffpos) {
++		if (cmd == READ)
++			return -ENOENT;
++
++		ffpos = qcow->file_size;
++		qcow->file_size += 1 << qcow->header.cluster_bits;
++		qcow->l2s[l1_index]->offsets[l2_index] =
++			cpu_to_be64(ffpos);
++	}
 +
 +	*fpos = ffpos + (pos & B2M(qcow->header.cluster_bits));
 +	return 0;
@@ -467,7 +496,19 @@ index 0000000..5ea06f7
 +int qcow_write(struct loop_device *lo, struct lo_file *lo_file,
 +	      struct bio *bio, loff_t pos)
 +{
-+	return -EIO;
++	int i;
++	struct bio_vec *bvec;
++	int ret = 0;
++	struct qcow *qcow = lo_file->parser_priv;
++
++	bio_for_each_segment(bvec, bio, i) {
++		ret = qcow_do_bvec(qcow, bvec, pos, WRITE);
++		if (ret)
++			break;
++		pos += bvec->bv_len;
++	}
++
++	return ret;
 +}
 +
 +static struct loop_parser qcow_parser =
