@@ -1,7 +1,7 @@
 From 6bd533a8419db5b34483e74b78be97cda3ec0ff8 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
-Subject: [PATCH 3/4] Loop: VHD loop parser implementation.
+Subject: [PATCH 3/5] Loop: VHD loop parser implementation.
 
 This VHD parser supports fixed-size and dynamic disks.
 

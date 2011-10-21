@@ -29,19 +29,29 @@ QCOW parser to-do:
 5) Deal with HUGE images - i.e. deal with not being able to
    keep L1 or L2s in memory at all.
 
+VMDK parser to do:
+1) Support RO on hosted extents.
+2) Support RW on hosted extents.
+3) Support ESX extents.
+4) Support COW.
+5) LRU/shrink enhancements for grain tables.
+6) Deal ith HUGE images - i.e. deal with not being able
+   to keep GTs in memory at all.
+
 Common:
 1) Think about and split out common functionality: it's
    painful how similar both the VHD and QCOW parsers look,
    from an internal data structure POV. (done!)
-2) The shrinking LRU cache is a common neccesity for both VHD
-   and QCOW,
+2) The shrinking LRU cache is a common neccesity for both VHD,
+   QCOW, and VMDK.
 3) Think about a common interface for dealing with COW/differencing
    disks. It looks like change_fd is the right mechanism, just need
    to figure out how to prevent silly things from happening (or not?)
 4) Deal with mounting same image multiple times on different loop
    devices - from a metadata point of view.
-
-VMDK is coming next.
+5) All of the sparse formats use a multi-level lookup scheme. While the
+   contents are different, the management, lookup (see LRU cache) and life
+   time constraints are the same, and could be all factored out.
 
 I think a hallmark of good design isn't just time and space considerations, but
 also ease of implementation. It's roughly 3 hours to implement the QCOW (v1) logic

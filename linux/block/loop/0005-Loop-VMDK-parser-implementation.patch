@@ -1,0 +1,279 @@
+From 8f19b2f8e6ee3e7b78667503f86a64122c2ab879 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Thu, 20 Oct 2011 23:57:05 -0400
+Subject: [PATCH 5/5] Loop: VMDK parser implementation.
+
+Just the beginnings of one. Looks like we'll support
+hosted and ESX sparse VMDKs, and start out with
+the hosted support first (since qemu-img generates those).
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ drivers/block/Kconfig    |    8 ++
+ drivers/block/Makefile   |    1 +
+ drivers/block/vmdkloop.c |  222 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 231 insertions(+), 0 deletions(-)
+ create mode 100644 drivers/block/vmdkloop.c
+
+diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
+index ed14cbc..ab2f5d6 100644
+--- a/drivers/block/Kconfig
++++ b/drivers/block/Kconfig
+@@ -306,6 +306,14 @@ config BLK_DEV_QCOWLOOP
+ 	  Say Y here if you want to be able to use QCOW images
+ 	  as disks using the loop device.
+ 
++config BLK_DEV_VMDKLOOP
++	tristate "VMDK loop support"
++	depends on BLK_DEV_LOOP
++	select BLK_DEV_LOOP_UTIL
++	---help---
++	  Say Y here if you want to be able to use sparse VMDK
++	  images as disks using the loop device.
++
+ source "drivers/block/drbd/Kconfig"
+ 
+ config BLK_DEV_NBD
+diff --git a/drivers/block/Makefile b/drivers/block/Makefile
+index 619635c..d1314ee 100644
+--- a/drivers/block/Makefile
++++ b/drivers/block/Makefile
+@@ -31,6 +31,7 @@ obj-$(CONFIG_BLK_DEV_CRYPTOLOOP) += cryptoloop.o
+ obj-$(CONFIG_BLK_DEV_LOOP_UTIL)	+= looputil.o
+ obj-$(CONFIG_BLK_DEV_VHDLOOP)	+= vhdloop.o
+ obj-$(CONFIG_BLK_DEV_QCOWLOOP)	+= qcowloop.o
++obj-$(CONFIG_BLK_DEV_VMDKLOOP)	+= vmdkloop.o
+ obj-$(CONFIG_VIRTIO_BLK)	+= virtio_blk.o
+ 
+ obj-$(CONFIG_VIODASD)		+= viodasd.o
+diff --git a/drivers/block/vmdkloop.c b/drivers/block/vmdkloop.c
+new file mode 100644
+index 0000000..9e914ed
+--- /dev/null
++++ b/drivers/block/vmdkloop.c
+@@ -0,0 +1,222 @@
++/*
++   Linux loop VMDK support.
++
++   Copyright (C) 2011 Andrei Warkentin <andreiw@vmware.com>
++
++   This module is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This module is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this module; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/init.h>
++#include <linux/loop.h>
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("loop VMDK parser");
++MODULE_AUTHOR("Andrei Warkentin <andreiw@vmware.com>");
++
++#define VMDK_DNAME(vmdk)	((vmdk)->lo->lo_disk->disk_name)
++#define SEC_SHIFT		(9)
++#define SEC_SZ			(1 << SEC_SHIFT)
++#define GT_CACHE_PREFIX		("vmdkgt")
++
++#define COW_MAGIC			(*(u32 *) "COWD")
++#define COW_VERSION			(1)
++#define COW_FLAGS			(3)
++#define COWDISK_MAX_PARENT_FILELEN	(1024)
++#define COWDISK_MAX_NAME_LEN		(60)
++#define COWDISK_MAX_DESC_LEN		(512)
++
++/* All fields LE. */
++struct cow_header {
++	u32 magic_number;
++	u32 version;
++	u32 flags;
++	u32 num_sectors;
++	u32 grain_size;
++	u32 gd_offset;
++	u32 num_gd_entries;
++	u32 free_sector;
++	union {
++		struct {
++			u32 cylinders;
++			u32 heads;
++			u32 sectors;
++		} root;
++		struct {
++			char parent_fn[COWDISK_MAX_PARENT_FILELEN];
++			u32 parent_generation;
++		} child;
++	} u;
++	u32 generation;
++	char name[COWDISK_MAX_NAME_LEN];
++	char descriptor[COWDISK_MAX_DESC_LEN];
++	u32 saved_generation;
++	u8 reserved[8];
++	u32 unclean_shutdown;
++	u8 padding[396];
++};
++
++#define SPARSE_MAGIC		(*(u32 *) "VMDK")
++#define SPARSE_VERSION		(1)
++#define SPARSE_FLAG_ENDL	(1 << 0)
++#define SPARSE_FLAG_RGD		(1 << 1)
++#define SPARSE_FLAG_COMPRESS	(1 << 16)
++#define SPARSE_FLAG_MARKERS	(1 << 17)
++#define SPARSE_COMPRESS_NONE	(0)
++#define SPARSE_COMPRESS_DEFLATE	(1)
++
++/* All fields LE, and packed, ewww. */
++struct sparse_header {
++	u32 magic;
++	u32 version;
++	u32 flags;
++	u64 capacity;
++	u64 grain_size;
++	u64 descriptor_offset;
++	u64 descriptor_size;
++	u32 gtes;
++	u64 rgd_offset;
++	u64 gd_offset;
++	u64 overhead;
++	u8  unclean_shutdown;
++	char single_endline;
++	char non_endline;
++	char double_endline1;
++	char double_endline2;
++	u16 compress;
++	u8 pad[433];
++} __attribute__((packed));
++
++#define VMDK_GT_DIRTY (0x1)
++
++struct vmdk_gt
++{
++	unsigned flags;
++	u32 sectors[0];
++};
++
++/* L1 table needs to be flushed. */
++#define VMDK_GD_DIRTY (0x1)
++
++struct vmdk
++{
++	struct loop_device *lo;
++	struct lo_file     *lo_file;
++	union {
++		struct cow_header cow;
++		struct sparse_header sparse;
++	};
++	loff_t file_size;
++	loff_t size;
++
++	/* Parsed and created from header. */
++	u32 *gd;
++	u64 gd_entries;
++	u64 gt_entries;
++	loff_t grain_size;
++	unsigned int access_size;
++	struct kmem_cache *gt_cache;
++	char *gt_cache_name;
++
++	/* L2s should be in an LRU list.
++	 * and should respond to memory pressure.
++	 */
++	struct vmdk_gt **gts;
++	unsigned flags;
++};
++
++static int vmdk_meta_flush(struct vmdk *vmdk)
++{
++	return -EIO;
++}
++
++static void vmdk_free(struct vmdk *vmdk)
++{
++}
++
++static int vmdk_init(struct loop_device *lo, struct lo_file *lo_file)
++{
++	return -EIO;
++}
++
++static void vmdk_release(struct loop_device *lo, struct lo_file *lo_file)
++{
++	struct vmdk *vmdk = lo_file->parser_priv;
++	lo_file->parser_priv = NULL;
++	vmdk_free(vmdk);
++}
++
++static loff_t vmdk_size(struct loop_device *lo)
++{
++	struct vmdk *vmdk = lo->lo_file.parser_priv;
++	return vmdk->size >> SEC_SHIFT;
++}
++
++static int vmdk_sync(struct loop_device *lo)
++{
++	int ret;
++	struct vmdk *vmdk = lo->lo_file.parser_priv;
++
++	ret = vmdk_meta_flush(vmdk);
++	if (ret)
++		return ret;
++
++	return loop_sync(lo, &lo->lo_file);
++}
++
++static int vmdk_sparse_to(struct lo_file **lo_file,
++			  struct bio *bio,
++			  loff_t pos,
++			  unsigned int *len,
++			  loff_t *fpos)
++{
++	return -EIO;
++}
++
++static int vmdk_bio(struct loop_device *lo, struct bio *bio)
++{
++	return loop_sparse_io(lo, bio, vmdk_sparse_to);
++}
++
++static struct loop_parser vmdk_parser =
++{
++	.name = "vmdk",
++	.init = vmdk_init,
++	.release = vmdk_release,
++	.sync = vmdk_sync,
++	.size = vmdk_size,
++	.bio = vmdk_bio,
++	.owner = THIS_MODULE
++};
++
++static int __init
++init_vmdkloop(void)
++{
++	int ret = loop_register_parser(&vmdk_parser);
++	if (ret)
++		printk(KERN_ERR "vmdkloop: loop_register_parser failed\n");
++	return ret;
++}
++
++static void __exit
++cleanup_vmdkloop(void)
++{
++	if (loop_unregister_parser(&vmdk_parser))
++		printk(KERN_ERR "vmdkloop: loop_unregister_parser failed\n");
++}
++
++module_init(init_vmdkloop);
++module_exit(cleanup_vmdkloop);
+-- 
+1.7.7
+

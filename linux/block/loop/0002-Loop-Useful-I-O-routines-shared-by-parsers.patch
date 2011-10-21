@@ -1,7 +1,7 @@
 From a5c4ff377fa84291b4ad22e9f53d44b7d5b0ada5 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
-Subject: [PATCH 2/4] Loop: Useful I/O routines shared by parsers.
+Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
 
 This is basic functionality otherwise duplicated, like
 reading/writing a kernel buffer or struct page. Also
