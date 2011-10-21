@@ -1,0 +1,81 @@
+From 8402ca9b942fa5e869ff9c9529e4bc8095e806c1 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@vmware.com>
+Date: Fri, 14 Oct 2011 17:46:04 -0400
+Subject: [PATCH] Git-p4: Add "git p4 change" command.
+
+Many users of p4/sd use changelists for review, regression
+tests and batch builds.
+
+"p4 change" is almost equivalent to "p4 submit", yet will
+just create the changelist and not submit it.
+
+Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
+---
+ contrib/fast-import/git-p4 |   23 ++++++++++++++++++-----
+ 1 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/contrib/fast-import/git-p4 b/contrib/fast-import/git-p4
+index 2f7b270..dd084b9 100755
+--- a/contrib/fast-import/git-p4
++++ b/contrib/fast-import/git-p4
+@@ -950,7 +950,10 @@ class P4Submit(Command, P4UserMap):
+             if checkModTime and (os.stat(fileName).st_mtime <= mtime):
+                 response = "x"
+                 while response != "y" and response != "n":
+-                    response = raw_input("Submit template unchanged. Submit anyway? [y]es, [n]o (skip this patch) ")
++                    if (self.cmdname == "change"):
++                        response = raw_input("Change template unchanged. Create changelist anyway? [y]es, [n]o (skip this patch) ")
++                    else:
++                        response = raw_input("Submit template unchanged. Submit anyway? [y]es, [n]o (skip this patch) ")
+ 
+             if response == "y":
+                 tmpFile = open(fileName, "rb")
+@@ -959,7 +962,10 @@ class P4Submit(Command, P4UserMap):
+                 submitTemplate = message[:message.index(separatorLine)]
+                 if self.isWindows:
+                     submitTemplate = submitTemplate.replace("\r\n", "\n")
+-                p4_write_pipe("submit -i", submitTemplate)
++                if (self.cmdname == "change"):
++                    p4_write_pipe("change -i", submitTemplate)
++                else:
++                    p4_write_pipe("submit -i", submitTemplate)
+ 
+                 if self.preserveUser:
+                     if p4User:
+@@ -981,9 +987,14 @@ class P4Submit(Command, P4UserMap):
+             file = open(fileName, "w+")
+             file.write(self.prepareLogMessage(template, logMessage))
+             file.close()
+-            print ("Perforce submit template written as %s. "
+-                   + "Please review/edit and then use p4 submit -i < %s to submit directly!"
+-                   % (fileName, fileName))
++            if (self.cmdname == "change"):
++                print ("Perforce change template written as %s. "
++                       + "Please review/edit and then use p4 change -i < %s to submit directly!"
++                       % (fileName, fileName))
++            else:
++                print ("Perforce submit template written as %s. "
++                       + "Please review/edit and then use p4 submit -i < %s to submit directly!"
++                       % (fileName, fileName))
+ 
+     def run(self, args):
+         if len(args) == 0:
+@@ -2177,6 +2188,7 @@ commands = {
+     "debug" : P4Debug,
+     "submit" : P4Submit,
+     "commit" : P4Submit,
++    "change" : P4Submit,
+     "sync" : P4Sync,
+     "rebase" : P4Rebase,
+     "clone" : P4Clone,
+@@ -2202,6 +2214,7 @@ def main():
+         sys.exit(2)
+ 
+     options = cmd.options
++    cmd.cmdname = cmdName
+     cmd.gitdir = os.environ.get("GIT_DIR", None)
+ 
+     args = sys.argv[2:]
+-- 
+1.7.4.1
+
