@@ -1,13 +1,65 @@
-Loop device parser support.
-===================================
+Loop Device Parser support.
+===========================
 
 These are my work-in-progress patches for developing
 VHD/VMDK/qcow and other-virtual-disk support in loop device via
 the addition of loop parser support and parser implementations.
 
+Patches are now rebased to linux-next (as of 9/26/2011).
+
+I think a hallmark of good design isn't just time and space considerations, but
+also ease of implementation. It's roughly 3 hours to implement the QCOW (v1) logic
+and test. It's been about 8 to implement and test dynamic VHD - and you get better
+use of unallocated space for QCOW.
+
+Ex: for 100m qcow and VHD at default settings, empty disks take up 448 and 2.5k
+respectively. Formatted with mkfs.ext2, they take up 3.3m and 24.3m respectively.
+Astounding.
+
+VHD spec is at:
+http://www.microsoft.com/download/en/details.aspx?id=23850
+
+QCOW spec is at: 
+http://people.gnome.org/~markmc/qcow-image-format-version-1.html
+
+VMDK spec is at:
+http://www.vmware.com/technical-resources/interfaces/vmdk.html
+
+Using.
+======
+
+Apply patches. Your .config should have something like:
+
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_BLK_DEV_LOOP_MIN_COUNT=8
+CONFIG_BLK_DEV_LOOP_UTIL=y
+CONFIG_BLK_DEV_VHDLOOP=y
+CONFIG_BLK_DEV_QCOWLOOP=y
+CONFIG_BLK_DEV_VMDKLOOP=y
+
+Mounting is easy, since the losetup interface isn't (and won't)
+change.
+
+$ losetup /dev/loop0 /path/to/image
+
+You will see some acknowledging messages from the kernel regarding
+image type and loop size.
+
+Your either want to set loop.max_parts to something non-zero (10 sounds good to me),
+or use kpartx to actually see partitions on devices.
+
+To generate images you can use my vhdtool (https://github.com/andreiw/vhdtool), which
+allows you to fine-tune metadata details for dynamic disks (and unlike qemu-img, doesn't
+create b0rked images).
+
+For other images types `man 1 qemu-img` (obviously requires qemu installed).
+
+To-do.
+======
+
 VHD parser to-do:
 1) Fixed-size VHDs (Done!)
-2) Dynamic VHDs (Seemingly done!)
+2) Dynamic VHDs (Done!)
 3) Differencing VHDs (Should be trivial, since it's a special
    case of dynamic VHDs)
 4) Benching against exsting nbd/fuse-based solutions.
@@ -16,9 +68,6 @@ VHD parser to-do:
 7) Deal with HUGE VHDs - i.e. deal with not being able
    to keep BAT/bitmaps in memory at all.
 8) Parser options and backwards-compat loop_info changes.
-
-VHD spec is of course at:
-http://www.microsoft.com/download/en/details.aspx?id=23850
 
 QCOW parser to-do:
 1) Support RW on v1 (done!)
@@ -42,27 +91,19 @@ Common:
 1) Think about and split out common functionality: it's
    painful how similar both the VHD and QCOW parsers look,
    from an internal data structure POV. (done!)
-2) The shrinking LRU cache is a common neccesity for both VHD,
+2) The shrinking LRU cache is a common necesity for both VHD,
    QCOW, and VMDK.
-3) Think about a common interface for dealing with COW/differencing
+3) lo_file management in loop.c is crucial for differencing/COW
+   disk support.
+4) Think about a common interface for dealing with COW/differencing
    disks. It looks like change_fd is the right mechanism, just need
    to figure out how to prevent silly things from happening (or not?)
 4) Deal with mounting same image multiple times on different loop
    devices - from a metadata point of view.
 5) All of the sparse formats use a multi-level lookup scheme. While the
    contents are different, the management, lookup (see LRU cache) and life
-   time constraints are the same, and could be all factored out.
-
-I think a hallmark of good design isn't just time and space considerations, but
-also ease of implementation. It's roughly 3 hours to implement the QCOW (v1) logic
-and test. It's been about 8 to implement and test dynamic VHD - and you get better
-use of unallocated space for QCOW.
-
-Ex: for 100m qcow and VHD at default settings, empty disks take up 448 and 2.5k
-respectively. Formatted with mkfs.ext2, they take up 3.3m and 24.3m respectively.
-Astounding.
-
-Patches are now rebased to linux-next (as of 9/26/2011).
+   time constraints are the same, and could be all factored out simplifying
+   the parsers (and simplifying writing similar parsers).
 
 Contact Info
 ============
