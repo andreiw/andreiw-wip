@@ -32,7 +32,7 @@ QCOW parser to-do:
 Common:
 1) Think about and split out common functionality: it's
    painful how similar both the VHD and QCOW parsers look,
-   from an internal data structure POV.
+   from an internal data structure POV. (done!)
 2) The shrinking LRU cache is a common neccesity for both VHD
    and QCOW,
 3) Think about a common interface for dealing with COW/differencing
@@ -43,18 +43,14 @@ Common:
 
 VMDK is coming next.
 
-I think a hallmark of good design isn't just
-time and space considerations, but also ease
-of implementation. It's roughly 3 hours to
-implement the QCOW (v1) logic and test. It's
-been about 8 to implement and test dynamic
-VHD - and you get better use of unallocated
-space for QCOW.
+I think a hallmark of good design isn't just time and space considerations, but
+also ease of implementation. It's roughly 3 hours to implement the QCOW (v1) logic
+and test. It's been about 8 to implement and test dynamic VHD - and you get better
+use of unallocated space for QCOW.
 
-Ex: for 100m qcow and VHD at default settings,
-empty disks take up 448 and 2.5k respectively.
-Formatted with mkfs.ext2, they take up 3.3m
-and 24.3m respectively. Astounding.
+Ex: for 100m qcow and VHD at default settings, empty disks take up 448 and 2.5k
+respectively. Formatted with mkfs.ext2, they take up 3.3m and 24.3m respectively.
+Astounding.
 
 Patches are now rebased to linux-next (as of 9/26/2011).
 

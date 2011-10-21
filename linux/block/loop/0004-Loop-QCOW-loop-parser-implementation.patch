@@ -1,4 +1,4 @@
-From 3d34dee2bd1e2f8b7042faeb7186415fcf39e241 Mon Sep 17 00:00:00 2001
+From 554aaac9a38dd95f995d3f0e9b64028c610581e2 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
 Subject: [PATCH 4/4] Loop: QCOW loop parser implementation.
@@ -22,8 +22,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  420 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 429 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  414 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 423 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -59,10 +59,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..28b0ebe
+index 0000000..1d64a50
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,414 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -443,12 +443,7 @@ index 0000000..28b0ebe
 +	return 0;
 +}
 +
-+static int qcow_read(struct loop_device *lo, struct bio *bio)
-+{
-+	return loop_sparse_io(lo, bio, qcow_sparse_to);
-+}
-+
-+static int qcow_write(struct loop_device *lo, struct bio *bio)
++static int qcow_bio(struct loop_device *lo, struct bio *bio)
 +{
 +	return loop_sparse_io(lo, bio, qcow_sparse_to);
 +}
@@ -460,8 +455,7 @@ index 0000000..28b0ebe
 +	.release = qcow_release,
 +	.sync = qcow_sync,
 +	.size = qcow_size,
-+	.read = qcow_read,
-+	.write = qcow_write,
++	.bio = qcow_bio,
 +	.owner = THIS_MODULE
 +};
 +

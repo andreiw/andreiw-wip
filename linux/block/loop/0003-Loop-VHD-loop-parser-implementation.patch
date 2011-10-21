@@ -1,4 +1,4 @@
-From 60dbd7ff4c72a5c5df2f9d502837cf7c4f5ce0bb Mon Sep 17 00:00:00 2001
+From 6bd533a8419db5b34483e74b78be97cda3ec0ff8 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
 Subject: [PATCH 3/4] Loop: VHD loop parser implementation.
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  724 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 733 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  717 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 726 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..36c841d
+index 0000000..6c54b0f
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,724 @@
+@@ -0,0 +1,717 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -720,26 +720,20 @@ index 0000000..36c841d
 +	return 0;
 +}
 +
-+static int vhd_read(struct loop_device *lo, struct bio *bio)
++static int vhd_bio(struct loop_device *lo, struct bio *bio)
 +{
 +	struct vhd *vhd = lo->lo_file.parser_priv;
 +
-+	if (vhd->type == FOOTER_TYPE_FIXED)
-+		return loop_recv(lo, &lo->lo_file, bio,
-+				 ((loff_t) bio->bi_sector << SEC_SHIFT),
-+				 NULL);
-+
-+	return loop_sparse_io(lo, bio, vhd_sparse_to);
-+}
-+
-+static int vhd_write(struct loop_device *lo, struct bio *bio)
-+{
-+	struct vhd *vhd = lo->lo_file.parser_priv;
-+
-+	if (vhd->type == FOOTER_TYPE_FIXED)
-+		return loop_send(lo, &lo->lo_file, bio,
-+				 ((loff_t) bio->bi_sector << SEC_SHIFT),
-+				 NULL);
++	if (vhd->type == FOOTER_TYPE_FIXED) {
++		if (bio_rw(bio) == WRITE)
++			return loop_send(lo, &lo->lo_file, bio,
++					 ((loff_t) bio->bi_sector << SEC_SHIFT),
++					 NULL);
++		else
++			return loop_recv(lo, &lo->lo_file, bio,
++					 ((loff_t) bio->bi_sector << SEC_SHIFT),
++					 NULL);
++	}
 +
 +	return loop_sparse_io(lo, bio, vhd_sparse_to);
 +}
@@ -751,8 +745,7 @@ index 0000000..36c841d
 +	.release = vhd_release,
 +	.sync = vhd_sync,
 +	.size = vhd_size,
-+	.read = vhd_read,
-+	.write = vhd_write,
++	.bio = vhd_bio,
 +	.owner = THIS_MODULE
 +};
 +

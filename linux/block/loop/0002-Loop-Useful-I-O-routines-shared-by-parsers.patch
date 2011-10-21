@@ -1,4 +1,4 @@
-From 9b37a27f28d61af7dea6424ec126a5cbbc81e072 Mon Sep 17 00:00:00 2001
+From a5c4ff377fa84291b4ad22e9f53d44b7d5b0ada5 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
 Subject: [PATCH 2/4] Loop: Useful I/O routines shared by parsers.
@@ -245,10 +245,10 @@ index 0000000..ab67a5e
 +	return ret;
 +}
 diff --git a/include/linux/loop.h b/include/linux/loop.h
-index 222534f..4ffde53 100644
+index 02db81e..a07fb2b 100644
 --- a/include/linux/loop.h
 +++ b/include/linux/loop.h
-@@ -186,6 +186,39 @@ int loop_send(struct loop_device *lo, struct lo_file *lo_file,
+@@ -185,6 +185,39 @@ int loop_send(struct loop_device *lo, struct lo_file *lo_file,
  int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
  	      struct bio *bio, loff_t pos, loop_xfer transfer);
  int loop_sync(struct loop_device *lo, struct lo_file *lo_file);

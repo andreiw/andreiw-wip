@@ -1,4 +1,4 @@
-From 9acd33daf17f8fb3fe4c78292a343d058dd43bcf Mon Sep 17 00:00:00 2001
+From 64da08b05414ed48d12d1502437d92a04dcb858f Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:36:19 -0400
 Subject: [PATCH 1/4] Loop: Loop parser support.
@@ -8,12 +8,12 @@ disk image formats, such as VMDK, VHD and QCOW.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- drivers/block/loop.c |  379 ++++++++++++++++++++++++++++++++++++--------------
- include/linux/loop.h |   64 +++++++--
- 2 files changed, 323 insertions(+), 120 deletions(-)
+ drivers/block/loop.c |  375 +++++++++++++++++++++++++++++++++++---------------
+ include/linux/loop.h |   63 +++++++--
+ 2 files changed, 318 insertions(+), 120 deletions(-)
 
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
-index 4720c7a..66f2156 100644
+index 4720c7a..4476510 100644
 --- a/drivers/block/loop.c
 +++ b/drivers/block/loop.c
 @@ -80,9 +80,12 @@
@@ -306,7 +306,7 @@ index 4720c7a..66f2156 100644
  		}
  
 -		ret = lo_send(lo, bio, pos);
-+		ret = lo->lo_parser->write(lo, bio);
++		ret = lo->lo_parser->bio(lo, bio);
  
  		if ((bio->bi_rw & REQ_FUA) && !ret) {
 -			ret = vfs_fsync(file, 0);
@@ -320,7 +320,7 @@ index 4720c7a..66f2156 100644
  		}
  	} else
 -		ret = lo_receive(lo, bio, lo->lo_blocksize, pos);
-+		ret = lo->lo_parser->read(lo, bio);
++		ret = lo->lo_parser->bio(lo, bio);
  
  out:
  	return ret;
@@ -584,7 +584,7 @@ index 4720c7a..66f2156 100644
  	struct kstat stat;
  	int error;
  
-@@ -1551,6 +1625,34 @@ MODULE_PARM_DESC(max_part, "Maximum number of partitions per loop device");
+@@ -1551,6 +1625,33 @@ MODULE_PARM_DESC(max_part, "Maximum number of partitions per loop device");
  MODULE_LICENSE("GPL");
  MODULE_ALIAS_BLOCKDEV_MAJOR(LOOP_MAJOR);
  
@@ -595,8 +595,7 @@ index 4720c7a..66f2156 100644
 +	    !parser->release ||
 +	    !parser->sync ||
 +	    !parser->size ||
-+	    !parser->read ||
-+	    !parser->write)
++	    !parser->bio)
 +		return -EINVAL;
 +
 +	mutex_lock(&loop_parsers_mutex);
@@ -619,7 +618,7 @@ index 4720c7a..66f2156 100644
  int loop_register_transfer(struct loop_func_table *funcs)
  {
  	unsigned int n = funcs->number;
-@@ -1788,6 +1890,67 @@ static struct miscdevice loop_misc = {
+@@ -1788,6 +1889,64 @@ static struct miscdevice loop_misc = {
  MODULE_ALIAS_MISCDEV(LOOP_CTRL_MINOR);
  MODULE_ALIAS("devname:loop-control");
  
@@ -653,18 +652,16 @@ index 4720c7a..66f2156 100644
 +	return size >> 9;
 +}
 +
-+static int raw_read(struct loop_device *lo, struct bio *bio)
++static int raw_bio(struct loop_device *lo, struct bio *bio)
 +{
-+	return loop_recv(lo, &lo->lo_file, bio,
-+			 ((loff_t) bio->bi_sector << 9) +
-+			 lo->lo_offset, lo->transfer);
-+}
-+
-+static int raw_write(struct loop_device *lo, struct bio *bio)
-+{
-+	return loop_send(lo, &lo->lo_file, bio,
-+			 ((loff_t) bio->bi_sector << 9) +
-+			 lo->lo_offset, lo->transfer);
++	if (bio_rw(bio) == WRITE)
++		return loop_send(lo, &lo->lo_file, bio,
++				 ((loff_t) bio->bi_sector << 9) +
++				 lo->lo_offset, lo->transfer);
++	else
++		return loop_recv(lo, &lo->lo_file, bio,
++				 ((loff_t) bio->bi_sector << 9) +
++				 lo->lo_offset, lo->transfer);
 +}
 +
 +static int raw_sync(struct loop_device *lo)
@@ -679,8 +676,7 @@ index 4720c7a..66f2156 100644
 +	.release = raw_release,
 +	.sync = raw_sync,
 +	.size = raw_size,
-+	.read = raw_read,
-+	.write = raw_write,
++	.bio = raw_bio,
 +	.owner = THIS_MODULE
 +};
 +
@@ -688,7 +684,7 @@ index 4720c7a..66f2156 100644
  {
  	int i, nr;
 diff --git a/include/linux/loop.h b/include/linux/loop.h
-index 683d698..222534f 100644
+index 683d698..02db81e 100644
 --- a/include/linux/loop.h
 +++ b/include/linux/loop.h
 @@ -28,12 +28,32 @@ enum {
@@ -783,7 +779,7 @@ index 683d698..222534f 100644
  	int (*init)(struct loop_device *, const struct loop_info64 *); 
  	/* release is called from loop_unregister_transfer or clr_fd */
  	int (*release)(struct loop_device *); 
-@@ -146,6 +165,27 @@ struct loop_func_table {
+@@ -146,6 +165,26 @@ struct loop_func_table {
  int loop_register_transfer(struct loop_func_table *funcs);
  int loop_unregister_transfer(int number); 
  
@@ -795,8 +791,7 @@ index 683d698..222534f 100644
 +	void (*release)(struct loop_device *lo, struct lo_file *lo_file);
 +	int (*sync)(struct loop_device *lo);
 +	loff_t (*size)(struct loop_device *lo);
-+	int (*write)(struct loop_device *lo, struct bio *bio);
-+	int (*read)(struct loop_device *lo, struct bio *bio);
++	int (*bio)(struct loop_device *lo, struct bio *bio);
 +	struct module *owner;
 +};
 +
