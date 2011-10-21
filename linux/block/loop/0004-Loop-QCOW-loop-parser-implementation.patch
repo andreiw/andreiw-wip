@@ -1,4 +1,4 @@
-From 0ac7b1d6be162c9b9cde8c2bf678b54d6e6a2eca Mon Sep 17 00:00:00 2001
+From cd0be80d84b0f6ff58fb8fdc7cf2e6e7087cd686 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
 Subject: [PATCH 4/4] Loop: QCOW loop parser implementation.
@@ -22,8 +22,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  478 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 487 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  480 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 489 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -59,10 +59,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..c6991ef
+index 0000000..20d68a5
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,480 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -476,11 +476,12 @@ index 0000000..c6991ef
 +}
 +
 +int qcow_read(struct loop_device *lo, struct lo_file *lo_file,
-+	     struct bio *bio, loff_t pos)
++	     struct bio *bio)
 +{
 +	int i;
 +	struct bio_vec *bvec;
 +	int ret = 0;
++        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
 +	struct qcow *qcow = lo_file->parser_priv;
 +
 +	bio_for_each_segment(bvec, bio, i) {
@@ -494,11 +495,12 @@ index 0000000..c6991ef
 +}
 +
 +int qcow_write(struct loop_device *lo, struct lo_file *lo_file,
-+	      struct bio *bio, loff_t pos)
++	      struct bio *bio)
 +{
 +	int i;
 +	struct bio_vec *bvec;
 +	int ret = 0;
++        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
 +	struct qcow *qcow = lo_file->parser_priv;
 +
 +	bio_for_each_segment(bvec, bio, i) {

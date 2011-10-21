@@ -1,4 +1,4 @@
-From 748b36b748942406ef55e5cda05e0eddf48ce99e Mon Sep 17 00:00:00 2001
+From 977fd71911bb23ef0ca4aa7a2da002f3cb696854 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
 Subject: [PATCH 3/4] Loop: VHD loop parser implementation.
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  787 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 796 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  789 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 798 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..46d9212
+index 0000000..2ee289b
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,787 @@
+@@ -0,0 +1,789 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -222,7 +222,7 @@ index 0000000..46d9212
 +{
 +	u64 temp;
 +	u64 cyl_x_heads;
-+	u64 sectors = vhd->size >> 9;
++	u64 sectors = vhd->size >> SEC_SHIFT;
 +	struct vhd_chs chs;
 +
 +	/*
@@ -632,7 +632,7 @@ index 0000000..46d9212
 +static loff_t vhd_size(struct loop_device *lo, struct lo_file *lo_file)
 +{
 +	struct vhd *vhd = lo_file->parser_priv;
-+	return vhd->size >> 9;
++	return vhd->size >> SEC_SHIFT;
 +}
 +
 +static int vhd_sync(struct loop_device *lo, struct lo_file *lo_file,
@@ -766,11 +766,12 @@ index 0000000..46d9212
 +}
 +
 +int vhd_read(struct loop_device *lo, struct lo_file *lo_file,
-+	     struct bio *bio, loff_t pos)
++	     struct bio *bio)
 +{
 +	int i;
 +	struct bio_vec *bvec;
 +	int ret = 0;
++        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
 +	struct vhd *vhd = lo_file->parser_priv;
 +
 +	if (vhd->type == FOOTER_TYPE_FIXED)
@@ -787,11 +788,12 @@ index 0000000..46d9212
 +}
 +
 +int vhd_write(struct loop_device *lo, struct lo_file *lo_file,
-+	      struct bio *bio, loff_t pos)
++	      struct bio *bio)
 +{
 +	int i = 0;
 +	struct bio_vec *bvec;
 +	int ret = 0;
++        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
 +	struct vhd *vhd = lo_file->parser_priv;
 +
 +	if (vhd->type == FOOTER_TYPE_FIXED)

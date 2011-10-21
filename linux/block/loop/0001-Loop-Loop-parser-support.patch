@@ -1,4 +1,4 @@
-From d7576c75ace98b97bd77dd3930c4bf016bc588cc Mon Sep 17 00:00:00 2001
+From 528ac273b5430a87864bd38d4909460ce22091d0 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:36:19 -0400
 Subject: [PATCH 1/4] Loop: Loop parser support.
@@ -8,12 +8,12 @@ disk image formats, such as VMDK, VHD and QCOW.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- drivers/block/loop.c |  370 ++++++++++++++++++++++++++++++++++++--------------
+ drivers/block/loop.c |  375 ++++++++++++++++++++++++++++++++++++--------------
  include/linux/loop.h |   68 ++++++++--
- 2 files changed, 322 insertions(+), 116 deletions(-)
+ 2 files changed, 325 insertions(+), 118 deletions(-)
 
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
-index 4720c7a..6eb8a8a 100644
+index 4720c7a..5708c6d 100644
 --- a/drivers/block/loop.c
 +++ b/drivers/block/loop.c
 @@ -80,9 +80,12 @@
@@ -263,16 +263,18 @@ index 4720c7a..6eb8a8a 100644
  		if (ret < 0)
  			break;
  		pos += bvec->bv_len;
-@@ -466,33 +462,55 @@ lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
+@@ -466,33 +462,52 @@ lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
  	return ret;
  }
  
+-static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
 +EXPORT_SYMBOL(loop_recv);
 +
 +int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
 +	      unsigned long reqf)
-+{
-+	int ret;
+ {
+-	loff_t pos;
+ 	int ret;
 +	struct file *file = lo->lo_file.file;
 +
 +	ret = vfs_fsync(file, 0);
@@ -283,14 +285,11 @@ index 4720c7a..6eb8a8a 100644
 +}
 +
 +EXPORT_SYMBOL(loop_sync);
-+
- static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
- {
- 	loff_t pos;
- 	int ret;
  
 -	pos = ((loff_t) bio->bi_sector << 9) + lo->lo_offset;
-+	pos = ((loff_t) bio->bi_sector << 9);
++static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
++{
++	int ret;
  
  	if (bio_rw(bio) == WRITE) {
 -		struct file *file = lo->lo_backing_file;
@@ -307,7 +306,7 @@ index 4720c7a..6eb8a8a 100644
  		}
  
 -		ret = lo_send(lo, bio, pos);
-+		ret = lo->lo_parser->write(lo, &lo->lo_file, bio, pos);
++		ret = lo->lo_parser->write(lo, &lo->lo_file, bio);
  
  		if ((bio->bi_rw & REQ_FUA) && !ret) {
 -			ret = vfs_fsync(file, 0);
@@ -322,11 +321,11 @@ index 4720c7a..6eb8a8a 100644
  		}
  	} else
 -		ret = lo_receive(lo, bio, lo->lo_blocksize, pos);
-+		ret = lo->lo_parser->read(lo, &lo->lo_file, bio, pos);
++		ret = lo->lo_parser->read(lo, &lo->lo_file, bio);
  
  out:
  	return ret;
-@@ -634,7 +652,7 @@ static int loop_flush(struct loop_device *lo)
+@@ -634,7 +649,7 @@ static int loop_flush(struct loop_device *lo)
  static void do_loop_switch(struct loop_device *lo, struct switch_request *p)
  {
  	struct file *file = p->file;
@@ -335,7 +334,7 @@ index 4720c7a..6eb8a8a 100644
  	struct address_space *mapping;
  
  	/* if no new file, only flush of queued bios requested */
-@@ -642,16 +660,62 @@ static void do_loop_switch(struct loop_device *lo, struct switch_request *p)
+@@ -642,16 +657,62 @@ static void do_loop_switch(struct loop_device *lo, struct switch_request *p)
  		goto out;
  
  	mapping = file->f_mapping;
@@ -403,7 +402,7 @@ index 4720c7a..6eb8a8a 100644
  
  /*
   * loop_change_fd switched the backing store of a loopback device to
-@@ -683,15 +747,19 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
+@@ -683,15 +744,19 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
  		goto out;
  
  	inode = file->f_mapping->host;
@@ -426,7 +425,7 @@ index 4720c7a..6eb8a8a 100644
  		goto out_putf;
  
  	/* and ... switch */
-@@ -744,8 +812,8 @@ static ssize_t loop_attr_backing_file_show(struct loop_device *lo, char *buf)
+@@ -744,8 +809,8 @@ static ssize_t loop_attr_backing_file_show(struct loop_device *lo, char *buf)
  	char *p = NULL;
  
  	spin_lock_irq(&lo->lo_lock);
@@ -437,7 +436,7 @@ index 4720c7a..6eb8a8a 100644
  	spin_unlock_irq(&lo->lo_lock);
  
  	if (IS_ERR_OR_NULL(p))
-@@ -813,8 +881,9 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+@@ -813,8 +878,9 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
  	struct file	*file, *f;
  	struct inode	*inode;
  	struct address_space *mapping;
@@ -448,7 +447,7 @@ index 4720c7a..6eb8a8a 100644
  	int		error;
  	loff_t		size;
  
-@@ -843,7 +912,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+@@ -843,7 +909,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
  			error = -EINVAL;
  			goto out_putf;
  		}
@@ -457,7 +456,7 @@ index 4720c7a..6eb8a8a 100644
  	}
  
  	mapping = file->f_mapping;
-@@ -857,11 +926,11 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+@@ -857,11 +923,11 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
  		const struct address_space_operations *aops = mapping->a_ops;
  
  		if (aops->write_begin)
@@ -472,7 +471,7 @@ index 4720c7a..6eb8a8a 100644
  			inode->i_bdev->bd_block_size : PAGE_SIZE;
  
  		error = 0;
-@@ -869,28 +938,33 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+@@ -869,28 +935,33 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
  		goto out_putf;
  	}
  
@@ -518,7 +517,7 @@ index 4720c7a..6eb8a8a 100644
  	bio_list_init(&lo->lo_bio_list);
  
  	/*
-@@ -909,7 +983,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+@@ -909,7 +980,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
  	/* let user-space know about the new size */
  	kobject_uevent(&disk_to_dev(bdev->bd_disk)->kobj, KOBJ_CHANGE);
  
@@ -527,7 +526,7 @@ index 4720c7a..6eb8a8a 100644
  
  	lo->lo_thread = kthread_create(loop_thread, lo, "loop%d",
  						lo->lo_number);
-@@ -927,17 +1001,21 @@ out_clr:
+@@ -927,17 +998,21 @@ out_clr:
  	loop_sysfs_exit(lo);
  	lo->lo_thread = NULL;
  	lo->lo_device = NULL;
@@ -554,7 +553,7 @@ index 4720c7a..6eb8a8a 100644
  	/* This is safe: open() is still holding a reference. */
  	module_put(THIS_MODULE);
  	return error;
-@@ -982,8 +1060,8 @@ loop_init_xfer(struct loop_device *lo, struct loop_func_table *xfer,
+@@ -982,8 +1057,8 @@ loop_init_xfer(struct loop_device *lo, struct loop_func_table *xfer,
  
  static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
  {
@@ -565,7 +564,7 @@ index 4720c7a..6eb8a8a 100644
  
  	if (lo->lo_state != Lo_bound)
  		return -ENXIO;
-@@ -1000,8 +1078,10 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+@@ -1000,8 +1075,10 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
  
  	kthread_stop(lo->lo_thread);
  
@@ -577,7 +576,7 @@ index 4720c7a..6eb8a8a 100644
  	spin_unlock_irq(&lo->lo_lock);
  
  	loop_release_xfer(lo);
-@@ -1115,7 +1195,7 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
+@@ -1115,7 +1192,7 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
  static int
  loop_get_status(struct loop_device *lo, struct loop_info64 *info)
  {
@@ -586,7 +585,7 @@ index 4720c7a..6eb8a8a 100644
  	struct kstat stat;
  	int error;
  
-@@ -1551,6 +1631,34 @@ MODULE_PARM_DESC(max_part, "Maximum number of partitions per loop device");
+@@ -1551,6 +1628,34 @@ MODULE_PARM_DESC(max_part, "Maximum number of partitions per loop device");
  MODULE_LICENSE("GPL");
  MODULE_ALIAS_BLOCKDEV_MAJOR(LOOP_MAJOR);
  
@@ -621,7 +620,7 @@ index 4720c7a..6eb8a8a 100644
  int loop_register_transfer(struct loop_func_table *funcs)
  {
  	unsigned int n = funcs->number;
-@@ -1788,6 +1896,60 @@ static struct miscdevice loop_misc = {
+@@ -1788,6 +1893,64 @@ static struct miscdevice loop_misc = {
  MODULE_ALIAS_MISCDEV(LOOP_CTRL_MINOR);
  MODULE_ALIAS("devname:loop-control");
  
@@ -656,15 +655,19 @@ index 4720c7a..6eb8a8a 100644
 +}
 +
 +static int raw_read(struct loop_device *lo, struct lo_file *lo_file,
-+		    struct bio *bio, loff_t pos)
++		    struct bio *bio)
 +{
-+	return loop_recv(lo, lo_file, bio, pos + lo->lo_offset, lo->transfer);
++	return loop_recv(lo, lo_file, bio,
++			 ((loff_t) bio->bi_sector << 9) +
++			 lo->lo_offset, lo->transfer);
 +}
 +
 +static int raw_write(struct loop_device *lo, struct lo_file *lo_file,
-+		     struct bio *bio, loff_t pos)
++		     struct bio *bio)
 +{
-+	return loop_send(lo, lo_file, bio, pos + lo->lo_offset, lo->transfer);
++	return loop_send(lo, lo_file, bio,
++			 ((loff_t) bio->bi_sector << 9) +
++			 lo->lo_offset, lo->transfer);
 +}
 +
 +static struct loop_parser raw_parser =
@@ -683,7 +686,7 @@ index 4720c7a..6eb8a8a 100644
  {
  	int i, nr;
 diff --git a/include/linux/loop.h b/include/linux/loop.h
-index 683d698..ff8f201 100644
+index 683d698..258f614 100644
 --- a/include/linux/loop.h
 +++ b/include/linux/loop.h
 @@ -28,12 +28,32 @@ enum {
@@ -792,9 +795,9 @@ index 683d698..ff8f201 100644
 +		    unsigned long reqf);
 +	loff_t (*size)(struct loop_device *lo, struct lo_file *lo_file);
 +	int (*write)(struct loop_device *lo, struct lo_file *lo_file,
-+		     struct bio *bio, loff_t pos);
++		     struct bio *bio);
 +	int (*read)(struct loop_device *lo, struct lo_file *lo_file,
-+		    struct bio *bio, loff_t pos);
++		    struct bio *bio);
 +	struct module *owner;
 +};
 +
