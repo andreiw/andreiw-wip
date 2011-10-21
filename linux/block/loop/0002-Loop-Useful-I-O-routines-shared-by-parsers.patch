@@ -1,7 +1,7 @@
-From 2d4eec5948d70d8252d13be5293d03ead4854b69 Mon Sep 17 00:00:00 2001
+From 21f2ad6023e3594e903b300354042629d27ec8d0 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
-Subject: [PATCH 2/4] Loop: Useful I/O routines shared by parsers.
+Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
 
 This is basic functionality otherwise duplicated, like
 reading/writing a kernel buffer or struct page.
@@ -11,8 +11,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
  drivers/block/Kconfig    |    4 ++
  drivers/block/Makefile   |    1 +
  drivers/block/looputil.c |  128 ++++++++++++++++++++++++++++++++++++++++++++++
- include/linux/loop.h     |   26 +++++++++
- 4 files changed, 159 insertions(+), 0 deletions(-)
+ include/linux/loop.h     |   25 +++++++++
+ 4 files changed, 158 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/looputil.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -177,13 +177,13 @@ index 0000000..7523fa9
 +	return ret;
 +}
 diff --git a/include/linux/loop.h b/include/linux/loop.h
-index 258f614..4b1dc2ab 100644
+index 222534f..a9cf186 100644
 --- a/include/linux/loop.h
 +++ b/include/linux/loop.h
-@@ -190,6 +190,32 @@ int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
+@@ -186,6 +186,31 @@ int loop_send(struct loop_device *lo, struct lo_file *lo_file,
+ int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
  	      struct bio *bio, loff_t pos, loop_xfer transfer);
- int loop_sync(struct loop_device *lo, struct lo_file *lo_file,
- 	      unsigned long reqf);
+ int loop_sync(struct loop_device *lo, struct lo_file *lo_file);
 +
 +#ifdef CONFIG_BLK_DEV_LOOP_UTIL
 +int loop_write_kbuf(struct loop_device *lo,
@@ -209,7 +209,6 @@ index 258f614..4b1dc2ab 100644
 +		    unsigned int len,
 +		    loff_t pos);
 +#endif /* CONFIG_BLK_DEV_LOOP_UTIL */
-+
  #endif
  /*
   * IOCTL commands --- we will commandeer 0x4C ('L')

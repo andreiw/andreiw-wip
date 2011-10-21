@@ -1,7 +1,7 @@
-From cd0be80d84b0f6ff58fb8fdc7cf2e6e7087cd686 Mon Sep 17 00:00:00 2001
+From f03583c29dd7f30aba82f79882ca6bdb984f0c27 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
-Subject: [PATCH 4/4] Loop: QCOW loop parser implementation.
+Subject: [PATCH 4/5] Loop: QCOW loop parser implementation.
 
 Beginnings of QCOW support (v1, read/write).
 
@@ -22,8 +22,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  480 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 489 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  477 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 486 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -59,10 +59,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..20d68a5
+index 0000000..fe93765
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,477 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -344,23 +344,22 @@ index 0000000..20d68a5
 +	qcow_free(qcow);
 +}
 +
-+static loff_t qcow_size(struct loop_device *lo, struct lo_file *lo_file)
++static loff_t qcow_size(struct loop_device *lo)
 +{
-+	struct qcow *qcow = lo_file->parser_priv;
++	struct qcow *qcow = lo->lo_file.parser_priv;
 +	return qcow->header.size >> SEC_SHIFT;
 +}
 +
-+static int qcow_sync(struct loop_device *lo, struct lo_file *lo_file,
-+		    unsigned long reqf)
++static int qcow_sync(struct loop_device *lo)
 +{
 +	int ret;
-+	struct qcow *qcow = lo_file->parser_priv;
++	struct qcow *qcow = lo->lo_file.parser_priv;
 +
 +	ret = qcow_meta_flush(qcow);
 +	if (ret)
 +		return ret;
 +
-+	return loop_sync(lo, lo_file, reqf);
++	return loop_sync(lo, &lo->lo_file);
 +}
 +
 +static int qcow_pos_to_fpos(struct qcow *qcow, loff_t pos,
@@ -475,14 +474,13 @@ index 0000000..20d68a5
 +	return ret;
 +}
 +
-+int qcow_read(struct loop_device *lo, struct lo_file *lo_file,
-+	     struct bio *bio)
++int qcow_read(struct loop_device *lo, struct bio *bio)
 +{
 +	int i;
 +	struct bio_vec *bvec;
 +	int ret = 0;
 +        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
-+	struct qcow *qcow = lo_file->parser_priv;
++	struct qcow *qcow = lo->lo_file.parser_priv;
 +
 +	bio_for_each_segment(bvec, bio, i) {
 +		ret = qcow_do_bvec(qcow, bvec, pos, READ);
@@ -494,14 +492,13 @@ index 0000000..20d68a5
 +	return ret;
 +}
 +
-+int qcow_write(struct loop_device *lo, struct lo_file *lo_file,
-+	      struct bio *bio)
++int qcow_write(struct loop_device *lo, struct bio *bio)
 +{
 +	int i;
 +	struct bio_vec *bvec;
 +	int ret = 0;
 +        loff_t pos = ((loff_t) bio->bi_sector << SEC_SHIFT);
-+	struct qcow *qcow = lo_file->parser_priv;
++	struct qcow *qcow = lo->lo_file.parser_priv;
 +
 +	bio_for_each_segment(bvec, bio, i) {
 +		ret = qcow_do_bvec(qcow, bvec, pos, WRITE);
