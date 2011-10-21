@@ -37,8 +37,8 @@ CONFIG_BLK_DEV_VHDLOOP=y
 CONFIG_BLK_DEV_QCOWLOOP=y
 CONFIG_BLK_DEV_VMDKLOOP=y
 
-Mounting is easy, since the losetup interface isn't (and won't)
-change.
+Mounting is easy, since the losetup interface isn't (and won't be)
+changing.
 
 $ losetup /dev/loop0 /path/to/image
 
