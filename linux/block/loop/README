@@ -1,4 +1,4 @@
-Loop Device Parser support.
+Loop device parser support.
 ===========================
 
 These are my work-in-progress patches for developing
@@ -48,11 +48,11 @@ image type and loop size.
 Your either want to set loop.max_parts to something non-zero (10 sounds good to me),
 or use kpartx to actually see partitions on devices.
 
-To generate images you can use my vhdtool (https://github.com/andreiw/vhdtool), which
+To generate VHDs you can use my vhdtool (https://github.com/andreiw/vhdtool), which
 allows you to fine-tune metadata details for dynamic disks (and unlike qemu-img, doesn't
 create b0rked images).
 
-For other images types `man 1 qemu-img` (obviously requires qemu installed).
+For other image types `man 1 qemu-img` (obviously requires qemu installed).
 
 To-do.
 ======
