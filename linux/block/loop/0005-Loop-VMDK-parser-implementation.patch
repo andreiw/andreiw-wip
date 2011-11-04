@@ -1,4 +1,4 @@
-From 8f19b2f8e6ee3e7b78667503f86a64122c2ab879 Mon Sep 17 00:00:00 2001
+From 11089d992a4142a07a38dea3ce2a5aad0dad4c9b Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Thu, 20 Oct 2011 23:57:05 -0400
 Subject: [PATCH 5/5] Loop: VMDK parser implementation.
@@ -11,8 +11,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 ++
  drivers/block/Makefile   |    1 +
- drivers/block/vmdkloop.c |  222 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 231 insertions(+), 0 deletions(-)
+ drivers/block/vmdkloop.c |  223 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 232 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vmdkloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -48,10 +48,10 @@ index 619635c..d1314ee 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vmdkloop.c b/drivers/block/vmdkloop.c
 new file mode 100644
-index 0000000..9e914ed
+index 0000000..5441bfa
 --- /dev/null
 +++ b/drivers/block/vmdkloop.c
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,223 @@
 +/*
 +   Linux loop VMDK support.
 +
@@ -76,6 +76,7 @@ index 0000000..9e914ed
 +#include <linux/slab.h>
 +#include <linux/init.h>
 +#include <linux/loop.h>
++#include <linux/looputil.h>
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("loop VMDK parser");

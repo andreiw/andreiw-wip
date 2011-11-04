@@ -1,4 +1,4 @@
-From 554aaac9a38dd95f995d3f0e9b64028c610581e2 Mon Sep 17 00:00:00 2001
+From 1237d3888b3c805a6fd952e802fb167a0b257962 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
 Subject: [PATCH 4/5] Loop: QCOW loop parser implementation.
@@ -18,12 +18,19 @@ empty disks take up 448 and 2.5k respectively.
 Formatted with mkfs.ext2, they take up 3.3m
 and 24.3m respectively. Astounding.
 
+QCOW parser now uses the parser metadata cache
+manager.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+
+qcow cha
+
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  414 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 423 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  361 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 370 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -59,10 +66,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..1d64a50
+index 0000000..b8a777d
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,361 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -84,9 +91,9 @@ index 0000000..1d64a50
 + */
 +
 +#include <linux/module.h>
-+#include <linux/slab.h>
 +#include <linux/init.h>
 +#include <linux/loop.h>
++#include <linux/looputil.h>
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("loop QCOW parser");
@@ -99,7 +106,6 @@ index 0000000..1d64a50
 +#define B2M(bits)		((1 << (bits)) - 1)
 +#define SEC_SHIFT		(9)
 +#define SEC_SZ			(1 << SEC_SHIFT)
-+#define L2_CACHE_PREFIX		("qcowl2")
 +
 +struct qcow_header {
 +	u32 magic;
@@ -118,17 +124,6 @@ index 0000000..1d64a50
 +	u64 l1_table_offset;
 +};
 +
-+#define QCOW_L2_DIRTY (0x1)
-+
-+struct qcow_l2
-+{
-+	unsigned flags;
-+	u64 offsets[0];
-+};
-+
-+/* L1 table needs to be flushed. */
-+#define QCOW_L1_DIRTY (0x1)
-+
 +struct qcow
 +{
 +	struct loop_device *lo;
@@ -142,20 +137,48 @@ index 0000000..1d64a50
 +	u64 l2_entries;
 +	loff_t cluster_size;
 +	unsigned int access_size;
-+	struct kmem_cache *l2_cache;
-+	char *l2_cache_name;
++	struct loop_pmc *l2;
 +
-+	/* L2s should be in an LRU list.
-+	 * and should respond to memory pressure.
-+	 */
-+	struct qcow_l2 **l2s;
++/* L1 table needs to be flushed. */
++#define QCOW_L1_DIRTY (0x1)
 +	unsigned flags;
 +};
++
++static int qcow_l2_load(struct loop_pmc *pmc,
++			struct loop_pmce *pmce)
++{
++	loff_t l2pos;
++	struct qcow *qcow = pmc->context;
++	l2pos = be64_to_cpu(qcow->l1[pmce->index]);
++
++	if (!l2pos) {
++		l2pos = qcow->file_size;
++		qcow->file_size += L2_SIZE(qcow->l2_entries);
++		qcow->l1[pmce->index] = cpu_to_be64(l2pos);
++		qcow->flags |= QCOW_L1_DIRTY;
++		return 0;
++	}
++
++	if (l2pos > qcow->file_size ||
++	    l2pos + L2_SIZE(qcow->l2_entries) > qcow->file_size)
++		return -EINVAL;
++
++	return loop_read_kbuf(qcow->lo, qcow->lo_file, &pmce->data,
++			      L2_SIZE(qcow->l2_entries), l2pos);
++}
++
++static int qcow_l2_flush(struct loop_pmc *pmc,
++			 struct loop_pmce *pmce)
++{
++	struct qcow *qcow = pmc->context;
++	return loop_write_kbuf(qcow->lo, qcow->lo_file, &pmce->data,
++			       L2_SIZE(qcow->l2_entries),
++			       be64_to_cpu(qcow->l1[pmce->index]));
++}
 +
 +static int qcow_verify(struct qcow *qcow)
 +{
 +	int ret;
-+	unsigned len;
 +
 +	qcow->header.version = be32_to_cpu(qcow->header.version);
 +	if (qcow->header.version != 1) {
@@ -202,99 +225,56 @@ index 0000000..1d64a50
 +	if (ret)
 +		return ret;
 +
-+	len = sizeof(L2_CACHE_PREFIX) + strlen(QCOW_DNAME(qcow));
-+	qcow->l2_cache_name = kzalloc(len, GFP_KERNEL);
-+	if (!qcow->l2_cache_name)
-+		return -ENOMEM;
-+	strlcat(qcow->l2_cache_name, QCOW_DNAME(qcow), len);
-+	strlcat(qcow->l2_cache_name, L2_CACHE_PREFIX, len);
-+
-+	qcow->l2_cache = kmem_cache_create(qcow->l2_cache_name,
-+					   sizeof(struct qcow_l2) +
-+					   L2_SIZE(qcow->l2_entries),
-+					   1, 0, NULL);
-+	if (!qcow->l2_cache)
-+		return -ENOMEM;
-+
-+	qcow->l2s = kzalloc(qcow->l1_entries * sizeof(struct qcow_l2 *),
-+			    GFP_KERNEL);
-+	if (!qcow->l2s)
-+		return -ENOMEM;
-+
-+	return 0;
++	qcow->l2 = loop_pmc_init(qcow,
++				 L2_SIZE(qcow->l2_entries),
++				 QCOW_DNAME(qcow),
++				 qcow->l1_entries,
++				 qcow_l2_load, qcow_l2_flush);
++	if (IS_ERR(qcow->l2)){
++		qcow->l2 = NULL;
++		ret = PTR_ERR(qcow->l2);
++	}
++	return ret;
 +}
 +
 +static int qcow_meta_flush(struct qcow *qcow)
 +{
 +	int ret;
-+	u64 l1_index;
-+	struct qcow_l2 *l2;
 +
-+	if (qcow->l2s) {
-+		for (l1_index = 0; l1_index < qcow->l1_entries; l1_index++) {
-+			l2 = qcow->l2s[l1_index];
-+			if (l2 && (l2->flags & QCOW_L2_DIRTY)) {
-+				ret = loop_write_kbuf(qcow->lo, qcow->lo_file, &l2->offsets,
-+						      L2_SIZE(qcow->l2_entries),
-+						      be64_to_cpu(qcow->l1[l1_index]));
-+				if (ret) {
-+					printk(KERN_ERR "%s: failed to flush meta for L2 %lld\n",
-+					       QCOW_DNAME(qcow), l1_index);
-+					return ret;
-+				} else
-+					l2->flags ^= QCOW_L2_DIRTY;
-+			}
-+		}
++	if (qcow->l2) {
++		ret = loop_pmc_flush(qcow->l2);
++		if (ret)
++			goto out;
 +	}
 +
 +	if (qcow->flags & QCOW_L1_DIRTY) {
 +		ret = loop_write_kbuf(qcow->lo, qcow->lo_file, qcow->l1,
 +				      L1_SIZE(qcow->l1_entries),
 +				      qcow->header.l1_table_offset);
-+		if (ret) {
-+			printk(KERN_ERR "%s: failed to flush meta\n",
-+			       QCOW_DNAME(qcow));
-+			return ret;
-+		} else
++		if (ret)
++			goto out;
++		else
 +			qcow->flags ^= QCOW_L1_DIRTY;
 +	}
++out:
++	if (ret)
++		printk(KERN_ERR "%s: failed to flush meta\n",
++		       QCOW_DNAME(qcow));
 +	return 0;
 +}
 +
 +static void qcow_free(struct qcow *qcow)
 +{
-+	u64 l1_index;
 +
 +	if (qcow_meta_flush(qcow))
 +		printk(KERN_ERR "%s: failed to flush metadata, expect corruption\n",
 +		       QCOW_DNAME(qcow));
 +
-+	if (qcow->l2s) {
-+		for (l1_index = 0; l1_index < qcow->l1_entries; l1_index++) {
-+			if (qcow->l2s[l1_index]) {
-+				kmem_cache_free(qcow->l2_cache, qcow->l2s[l1_index]);
-+				qcow->l2s[l1_index] = NULL;
-+			}
-+		}
++	if (qcow->l2)
++		loop_pmc_free(qcow->l2);
 +
-+		kfree(qcow->l2s);
-+		qcow->l2s = NULL;
-+	}
-+
-+	if (qcow->l2_cache) {
-+		kmem_cache_destroy(qcow->l2_cache);
-+		qcow->l2_cache = NULL;
-+	}
-+
-+	if (qcow->l2_cache_name) {
-+		kfree(qcow->l2_cache_name);
-+		qcow->l2_cache_name = NULL;
-+	}
-+
-+	if (qcow->l1) {
++	if (qcow->l1)
 +		kfree(qcow->l1);
-+		qcow->l1 = NULL;
-+	}
 +
 +	kfree(qcow);
 +}
@@ -370,9 +350,9 @@ index 0000000..1d64a50
 +			  unsigned int *len,
 +			  loff_t *fpos)
 +{
-+	int ret;
 +	loff_t ffpos;
 +	u64 l2_index;
++	struct loop_pmce *pmce;
 +	struct qcow *qcow = (*lo_file)->parser_priv;
 +	u64 l1_index = pos >> (qcow->header.l2_bits +
 +			       qcow->header.cluster_bits);
@@ -382,57 +362,31 @@ index 0000000..1d64a50
 +	if (l1_index >= qcow->l1_entries)
 +		return -EINVAL;
 +
-+	ffpos = be64_to_cpu(qcow->l1[l1_index]);
-+	if (!ffpos) {
-+		if (bio_rw(bio) != WRITE)
-+			return -ENOENT;
++	if (bio_rw(bio) != WRITE &&
++	    !be64_to_cpu(qcow->l1[l1_index]))
++		return -ENOENT;
 +
-+		qcow->l2s[l1_index] = kmem_cache_zalloc(qcow->l2_cache,
-+							GFP_KERNEL);
-+		if (!qcow->l2s[l1_index])
-+			return -ENOMEM;
-+		qcow->l2s[l1_index]->flags |= QCOW_L2_DIRTY;
-+
-+		ffpos = qcow->file_size;
-+		qcow->file_size += L2_SIZE(qcow->l2_entries);
-+		qcow->l1[l1_index] = cpu_to_be64(ffpos);
-+		qcow->flags |= QCOW_L1_DIRTY;
-+        }
-+
-+	if (!qcow->l2s[l1_index]) {
-+		if (ffpos > qcow->file_size ||
-+		    (ffpos + L2_SIZE(qcow->l2_entries)) > qcow->file_size)
-+			return -EINVAL;
-+
-+		qcow->l2s[l1_index] = kmem_cache_zalloc(qcow->l2_cache,
-+							GFP_KERNEL);
-+		if (!qcow->l2s[l1_index])
-+			return -ENOMEM;
-+
-+		ret = loop_read_kbuf(qcow->lo, qcow->lo_file, &qcow->l2s[l1_index]->offsets,
-+				     L2_SIZE(qcow->l2_entries), ffpos);
-+
-+		if (ret) {
-+			kmem_cache_free(qcow->l2_cache,
-+					qcow->l2s[l1_index]);
-+			qcow->l2s[l1_index] = NULL;
-+			return ret;
-+		}
-+	}
++	pmce = loop_pmc_get(qcow->l2, l1_index, bio_rw(bio) == WRITE);
++	if (IS_ERR(pmce))
++		return PTR_ERR(pmce);
 +
 +	l2_index = pos >> qcow->header.cluster_bits &
 +		B2M(qcow->header.l2_bits);
 +
-+	ffpos = be64_to_cpu(qcow->l2s[l1_index]->offsets[l2_index]);
++	ffpos = be64_to_cpu(((u64 *)(&pmce->data))[l2_index]);
 +	if (!ffpos) {
-+		if (bio_rw(bio) != WRITE)
++		if (bio_rw(bio) != WRITE) {
++			loop_pmc_put(qcow->l2, pmce, false);
 +			return -ENOENT;
++		}
 +
 +		ffpos = qcow->file_size;
 +		qcow->file_size += qcow->cluster_size;
-+		qcow->l2s[l1_index]->offsets[l2_index] =
++		((u64 *)(&pmce->data))[l2_index] =
 +			cpu_to_be64(ffpos);
-+	}
++		loop_pmc_put(qcow->l2, pmce, true);
++	} else
++		loop_pmc_put(qcow->l2, pmce, false);
 +
 +	ffpos += pos & B2M(qcow->header.cluster_bits);
 +	if (ffpos > qcow->file_size ||

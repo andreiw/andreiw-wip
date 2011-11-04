@@ -1,21 +1,24 @@
-From a5c4ff377fa84291b4ad22e9f53d44b7d5b0ada5 Mon Sep 17 00:00:00 2001
+From 908234bda282c75e302fdb1e4d83b45c6bfefc47 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
 Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
 
 This is basic functionality otherwise duplicated, like
-reading/writing a kernel buffer or struct page. Also
-provides a generic sparse I/O routine currently
-shared by VHD and QCOW parsers.
+reading/writing a kernel buffer or struct page. Provides
+a generic sparse I/O routine that can be used by most
+parsers (QCOW, VHD, VMDK...). Also provides a metadata
+cache manager to simplify dealing with QCOW L2 tables,
+VHD bitmaps and VMDK PTs.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    4 +
  drivers/block/Makefile   |    1 +
- drivers/block/looputil.c |  194 ++++++++++++++++++++++++++++++++++++++++++++++
- include/linux/loop.h     |   33 ++++++++
- 4 files changed, 232 insertions(+), 0 deletions(-)
+ drivers/block/looputil.c |  442 ++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/looputil.h |  106 +++++++++++
+ 4 files changed, 553 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/looputil.c
+ create mode 100644 include/linux/looputil.h
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
 index 6f07ec1..326fd90 100644
@@ -46,10 +49,10 @@ index 76646e9..eb3df97 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/looputil.c b/drivers/block/looputil.c
 new file mode 100644
-index 0000000..ab67a5e
+index 0000000..ede87f9
 --- /dev/null
 +++ b/drivers/block/looputil.c
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,442 @@
 +/*
 +   Useful routines shared by loop parsers.
 +
@@ -71,6 +74,13 @@ index 0000000..ab67a5e
 + */
 +
 +#include <linux/loop.h>
++#include <linux/rwsem.h>
++#include <linux/shrinker.h>
++#include <linux/looputil.h>
++
++#define PMC_CACHE_PREFIX ("lpmc")
++#define LOOP_PMCE_WRITE (1 << 0)
++#define LOOP_PMCE_DIRTY (1 << 1)
 +
 +static int loop_kbuf_to_bio(struct bio *bio,
 +			    u8 *kbuf,
@@ -183,7 +193,7 @@ index 0000000..ab67a5e
 +			    struct bio *bio,
 +			    struct bio_vec *bvec,
 +			    loff_t pos,
-+			    loop_sparse_to sparse_to)
++			    loop_sparse_to_t sparse_to)
 +{
 +	u8 *raw_buf;
 +	unsigned int len;
@@ -230,7 +240,7 @@ index 0000000..ab67a5e
 +
 +int loop_sparse_io(struct loop_device *lo,
 +		   struct bio *bio,
-+		   loop_sparse_to sparse_to)
++		   loop_sparse_to_t sparse_to)
 +{
 +	struct bio_vec *bvec;
 +	int i = 0;
@@ -244,16 +254,282 @@ index 0000000..ab67a5e
 +
 +	return ret;
 +}
-diff --git a/include/linux/loop.h b/include/linux/loop.h
-index 02db81e..a07fb2b 100644
---- a/include/linux/loop.h
-+++ b/include/linux/loop.h
-@@ -185,6 +185,39 @@ int loop_send(struct loop_device *lo, struct lo_file *lo_file,
- int loop_recv(struct loop_device *lo, struct lo_file *lo_file,
- 	      struct bio *bio, loff_t pos, loop_xfer transfer);
- int loop_sync(struct loop_device *lo, struct lo_file *lo_file);
 +
-+#ifdef CONFIG_BLK_DEV_LOOP_UTIL
++struct loop_pmce *loop_pmc_get(struct loop_pmc *pmc,
++			       unsigned index,
++			       bool write)
++{
++	int ret;
++	struct loop_pmce *pmce;
++
++	mutex_lock(&pmc->mutex);
++	if (!pmc->cache) {
++		pmc->cache = kzalloc(sizeof(struct loop_pmce *) *
++				     pmc->max_entries,
++				     GFP_KERNEL);
++		if (!pmc->cache) {
++			ret = -ENOMEM;
++			goto out;
++		}
++	}
++
++	pmce = pmc->cache[index];
++	if (!pmce) {
++		pmce = kmem_cache_zalloc(pmc->kmc, GFP_KERNEL);
++		if (!pmce) {
++			ret = -ENOMEM;
++			goto out;
++		}
++
++		INIT_LIST_HEAD(&pmce->list);
++		init_rwsem(&pmce->sem);
++		pmce->index = index;
++		ret = pmc->load(pmc, pmce);
++		if (ret) {
++			kmem_cache_free(pmc->kmc, pmce);
++			goto out;
++		}
++		list_add_tail(&pmce->list, &pmc->lru);
++		pmc->cache[index] = pmce;
++		pmc->cache_count++;
++	} else
++		list_move_tail(&pmce->list, &pmc->lru);
++
++	if (write) {
++		down_write(&pmce->sem);
++		pmce->flags |= LOOP_PMCE_WRITE;
++	} else
++		down_read(&pmce->sem);
++
++out:
++	mutex_unlock(&pmc->mutex);
++	if (ret)
++		return ERR_PTR(ret);
++	return pmce;
++}
++
++void loop_pmc_put(struct loop_pmc *pmc,
++		  struct loop_pmce *pmce,
++		  bool dirty)
++{
++	if (pmce->flags & LOOP_PMCE_WRITE) {
++		if (dirty)
++			pmce->flags |= LOOP_PMCE_DIRTY;
++		pmce->flags ^= LOOP_PMCE_WRITE;
++		up_write(&pmce->sem);
++	} else
++		up_read(&pmce->sem);
++}
++
++int loop_pmc_flush(struct loop_pmc *pmc)
++{
++	struct loop_pmce *pmce;
++	int ret = 0;
++
++	mutex_lock(&pmc->mutex);
++	list_for_each_entry(pmce, &pmc->lru, list) {
++		down_read(&pmce->sem);
++		if (!(pmce->flags & LOOP_PMCE_DIRTY)) {
++			up_read(&pmce->sem);
++			continue;
++		}
++
++		ret = pmc->flush(pmc, pmce);
++		if (ret) {
++			up_read(&pmce->sem);
++			break;
++		}
++		pmce->flags ^= LOOP_PMCE_DIRTY;
++		up_read(&pmce->sem);
++	}
++	mutex_unlock(&pmc->mutex);
++
++	return ret;
++}
++
++void loop_pmc_free(struct loop_pmc *pmc)
++{
++	struct loop_pmce *pmce, *n;
++
++	/*
++	 * This lock is really here to protect
++	 * against concurrent shrinking - no
++	 * pmce locking is done - as pmc is freed
++	 * when parser is shut down, thus - no I/O
++	 * is happening on last loop device using
++	 * the parser. This also implies any data
++	 * needing flushing is already flushed.
++	 */
++	mutex_lock(&pmc->mutex);
++	unregister_shrinker(&pmc->shrinker);
++
++	if (pmc->cache) {
++		list_for_each_entry_safe(pmce, n, &pmc->lru, list) {
++			list_del(&pmce->list);
++			pmc->cache[pmce->index] = NULL;
++			kmem_cache_free(pmc->kmc, pmce);
++			pmc->cache_count--;
++		}
++		kfree(pmc->cache);
++	}
++
++	if (pmc->kmc)
++		kmem_cache_destroy(pmc->kmc);
++	if (pmc->kmc_name)
++		kfree(pmc->kmc_name);
++	kfree(pmc);
++}
++
++static int
++loop_pmc_shrink(struct shrinker *shrinker, struct shrink_control *sc)
++{
++	unsigned todo;
++	struct loop_pmce *pmce, *n;
++	enum {
++		PASS_CLEAN,
++		PASS_DIRTY,
++		PASS_WAIT
++	} pass = PASS_CLEAN;
++
++	struct loop_pmc *pmc =
++		container_of(shrinker,
++			     struct loop_pmc,
++			     shrinker);
++
++	if (!mutex_trylock(&pmc->mutex))
++		return -1;
++
++	todo = sc->nr_to_scan;
++	while(todo && pmc->cache_count) {
++		BUG_ON(pass > PASS_WAIT);
++		list_for_each_entry_safe(pmce, n, &pmc->lru, list) {
++			if (pass == PASS_WAIT)
++				down_write(&pmce->sem);
++			else
++				if (!down_write_trylock(&pmce->sem))
++					continue;
++
++			if (pass != PASS_CLEAN &&
++			    pmce->flags & LOOP_PMCE_DIRTY) {
++				if (!pmc->flush(pmc, pmce))
++					pmce->flags ^= LOOP_PMCE_DIRTY;
++			}
++
++			if (pmce->flags & LOOP_PMCE_DIRTY) {
++				up_write(&pmce->sem);
++				continue;
++			}
++
++			list_del(&pmce->list);
++			pmc->cache[pmce->index] = NULL;
++			kmem_cache_free(pmc->kmc, pmce);
++                        pmc->cache_count--;
++                        todo--;
++			if (!todo || !pmc->cache_count)
++				break;
++		}
++		pass++;
++	}
++
++	if (sc->nr_to_scan && !pmc->cache_count) {
++		kfree(pmc->cache);
++		pmc->cache = NULL;
++	}
++	mutex_unlock(&pmc->mutex);
++	return pmc->cache_count + (pmc->cache != NULL);
++}
++
++struct loop_pmc *loop_pmc_init(void *context,
++			       size_t size,
++			       char *cname,
++			       unsigned entries,
++			       loop_pmc_load_t load,
++			       loop_pmc_flush_t flush)
++{
++	unsigned len;
++	struct loop_pmc *pmc;
++	int ret = 0;
++
++	pmc = kzalloc(sizeof(*pmc), GFP_KERNEL);
++	if (!pmc)
++		return ERR_PTR(-ENOMEM);
++
++	pmc->context = context;
++	INIT_LIST_HEAD(&pmc->lru);
++	len = sizeof(PMC_CACHE_PREFIX) + strlen(cname);
++	pmc->kmc_name = kzalloc(len, GFP_KERNEL);
++	if (!pmc->kmc_name) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	strlcat(pmc->kmc_name, cname, len);
++	strlcat(pmc->kmc_name, PMC_CACHE_PREFIX, len);
++
++	pmc->kmc = kmem_cache_create(pmc->kmc_name,
++				     sizeof(struct loop_pmce) +
++				     size, __alignof__(struct loop_pmce),
++				     0, NULL);
++	if (!pmc->kmc) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	pmc->max_entries = entries;
++	pmc->flush = flush;
++	pmc->load = load;
++        pmc->shrinker.batch = 1;
++	pmc->shrinker.seeks = DEFAULT_SEEKS;
++	pmc->shrinker.shrink = loop_pmc_shrink;
++	mutex_init(&pmc->mutex);
++	register_shrinker(&pmc->shrinker);
++	printk(KERN_INFO "%s: init metacache %ux%u\n", cname, size, entries);
++
++out:
++	if (ret) {
++		if (pmc->kmc)
++			kmem_cache_destroy(pmc->kmc);
++		if (pmc->kmc_name)
++			kfree(pmc->kmc_name);
++		kfree(pmc);
++		return ERR_PTR(ret);
++	}
++	return pmc;
++}
+diff --git a/include/linux/looputil.h b/include/linux/looputil.h
+new file mode 100644
+index 0000000..48e3bc5
+--- /dev/null
++++ b/include/linux/looputil.h
+@@ -0,0 +1,106 @@
++/*
++  Useful routines for loop parsers.
++
++  Copyright (C) 2011 Andrei Warkentin <andreiw@vmware.com>
++
++  This module is free software; you can redistribute it and/or modify
++  it under the terms of the GNU General Public License as published by
++  the Free Software Foundation; either version 2 of the License, or
++  (at your option) any later version.
++
++  This module is distributed in the hope that it will be useful,
++  but WITHOUT ANY WARRANTY; without even the implied warranty of
++  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++  GNU General Public License for more details.
++
++  You should have received a copy of the GNU General Public License
++  along with this module; if not, write to the Free Software
++  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++*/
++
++#ifndef _LINUX_LOOP_UTIL_H
++#define _LINUX_LOOP_UTIL_H
++
++#include <linux/loop.h>
++#include <linux/mutex.h>
++#include <linux/rwsem.h>
++#include <linux/list.h>
++#include <linux/slab.h>
++
 +int loop_write_kbuf(struct loop_device *lo,
 +		    struct lo_file *lo_file,
 +		    void *kbuf,
@@ -276,18 +552,61 @@ index 02db81e..a07fb2b 100644
 +		    unsigned int offset,
 +		    unsigned int len,
 +		    loff_t pos);
-+typedef int (*loop_sparse_to)(struct lo_file **lo_file,
-+			      struct bio *bio,
-+			      loff_t pos,
-+			      unsigned int *len,
-+			      loff_t *fpos);
++typedef int (*loop_sparse_to_t)(struct lo_file **lo_file,
++				struct bio *bio,
++				loff_t pos,
++				unsigned int *len,
++				loff_t *fpos);
 +int loop_sparse_io(struct loop_device *lo,
 +		   struct bio *bio,
-+		   loop_sparse_to sparse_to);
-+#endif /* CONFIG_BLK_DEV_LOOP_UTIL */
- #endif
- /*
-  * IOCTL commands --- we will commandeer 0x4C ('L')
++		   loop_sparse_to_t sparse_to);
++
++struct loop_pmce {
++	struct list_head list;
++	u64 index;
++	unsigned flags;
++	struct rw_semaphore sem;
++	u8 data[0];
++} ____cacheline_aligned_in_smp;
++
++struct loop_pmc;
++struct loop_pmce;
++
++typedef int (*loop_pmc_flush_t)(struct loop_pmc *,
++				struct loop_pmce *);
++typedef int (*loop_pmc_load_t)(struct loop_pmc *,
++			       struct loop_pmce *);
++
++struct loop_pmc {
++	struct list_head lru;
++	struct kmem_cache *kmc;
++	struct loop_pmce **cache;
++	void *context;
++	char *kmc_name;
++	loop_pmc_load_t load;
++	loop_pmc_flush_t flush;
++	struct shrinker shrinker;
++	unsigned cache_count;
++	unsigned max_entries;
++	struct mutex mutex;
++};
++
++struct loop_pmce *loop_pmc_get(struct loop_pmc *pmc,
++			       unsigned index,
++			       bool write);
++void loop_pmc_put(struct loop_pmc *pmc,
++		  struct loop_pmce *pmce,
++		  bool dirty);
++int loop_pmc_flush(struct loop_pmc *pmc);
++void loop_pmc_free(struct loop_pmc *pmc);
++struct loop_pmc *loop_pmc_init(void *context,
++			       size_t size,
++			       char *cname,
++			       unsigned entries,
++			       loop_pmc_load_t load,
++			       loop_pmc_flush_t flush);
++
++#endif /* _LINUX_LOOP_UTIL_H */
 -- 
 1.7.7
 

@@ -1,4 +1,4 @@
-From 6bd533a8419db5b34483e74b78be97cda3ec0ff8 Mon Sep 17 00:00:00 2001
+From d3a902fc793ec79bf20acd0edba4798a7adb72ad Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
 Subject: [PATCH 3/5] Loop: VHD loop parser implementation.
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  717 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 726 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  711 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 720 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..6c54b0f
+index 0000000..d277459
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,717 @@
+@@ -0,0 +1,711 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -74,6 +74,7 @@ index 0000000..6c54b0f
 +#include <linux/slab.h>
 +#include <linux/init.h>
 +#include <linux/loop.h>
++#include <linux/looputil.h>
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("loop VHD parser");
@@ -557,23 +558,16 @@ index 0000000..6c54b0f
 +		}
 +
 +		kfree(vhd->bmps);
-+                vhd->bmps = NULL;
 +	}
 +
-+	if (vhd->bmp_cache) {
++	if (vhd->bmp_cache)
 +		kmem_cache_destroy(vhd->bmp_cache);
-+		vhd->bmp_cache = NULL;
-+	}
 +
-+	if (vhd->bmp_cache_name) {
++	if (vhd->bmp_cache_name)
 +		kfree(vhd->bmp_cache_name);
-+		vhd->bmp_cache_name = NULL;
-+	}
 +
-+	if (vhd->bat) {
++	if (vhd->bat)
 +		kfree(vhd->bat);
-+		vhd->bat = NULL;
-+	}
 +
 +	kfree(vhd);
 +}
