@@ -1,4 +1,4 @@
-From 1b5053291703e291ff1708da3390722cc4480e98 Mon Sep 17 00:00:00 2001
+From 653b224389acc34295b4c15e463a893b0a83c974 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Thu, 20 Oct 2011 23:57:05 -0400
 Subject: [PATCH 5/5] Loop: VMDK parser implementation.
@@ -11,8 +11,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 ++
  drivers/block/Makefile   |    1 +
- drivers/block/vmdkloop.c |  223 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 232 insertions(+), 0 deletions(-)
+ drivers/block/vmdkloop.c |  197 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 206 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vmdkloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -48,10 +48,10 @@ index 619635c..d1314ee 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vmdkloop.c b/drivers/block/vmdkloop.c
 new file mode 100644
-index 0000000..5441bfa
+index 0000000..4d0b909
 --- /dev/null
 +++ b/drivers/block/vmdkloop.c
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,197 @@
 +/*
 +   Linux loop VMDK support.
 +
@@ -85,7 +85,6 @@ index 0000000..5441bfa
 +#define VMDK_DNAME(vmdk)	((vmdk)->lo->lo_disk->disk_name)
 +#define SEC_SHIFT		(9)
 +#define SEC_SZ			(1 << SEC_SHIFT)
-+#define GT_CACHE_PREFIX		("vmdkgt")
 +
 +#define COW_MAGIC			(*(u32 *) "COWD")
 +#define COW_VERSION			(1)
@@ -155,17 +154,6 @@ index 0000000..5441bfa
 +	u8 pad[433];
 +} __attribute__((packed));
 +
-+#define VMDK_GT_DIRTY (0x1)
-+
-+struct vmdk_gt
-+{
-+	unsigned flags;
-+	u32 sectors[0];
-+};
-+
-+/* L1 table needs to be flushed. */
-+#define VMDK_GD_DIRTY (0x1)
-+
 +struct vmdk
 +{
 +	struct loop_device *lo;
@@ -178,28 +166,20 @@ index 0000000..5441bfa
 +	loff_t size;
 +
 +	/* Parsed and created from header. */
-+	u32 *gd;
 +	u64 gd_entries;
 +	u64 gt_entries;
 +	loff_t grain_size;
 +	unsigned int access_size;
-+	struct kmem_cache *gt_cache;
-+	char *gt_cache_name;
 +
-+	/* L2s should be in an LRU list.
-+	 * and should respond to memory pressure.
-+	 */
-+	struct vmdk_gt **gts;
-+	unsigned flags;
 +};
-+
-+static int vmdk_meta_flush(struct vmdk *vmdk)
-+{
-+	return -EIO;
-+}
 +
 +static void vmdk_free(struct vmdk *vmdk)
 +{
++}
++
++static int vmdk_change(struct loop_device *lo, struct lo_file *lo_file)
++{
++	return -EIO;
 +}
 +
 +static int vmdk_init(struct loop_device *lo, struct lo_file *lo_file)
@@ -207,7 +187,7 @@ index 0000000..5441bfa
 +	return -EIO;
 +}
 +
-+static void vmdk_release(struct loop_device *lo, struct lo_file *lo_file)
++static void vmdk_release(struct lo_file *lo_file)
 +{
 +	struct vmdk *vmdk = lo_file->parser_priv;
 +	lo_file->parser_priv = NULL;
@@ -216,20 +196,13 @@ index 0000000..5441bfa
 +
 +static loff_t vmdk_size(struct loop_device *lo)
 +{
-+	struct vmdk *vmdk = lo->lo_file.parser_priv;
++	struct vmdk *vmdk = lo->lo_file->parser_priv;
 +	return vmdk->size >> SEC_SHIFT;
 +}
 +
 +static int vmdk_sync(struct loop_device *lo)
 +{
-+	int ret;
-+	struct vmdk *vmdk = lo->lo_file.parser_priv;
-+
-+	ret = vmdk_meta_flush(vmdk);
-+	if (ret)
-+		return ret;
-+
-+	return loop_sync(lo, &lo->lo_file);
++	return loop_sync(lo, lo->lo_file);
 +}
 +
 +static int vmdk_sparse_to(struct lo_file **lo_file,
@@ -254,6 +227,7 @@ index 0000000..5441bfa
 +	.sync = vmdk_sync,
 +	.size = vmdk_size,
 +	.bio = vmdk_bio,
++	.change = vmdk_change,
 +	.owner = THIS_MODULE
 +};
 +

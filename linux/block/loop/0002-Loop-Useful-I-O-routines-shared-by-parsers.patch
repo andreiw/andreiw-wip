@@ -1,4 +1,4 @@
-From ce271ff63cbfd34f3f75f694a68f9cee5e98aa52 Mon Sep 17 00:00:00 2001
+From 8b44e24662381a0b0ec72675bd1410fdbaa49b1f Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
 Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
@@ -47,7 +47,7 @@ index 76646e9..eb3df97 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/looputil.c b/drivers/block/looputil.c
 new file mode 100644
-index 0000000..2f0a805
+index 0000000..46ea02c
 --- /dev/null
 +++ b/drivers/block/looputil.c
 @@ -0,0 +1,236 @@
@@ -232,7 +232,7 @@ index 0000000..2f0a805
 +	unsigned int len;
 +	int ret = 0;
 +	loff_t fpos = 0;
-+	struct lo_file *lo_file = &lo->lo_file;
++	struct lo_file *lo_file = lo->lo_file;
 +	unsigned int bv_len = bvec->bv_len;
 +
 +	while (bv_len) {

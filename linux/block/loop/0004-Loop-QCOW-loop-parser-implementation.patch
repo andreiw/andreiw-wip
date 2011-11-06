@@ -1,4 +1,4 @@
-From 78a1000dfde3721419e491e691c52ce5c088b269 Mon Sep 17 00:00:00 2001
+From 601dd3cc3398915cfaaefe61448d062a3e9cb938 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
 Subject: [PATCH 4/5] Loop: QCOW loop parser implementation.
@@ -20,10 +20,10 @@ and 24.3m respectively. Astounding.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- drivers/block/Kconfig    |    8 ++
+ drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  290 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 299 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  337 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 346 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -59,10 +59,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..e559a35
+index 0000000..c4390f4
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,337 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -172,14 +172,15 @@ index 0000000..e559a35
 +	return ret;
 +}
 +
-+static int qcow_init(struct loop_device *lo, struct lo_file *lo_file)
++static struct qcow *qcow_parse(struct loop_device *lo,
++			       struct lo_file *lo_file)
 +{
 +	int ret;
 +	struct qcow *qcow;
 +
 +	qcow = kzalloc(sizeof(struct qcow), GFP_KERNEL);
 +	if (!qcow)
-+		return -ENOMEM;
++		return ERR_PTR(-ENOMEM);
 +
 +	qcow->lo = lo;
 +	qcow->lo_file = lo_file;
@@ -202,17 +203,62 @@ index 0000000..e559a35
 +		goto out;
 +	}
 +
++out:
++	if (ret) {
++		kfree(qcow);
++		return ERR_PTR(ret);
++	}
++	return qcow;
++}
++
++static int qcow_change(struct loop_device *lo, struct lo_file *lo_file)
++{
++	struct qcow *qcow = lo->lo_file->parser_priv;
++	struct qcow *new_qcow = qcow_parse(lo, lo_file);
++	if (IS_ERR(new_qcow)) {
++		new_qcow = NULL;
++		printk(KERN_ERR "%s: changed-to image not QCOW\n",
++		       QCOW_DNAME(qcow));
++		goto out;
++	}
++
++	if (qcow->header.size != new_qcow->header.size) {
++		printk(KERN_ERR "%s: changed-to image mismatched disk size\n",
++		       QCOW_DNAME(qcow));
++		goto out;
++	}
++
++	/* For non-COW cases, the loop device has to be read-only */
++	if (!(lo->lo_flags & LO_FLAGS_READ_ONLY)) {
++		printk(KERN_ERR "%s: non-COW change permitted only on RO disks\n",
++		       QCOW_DNAME(qcow));
++		goto out;
++	}
++
++	lo_file->parser_priv = new_qcow;
++	return 0;
++out:
++	printk(KERN_ERR "%s: loop change aborted\n",
++	       QCOW_DNAME(qcow));
++	if (new_qcow)
++		kfree(new_qcow);
++	return -EINVAL;
++}
++
++static int qcow_init(struct loop_device *lo, struct lo_file *lo_file)
++{
++	struct qcow *qcow = qcow_parse(lo, lo_file);
++	if (IS_ERR(qcow))
++		return PTR_ERR(qcow);
++
 +	printk(KERN_INFO "%s: QCOW %lld bytes\n",
 +	       QCOW_DNAME(qcow),
 +	       qcow->header.size);
 +	lo_file->parser_priv = qcow;
-+out:
-+	if (ret)
-+		kfree(qcow);
-+	return ret;
++	return 0;
 +}
 +
-+static void qcow_release(struct loop_device *lo, struct lo_file *lo_file)
++static void qcow_release(struct lo_file *lo_file)
 +{
 +	struct qcow *qcow = lo_file->parser_priv;
 +	lo_file->parser_priv = NULL;
@@ -221,13 +267,13 @@ index 0000000..e559a35
 +
 +static loff_t qcow_size(struct loop_device *lo)
 +{
-+	struct qcow *qcow = lo->lo_file.parser_priv;
++	struct qcow *qcow = lo->lo_file->parser_priv;
 +	return qcow->header.size >> SEC_SHIFT;
 +}
 +
 +static int qcow_sync(struct loop_device *lo)
 +{
-+	return loop_sync(lo, &lo->lo_file);
++	return loop_sync(lo, lo->lo_file);
 +}
 +
 +static int qcow_sparse_to(struct lo_file **lo_file,
@@ -332,6 +378,7 @@ index 0000000..e559a35
 +	.sync = qcow_sync,
 +	.size = qcow_size,
 +	.bio = qcow_bio,
++	.change = qcow_change,
 +	.owner = THIS_MODULE
 +};
 +
