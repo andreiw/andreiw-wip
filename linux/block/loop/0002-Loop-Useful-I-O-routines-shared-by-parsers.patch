@@ -1,4 +1,4 @@
-From 908234bda282c75e302fdb1e4d83b45c6bfefc47 Mon Sep 17 00:00:00 2001
+From ce271ff63cbfd34f3f75f694a68f9cee5e98aa52 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
 Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
@@ -6,17 +6,15 @@ Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
 This is basic functionality otherwise duplicated, like
 reading/writing a kernel buffer or struct page. Provides
 a generic sparse I/O routine that can be used by most
-parsers (QCOW, VHD, VMDK...). Also provides a metadata
-cache manager to simplify dealing with QCOW L2 tables,
-VHD bitmaps and VMDK PTs.
+parsers (QCOW, VHD, VMDK...).
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    4 +
  drivers/block/Makefile   |    1 +
- drivers/block/looputil.c |  442 ++++++++++++++++++++++++++++++++++++++++++++++
- include/linux/looputil.h |  106 +++++++++++
- 4 files changed, 553 insertions(+), 0 deletions(-)
+ drivers/block/looputil.c |  236 ++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/looputil.h |   61 ++++++++++++
+ 4 files changed, 302 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/looputil.c
  create mode 100644 include/linux/looputil.h
 
@@ -49,10 +47,10 @@ index 76646e9..eb3df97 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/looputil.c b/drivers/block/looputil.c
 new file mode 100644
-index 0000000..ede87f9
+index 0000000..2f0a805
 --- /dev/null
 +++ b/drivers/block/looputil.c
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,236 @@
 +/*
 +   Useful routines shared by loop parsers.
 +
@@ -74,13 +72,7 @@ index 0000000..ede87f9
 + */
 +
 +#include <linux/loop.h>
-+#include <linux/rwsem.h>
-+#include <linux/shrinker.h>
 +#include <linux/looputil.h>
-+
-+#define PMC_CACHE_PREFIX ("lpmc")
-+#define LOOP_PMCE_WRITE (1 << 0)
-+#define LOOP_PMCE_DIRTY (1 << 1)
 +
 +static int loop_kbuf_to_bio(struct bio *bio,
 +			    u8 *kbuf,
@@ -101,7 +93,7 @@ index 0000000..ede87f9
 +	 */
 +	while (len) {
 +		bv_offset = ((uintptr_t) kbuf) & ~PAGE_MASK;
-+		bv_len = min(len, (unsigned int) PAGE_SIZE - bv_offset);
++		bv_len = min(len, (size_t) PAGE_SIZE - bv_offset);
 +		bvec = &bio->bi_io_vec[bio->bi_vcnt];
 +		bvec->bv_page = virt_to_page(kbuf);
 +		bvec->bv_len = bv_len;
@@ -111,6 +103,47 @@ index 0000000..ede87f9
 +		kbuf += bv_len;
 +	}
 +	return 0;
++}
++
++static int transfer_zero(struct loop_device *lo, int cmd,
++			 struct page *raw_page, unsigned raw_off,
++			 struct page *loop_page, unsigned loop_off,
++			 int size, sector_t real_block)
++{
++	char *buf;
++
++	if (cmd == READ)
++		buf = kmap_atomic(loop_page, KM_USER0) + loop_off;
++	else
++		buf = kmap_atomic(raw_page, KM_USER0) + raw_off;
++
++	memset(buf, 0, size);
++	kunmap_atomic(buf, KM_USER0);
++	cond_resched();
++	return 0;
++}
++
++int loop_write_zero(struct loop_device *lo,
++		    struct lo_file *lo_file,
++		    size_t len,
++		    loff_t pos)
++{
++	int ret;
++	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++
++	/*
++	 * We end up describing a bogus range, which is safe,
++	 * since it is ignored by transfer_zero.
++	 */
++	ret = loop_kbuf_to_bio(bio, NULL, len);
++	if (ret)
++		goto out;
++
++	ret = loop_send(lo, lo_file, bio, pos, transfer_zero);
++out:
++	bio_put(bio);
++	return ret;
 +}
 +
 +int loop_write_kbuf(struct loop_device *lo,
@@ -254,253 +287,12 @@ index 0000000..ede87f9
 +
 +	return ret;
 +}
-+
-+struct loop_pmce *loop_pmc_get(struct loop_pmc *pmc,
-+			       unsigned index,
-+			       bool write)
-+{
-+	int ret;
-+	struct loop_pmce *pmce;
-+
-+	mutex_lock(&pmc->mutex);
-+	if (!pmc->cache) {
-+		pmc->cache = kzalloc(sizeof(struct loop_pmce *) *
-+				     pmc->max_entries,
-+				     GFP_KERNEL);
-+		if (!pmc->cache) {
-+			ret = -ENOMEM;
-+			goto out;
-+		}
-+	}
-+
-+	pmce = pmc->cache[index];
-+	if (!pmce) {
-+		pmce = kmem_cache_zalloc(pmc->kmc, GFP_KERNEL);
-+		if (!pmce) {
-+			ret = -ENOMEM;
-+			goto out;
-+		}
-+
-+		INIT_LIST_HEAD(&pmce->list);
-+		init_rwsem(&pmce->sem);
-+		pmce->index = index;
-+		ret = pmc->load(pmc, pmce);
-+		if (ret) {
-+			kmem_cache_free(pmc->kmc, pmce);
-+			goto out;
-+		}
-+		list_add_tail(&pmce->list, &pmc->lru);
-+		pmc->cache[index] = pmce;
-+		pmc->cache_count++;
-+	} else
-+		list_move_tail(&pmce->list, &pmc->lru);
-+
-+	if (write) {
-+		down_write(&pmce->sem);
-+		pmce->flags |= LOOP_PMCE_WRITE;
-+	} else
-+		down_read(&pmce->sem);
-+
-+out:
-+	mutex_unlock(&pmc->mutex);
-+	if (ret)
-+		return ERR_PTR(ret);
-+	return pmce;
-+}
-+
-+void loop_pmc_put(struct loop_pmc *pmc,
-+		  struct loop_pmce *pmce,
-+		  bool dirty)
-+{
-+	if (pmce->flags & LOOP_PMCE_WRITE) {
-+		if (dirty)
-+			pmce->flags |= LOOP_PMCE_DIRTY;
-+		pmce->flags ^= LOOP_PMCE_WRITE;
-+		up_write(&pmce->sem);
-+	} else
-+		up_read(&pmce->sem);
-+}
-+
-+int loop_pmc_flush(struct loop_pmc *pmc)
-+{
-+	struct loop_pmce *pmce;
-+	int ret = 0;
-+
-+	mutex_lock(&pmc->mutex);
-+	list_for_each_entry(pmce, &pmc->lru, list) {
-+		down_read(&pmce->sem);
-+		if (!(pmce->flags & LOOP_PMCE_DIRTY)) {
-+			up_read(&pmce->sem);
-+			continue;
-+		}
-+
-+		ret = pmc->flush(pmc, pmce);
-+		if (ret) {
-+			up_read(&pmce->sem);
-+			break;
-+		}
-+		pmce->flags ^= LOOP_PMCE_DIRTY;
-+		up_read(&pmce->sem);
-+	}
-+	mutex_unlock(&pmc->mutex);
-+
-+	return ret;
-+}
-+
-+void loop_pmc_free(struct loop_pmc *pmc)
-+{
-+	struct loop_pmce *pmce, *n;
-+
-+	/*
-+	 * This lock is really here to protect
-+	 * against concurrent shrinking - no
-+	 * pmce locking is done - as pmc is freed
-+	 * when parser is shut down, thus - no I/O
-+	 * is happening on last loop device using
-+	 * the parser. This also implies any data
-+	 * needing flushing is already flushed.
-+	 */
-+	mutex_lock(&pmc->mutex);
-+	unregister_shrinker(&pmc->shrinker);
-+
-+	if (pmc->cache) {
-+		list_for_each_entry_safe(pmce, n, &pmc->lru, list) {
-+			list_del(&pmce->list);
-+			pmc->cache[pmce->index] = NULL;
-+			kmem_cache_free(pmc->kmc, pmce);
-+			pmc->cache_count--;
-+		}
-+		kfree(pmc->cache);
-+	}
-+
-+	if (pmc->kmc)
-+		kmem_cache_destroy(pmc->kmc);
-+	if (pmc->kmc_name)
-+		kfree(pmc->kmc_name);
-+	kfree(pmc);
-+}
-+
-+static int
-+loop_pmc_shrink(struct shrinker *shrinker, struct shrink_control *sc)
-+{
-+	unsigned todo;
-+	struct loop_pmce *pmce, *n;
-+	enum {
-+		PASS_CLEAN,
-+		PASS_DIRTY,
-+		PASS_WAIT
-+	} pass = PASS_CLEAN;
-+
-+	struct loop_pmc *pmc =
-+		container_of(shrinker,
-+			     struct loop_pmc,
-+			     shrinker);
-+
-+	if (!mutex_trylock(&pmc->mutex))
-+		return -1;
-+
-+	todo = sc->nr_to_scan;
-+	while(todo && pmc->cache_count) {
-+		BUG_ON(pass > PASS_WAIT);
-+		list_for_each_entry_safe(pmce, n, &pmc->lru, list) {
-+			if (pass == PASS_WAIT)
-+				down_write(&pmce->sem);
-+			else
-+				if (!down_write_trylock(&pmce->sem))
-+					continue;
-+
-+			if (pass != PASS_CLEAN &&
-+			    pmce->flags & LOOP_PMCE_DIRTY) {
-+				if (!pmc->flush(pmc, pmce))
-+					pmce->flags ^= LOOP_PMCE_DIRTY;
-+			}
-+
-+			if (pmce->flags & LOOP_PMCE_DIRTY) {
-+				up_write(&pmce->sem);
-+				continue;
-+			}
-+
-+			list_del(&pmce->list);
-+			pmc->cache[pmce->index] = NULL;
-+			kmem_cache_free(pmc->kmc, pmce);
-+                        pmc->cache_count--;
-+                        todo--;
-+			if (!todo || !pmc->cache_count)
-+				break;
-+		}
-+		pass++;
-+	}
-+
-+	if (sc->nr_to_scan && !pmc->cache_count) {
-+		kfree(pmc->cache);
-+		pmc->cache = NULL;
-+	}
-+	mutex_unlock(&pmc->mutex);
-+	return pmc->cache_count + (pmc->cache != NULL);
-+}
-+
-+struct loop_pmc *loop_pmc_init(void *context,
-+			       size_t size,
-+			       char *cname,
-+			       unsigned entries,
-+			       loop_pmc_load_t load,
-+			       loop_pmc_flush_t flush)
-+{
-+	unsigned len;
-+	struct loop_pmc *pmc;
-+	int ret = 0;
-+
-+	pmc = kzalloc(sizeof(*pmc), GFP_KERNEL);
-+	if (!pmc)
-+		return ERR_PTR(-ENOMEM);
-+
-+	pmc->context = context;
-+	INIT_LIST_HEAD(&pmc->lru);
-+	len = sizeof(PMC_CACHE_PREFIX) + strlen(cname);
-+	pmc->kmc_name = kzalloc(len, GFP_KERNEL);
-+	if (!pmc->kmc_name) {
-+		ret = -ENOMEM;
-+		goto out;
-+	}
-+	strlcat(pmc->kmc_name, cname, len);
-+	strlcat(pmc->kmc_name, PMC_CACHE_PREFIX, len);
-+
-+	pmc->kmc = kmem_cache_create(pmc->kmc_name,
-+				     sizeof(struct loop_pmce) +
-+				     size, __alignof__(struct loop_pmce),
-+				     0, NULL);
-+	if (!pmc->kmc) {
-+		ret = -ENOMEM;
-+		goto out;
-+	}
-+
-+	pmc->max_entries = entries;
-+	pmc->flush = flush;
-+	pmc->load = load;
-+        pmc->shrinker.batch = 1;
-+	pmc->shrinker.seeks = DEFAULT_SEEKS;
-+	pmc->shrinker.shrink = loop_pmc_shrink;
-+	mutex_init(&pmc->mutex);
-+	register_shrinker(&pmc->shrinker);
-+	printk(KERN_INFO "%s: init metacache %ux%u\n", cname, size, entries);
-+
-+out:
-+	if (ret) {
-+		if (pmc->kmc)
-+			kmem_cache_destroy(pmc->kmc);
-+		if (pmc->kmc_name)
-+			kfree(pmc->kmc_name);
-+		kfree(pmc);
-+		return ERR_PTR(ret);
-+	}
-+	return pmc;
-+}
 diff --git a/include/linux/looputil.h b/include/linux/looputil.h
 new file mode 100644
-index 0000000..48e3bc5
+index 0000000..672361b
 --- /dev/null
 +++ b/include/linux/looputil.h
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,61 @@
 +/*
 +  Useful routines for loop parsers.
 +
@@ -525,11 +317,11 @@ index 0000000..48e3bc5
 +#define _LINUX_LOOP_UTIL_H
 +
 +#include <linux/loop.h>
-+#include <linux/mutex.h>
-+#include <linux/rwsem.h>
-+#include <linux/list.h>
-+#include <linux/slab.h>
 +
++int loop_write_zero(struct loop_device *lo,
++		    struct lo_file *lo_file,
++		    size_t len,
++		    loff_t pos);
 +int loop_write_kbuf(struct loop_device *lo,
 +		    struct lo_file *lo_file,
 +		    void *kbuf,
@@ -560,51 +352,6 @@ index 0000000..48e3bc5
 +int loop_sparse_io(struct loop_device *lo,
 +		   struct bio *bio,
 +		   loop_sparse_to_t sparse_to);
-+
-+struct loop_pmce {
-+	struct list_head list;
-+	u64 index;
-+	unsigned flags;
-+	struct rw_semaphore sem;
-+	u8 data[0];
-+} ____cacheline_aligned_in_smp;
-+
-+struct loop_pmc;
-+struct loop_pmce;
-+
-+typedef int (*loop_pmc_flush_t)(struct loop_pmc *,
-+				struct loop_pmce *);
-+typedef int (*loop_pmc_load_t)(struct loop_pmc *,
-+			       struct loop_pmce *);
-+
-+struct loop_pmc {
-+	struct list_head lru;
-+	struct kmem_cache *kmc;
-+	struct loop_pmce **cache;
-+	void *context;
-+	char *kmc_name;
-+	loop_pmc_load_t load;
-+	loop_pmc_flush_t flush;
-+	struct shrinker shrinker;
-+	unsigned cache_count;
-+	unsigned max_entries;
-+	struct mutex mutex;
-+};
-+
-+struct loop_pmce *loop_pmc_get(struct loop_pmc *pmc,
-+			       unsigned index,
-+			       bool write);
-+void loop_pmc_put(struct loop_pmc *pmc,
-+		  struct loop_pmce *pmce,
-+		  bool dirty);
-+int loop_pmc_flush(struct loop_pmc *pmc);
-+void loop_pmc_free(struct loop_pmc *pmc);
-+struct loop_pmc *loop_pmc_init(void *context,
-+			       size_t size,
-+			       char *cname,
-+			       unsigned entries,
-+			       loop_pmc_load_t load,
-+			       loop_pmc_flush_t flush);
 +
 +#endif /* _LINUX_LOOP_UTIL_H */
 -- 

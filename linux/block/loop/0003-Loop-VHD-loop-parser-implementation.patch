@@ -1,4 +1,4 @@
-From d3a902fc793ec79bf20acd0edba4798a7adb72ad Mon Sep 17 00:00:00 2001
+From 81cafb2f677a5c4a56e9feed946e0e4925ef6013 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
 Subject: [PATCH 3/5] Loop: VHD loop parser implementation.
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  711 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 720 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  572 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 581 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..d277459
+index 0000000..ef495b6
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,711 @@
+@@ -0,0 +1,572 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -98,11 +98,10 @@ index 0000000..d277459
 +#define SEC_SHIFT		(9)
 +#define SEC_SZ			(1 << SEC_SHIFT)
 +#define VHD_DNAME(vhd)		((vhd)->lo->lo_disk->disk_name)
-+#define BAT_SZ(entries)		round_up(sizeof(vhd_batent) * (entries), SEC_SZ)
++#define BAT_SZ(entries)		round_up(sizeof(u32) * (entries), SEC_SZ)
 +#define SECTOR_BMP_SZ(usz)	round_up((usz) >> (SEC_SHIFT + 3), SEC_SZ)
 +#define FOOTER_SZ(vhd)		(sizeof(struct vhd_footer) - ((vhd)->footer -\
 +				&(vhd)->footer_data))
-+#define BMP_CACHE_PREFIX	("vhdbmp")
 +
 +/* All fields Big-Endian */
 +struct vhd_id
@@ -170,19 +169,6 @@ index 0000000..d277459
 +	u8 reserved1[256];
 +};
 +
-+typedef u32 vhd_batent;
-+
-+#define VHD_BMP_DIRTY (0x1)
-+
-+struct vhd_bmp
-+{
-+	unsigned flags;
-+	u8  bmp[0];
-+};
-+
-+/* Dirty BAT needs to be flushed (and footer re-written) */
-+#define VHD_BAT_DIRTY (0x1)
-+
 +struct vhd
 +{
 +	struct loop_device *lo;
@@ -204,19 +190,9 @@ index 0000000..d277459
 +	/*
 +	 * Parsed from dynamic header.
 +	 */
-+	struct kmem_cache *bmp_cache;
-+	char *bmp_cache_name;
 +	loff_t table_offset;
 +	u32 bat_entries;
 +	size_t block_unit;
-+	vhd_batent *bat;
-+
-+	/*
-+	 * Note: the bitmaps should be in a LRU list,
-+	 * and should respond to memory pressure.
-+	 */
-+	struct vhd_bmp **bmps;
-+	unsigned flags;
 +};
 +
 +static int vhd_chs(struct vhd *vhd)
@@ -333,7 +309,6 @@ index 0000000..d277459
 +{
 +	int ret;
 +	loff_t blocks;
-+	unsigned len;
 +	u64 data_offset = be64_to_cpu(vhd->footer->data_offset);
 +	if (data_offset > vhd->file_size ||
 +	    data_offset + sizeof(vhd->dyn) > vhd->file_size)
@@ -377,7 +352,7 @@ index 0000000..d277459
 +	vhd->block_unit = be32_to_cpu(vhd->dyn.block_size);
 +	if (!vhd->block_unit ||
 +	    (vhd->block_unit & (vhd->block_unit - 1))) {
-+		printk(KERN_ERR "%s: invalid sparse block size %d\n",
++		printk(KERN_ERR "%s: invalid sparse block size %zu\n",
 +		       VHD_DNAME(vhd), vhd->block_unit);
 +		return -EINVAL;
 +
@@ -396,34 +371,6 @@ index 0000000..d277459
 +		       VHD_DNAME(vhd));
 +		return -EINVAL;
 +	}
-+
-+	vhd->bat = kzalloc(BAT_SZ(vhd->bat_entries), GFP_KERNEL);
-+	if (!vhd->bat)
-+		return -ENOMEM;
-+
-+	ret = loop_read_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
-+			     BAT_SZ(vhd->bat_entries),
-+			     vhd->table_offset);
-+	if (ret)
-+		return ret;
-+
-+	len = sizeof(BMP_CACHE_PREFIX) + strlen(VHD_DNAME(vhd));
-+	vhd->bmp_cache_name = kzalloc(len, GFP_KERNEL);
-+	if (!vhd->bmp_cache_name)
-+		return -ENOMEM;
-+	strlcat(vhd->bmp_cache_name, VHD_DNAME(vhd), len);
-+	strlcat(vhd->bmp_cache_name, BMP_CACHE_PREFIX, len);
-+
-+	vhd->bmp_cache = kmem_cache_create(vhd->bmp_cache_name,
-+					   sizeof(struct vhd_bmp) +
-+					   SECTOR_BMP_SZ(vhd->block_unit),
-+					   1, 0, NULL);
-+	if (!vhd->bmp_cache)
-+		return -ENOMEM;
-+
-+	vhd->bmps = kzalloc(vhd->bat_entries * sizeof(struct vhd_bmp *), GFP_KERNEL);
-+	if (!vhd->bmps)
-+		return -ENOMEM;
 +
 +	return 0;
 +}
@@ -495,83 +442,6 @@ index 0000000..d277459
 +	return ret;
 +}
 +
-+static int vhd_meta_flush(struct vhd *vhd)
-+{
-+	int ret;
-+	u32 bat_index;
-+	struct vhd_bmp *bmp;
-+
-+	if (vhd->bmps) {
-+		for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
-+			bmp = vhd->bmps[bat_index];
-+			if (bmp && (bmp->flags & VHD_BMP_DIRTY)) {
-+				ret = loop_write_kbuf(vhd->lo, vhd->lo_file, &bmp->bmp,
-+						      SECTOR_BMP_SZ(vhd->block_unit),
-+						      be32_to_cpu(vhd->bat[bat_index]) << SEC_SHIFT);
-+				if (ret) {
-+					printk(KERN_ERR "%s: failed to flush bitmap for block %d\n",
-+					       VHD_DNAME(vhd), bat_index);
-+					return ret;
-+				} else
-+					bmp->flags ^= VHD_BMP_DIRTY;
-+			}
-+		}
-+	}
-+
-+	if (vhd->flags & VHD_BAT_DIRTY) {
-+		ret = loop_write_kbuf(vhd->lo, vhd->lo_file, vhd->bat,
-+				      BAT_SZ(vhd->bat_entries),
-+				      vhd->table_offset);
-+		if (ret) {
-+			printk(KERN_ERR "%s: failed to flush BAT\n",
-+			       VHD_DNAME(vhd));
-+			return ret;
-+		} else
-+			vhd->flags ^= VHD_BAT_DIRTY;
-+
-+		ret = loop_write_kbuf(vhd->lo, vhd->lo_file, vhd->footer,
-+				      FOOTER_SZ(vhd),
-+				      vhd->file_size - FOOTER_SZ(vhd));
-+		if (ret) {
-+			printk(KERN_ERR "%s: failed to flush footer\n",
-+			       VHD_DNAME(vhd));
-+			return ret;
-+		}
-+	}
-+	return 0;
-+}
-+
-+static void vhd_free(struct vhd *vhd)
-+{
-+	u32 bat_index;
-+
-+	if (vhd_meta_flush(vhd))
-+		printk(KERN_ERR "%s: failed to flush metadata, expect corruption\n",
-+		       VHD_DNAME(vhd));
-+
-+	if (vhd->bmps) {
-+		for (bat_index = 0; bat_index < vhd->bat_entries; bat_index++) {
-+			if (vhd->bmps[bat_index]) {
-+				kmem_cache_free(vhd->bmp_cache, vhd->bmps[bat_index]);
-+				vhd->bmps[bat_index] = NULL;
-+			}
-+		}
-+
-+		kfree(vhd->bmps);
-+	}
-+
-+	if (vhd->bmp_cache)
-+		kmem_cache_destroy(vhd->bmp_cache);
-+
-+	if (vhd->bmp_cache_name)
-+		kfree(vhd->bmp_cache_name);
-+
-+	if (vhd->bat)
-+		kfree(vhd->bat);
-+
-+	kfree(vhd);
-+}
-+
 +static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
 +{
 +	int ret;
@@ -612,7 +482,7 @@ index 0000000..d277459
 +	lo_file->parser_priv = vhd;
 +out:
 +	if (ret)
-+		vhd_free(vhd);
++		kfree(vhd);
 +	return ret;
 +}
 +
@@ -620,7 +490,7 @@ index 0000000..d277459
 +{
 +	struct vhd *vhd = lo_file->parser_priv;
 +	lo_file->parser_priv = NULL;
-+	vhd_free(vhd);
++	kfree(vhd);
 +}
 +
 +static loff_t vhd_size(struct loop_device *lo)
@@ -631,13 +501,6 @@ index 0000000..d277459
 +
 +static int vhd_sync(struct loop_device *lo)
 +{
-+	int ret;
-+	struct vhd *vhd = lo->lo_file.parser_priv;
-+
-+	ret = vhd_meta_flush(vhd);
-+	if (ret)
-+		return ret;
-+
 +	return loop_sync(lo, &lo->lo_file);
 +}
 +
@@ -648,69 +511,67 @@ index 0000000..d277459
 +			 loff_t *fpos)
 +{
 +	int ret;
-+	loff_t block_fpos;
-+	loff_t bat_entry = pos;
++	loff_t ffpos, temp;
++	loff_t entry = pos;
 +	struct vhd *vhd = (*lo_file)->parser_priv;
-+	u32 offset = do_div(bat_entry, vhd->block_unit);
++	u32 offset = do_div(entry, vhd->block_unit);
 +	*len = min(*len, (unsigned int) ((SEC_SZ - (pos & (SEC_SZ - 1)))));
 +
-+	block_fpos = be32_to_cpu(vhd->bat[bat_entry]);;
-+	if (block_fpos == 0xFFFFFFFF) {
++	ret = loop_read_kbuf(vhd->lo, vhd->lo_file, &ffpos,
++			     sizeof(u32),
++			     vhd->table_offset + entry *
++			     sizeof(u32));
++	if (ret)
++		return ret;
++
++	if ((u32) ffpos == 0xFFFFFFFF) {
 +		if (bio_rw(bio) != WRITE)
 +			return -ENOENT;
 +
-+		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache,
-+                                                         GFP_KERNEL);
-+		if (!vhd->bmps[bat_entry])
-+			return -ENOMEM;
-+		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
-+
-+		block_fpos = round_up(vhd->file_size - FOOTER_SZ(vhd), SEC_SZ);
-+		vhd->file_size = block_fpos + vhd->block_unit + FOOTER_SZ(vhd);
-+		vhd->bat[bat_entry] = cpu_to_be32(block_fpos >> SEC_SHIFT);
-+		vhd->flags |= VHD_BAT_DIRTY;
-+	} else
-+		block_fpos <<= SEC_SHIFT;
-+
-+	if (!vhd->bmps[bat_entry]) {
-+		if (block_fpos > vhd->file_size ||
-+		    (block_fpos + SECTOR_BMP_SZ(vhd->block_unit)) > vhd->file_size)
-+			return -EINVAL;
-+
-+		vhd->bmps[bat_entry] = kmem_cache_zalloc(vhd->bmp_cache, GFP_KERNEL);
-+		if (!vhd->bmps[bat_entry])
-+			return -ENOMEM;
-+
-+		ret = loop_read_kbuf(vhd->lo, vhd->lo_file, &vhd->bmps[bat_entry]->bmp,
-+				     SECTOR_BMP_SZ(vhd->block_unit), block_fpos);
-+		if (ret) {
-+			kmem_cache_free(vhd->bmp_cache,
-+					vhd->bmps[bat_entry]);
-+			vhd->bmps[bat_entry] = NULL;
++		ffpos = round_up(vhd->file_size - FOOTER_SZ(vhd), SEC_SZ);
++		vhd->file_size = ffpos + vhd->block_unit + FOOTER_SZ(vhd);
++		temp = cpu_to_be32(ffpos >> SEC_SHIFT);
++		ret = loop_write_kbuf(vhd->lo, vhd->lo_file, &temp,
++				     sizeof(u32),
++				     vhd->table_offset + entry *
++				     sizeof(u32));
++		if (ret)
 +			return ret;
-+		}
-+	}
++	} else
++		ffpos = be32_to_cpu(ffpos) << SEC_SHIFT;
++
++	entry = 0;
++	ret = loop_read_kbuf(vhd->lo, vhd->lo_file, &entry,
++			     sizeof(u8),
++			     ffpos + sizeof(u8) *
++			     (offset >> (SEC_SHIFT + 3)));
++	if (ret)
++		return ret;
 +
 +	/*
 +	 * Bits within byte actually have a reversed meaning,
 +	 * where MSB is the lower sector number.
 +	 */
++
 +	if (bio_rw(bio) != WRITE) {
-+		if (!(vhd->bmps[bat_entry]->bmp[offset >> (SEC_SHIFT + 3)] &
-+		      (1 << (7 - ((offset >> SEC_SHIFT) & 7)))))
++		if (!(entry & (1 << (7 - ((offset >> SEC_SHIFT) & 7)))))
 +			return -ENOENT;
 +	} else {
-+		vhd->bmps[bat_entry]->bmp[offset >> (SEC_SHIFT + 3)] |=
-+			1 << (7 - (((offset >> SEC_SHIFT) & 7)));
-+		vhd->bmps[bat_entry]->flags |= VHD_BMP_DIRTY;
++		entry |= 1 << (7 - (((offset >> SEC_SHIFT) & 7)));
++		ret = loop_write_kbuf(vhd->lo, vhd->lo_file, &entry,
++				      sizeof(u8),
++				      ffpos + sizeof(u8) *
++				      (offset >> (SEC_SHIFT + 3)));
++		if (ret)
++			return ret;
 +	}
 +
-+	block_fpos += SECTOR_BMP_SZ(vhd->block_unit) + offset;
-+	if (block_fpos > vhd->file_size ||
-+	    (block_fpos + *len) > vhd->file_size)
++	ffpos += SECTOR_BMP_SZ(vhd->block_unit) + offset;
++	if (ffpos > vhd->file_size ||
++	    (ffpos + *len) > vhd->file_size)
 +		return -EINVAL;
 +
-+	*fpos = block_fpos;
++	*fpos = ffpos;
 +	return 0;
 +}
 +

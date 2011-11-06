@@ -1,4 +1,4 @@
-From 11089d992a4142a07a38dea3ce2a5aad0dad4c9b Mon Sep 17 00:00:00 2001
+From 1b5053291703e291ff1708da3390722cc4480e98 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Thu, 20 Oct 2011 23:57:05 -0400
 Subject: [PATCH 5/5] Loop: VMDK parser implementation.
