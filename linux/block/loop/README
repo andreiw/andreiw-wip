@@ -50,6 +50,22 @@ image type and loop size.
 Your either want to set loop.max_parts to something non-zero (10 sounds good to me),
 or use kpartx to actually see partitions on devices.
 
+To use COW disk, you need something to generate the already-present
+LOOP_CHANGE_FD loop ioctl. The flow here is that you need to
+losetup the parent image, then LOOP_CHANGE_FD to the child.
+The kernel will do it's best to prevent you from doing somthing dumb,
+by verifying the relation.
+
+The minimal code to do the change operation would be something like:
+
+int main(int argc, char **argv)
+{
+  return ioctl(open(argv[1], O_RDWR),
+               LOOP_CHANGE_FD,
+               open(argv[2], O_RDWR));
+}
+
+
 To generate VHDs you can use my vhdtool (https://github.com/andreiw/vhdtool), which
 allows you to fine-tune metadata details for dynamic disks (and unlike qemu-img, doesn't
 create b0rked images).
@@ -71,8 +87,7 @@ VHD parser to-do:
 QCOW parser to-do:
 1) Support RW on v1 (done!)
 2) Support v2.
-3) Support COW disks (painful, since there is no parent
-   UUID to match against, necessitating some loop changes).
+3) Support COW disks (done!)
 
 VMDK parser to do:
 1) Support RO on hosted extents.
@@ -89,6 +104,8 @@ Common:
 3) Think about a common interface for dealing with COW/differencing
    disks. It looks like change_fd is the right mechanism, just need
    to figure out how to prevent silly things from happening (done!)
+4) Comment everything before submitting to LKML for a shoot-down.
+5) Get flamed by LKML ;-).
 
 Notes:
 Previous versions used a complicated scheme to cache metadata, but

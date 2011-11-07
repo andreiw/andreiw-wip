@@ -1,4 +1,4 @@
-From 653b224389acc34295b4c15e463a893b0a83c974 Mon Sep 17 00:00:00 2001
+From ff9239ec8e3865e2564be6319801b41bf38850b2 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Thu, 20 Oct 2011 23:57:05 -0400
 Subject: [PATCH 5/5] Loop: VMDK parser implementation.
@@ -11,8 +11,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 ++
  drivers/block/Makefile   |    1 +
- drivers/block/vmdkloop.c |  197 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 206 insertions(+), 0 deletions(-)
+ drivers/block/vmdkloop.c |  201 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 210 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vmdkloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -48,10 +48,10 @@ index 619635c..d1314ee 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vmdkloop.c b/drivers/block/vmdkloop.c
 new file mode 100644
-index 0000000..4d0b909
+index 0000000..5d14a46
 --- /dev/null
 +++ b/drivers/block/vmdkloop.c
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,201 @@
 +/*
 +   Linux loop VMDK support.
 +
@@ -177,7 +177,9 @@ index 0000000..4d0b909
 +{
 +}
 +
-+static int vmdk_change(struct loop_device *lo, struct lo_file *lo_file)
++static int vmdk_change(struct loop_device *lo,
++		       struct lo_file *old_lo_file,
++		       struct lo_file *new_lo_file)
 +{
 +	return -EIO;
 +}
@@ -187,22 +189,22 @@ index 0000000..4d0b909
 +	return -EIO;
 +}
 +
-+static void vmdk_release(struct lo_file *lo_file)
++static void vmdk_release(struct loop_device *lo, struct lo_file *lo_file)
 +{
 +	struct vmdk *vmdk = lo_file->parser_priv;
 +	lo_file->parser_priv = NULL;
 +	vmdk_free(vmdk);
 +}
 +
-+static loff_t vmdk_size(struct loop_device *lo)
++static loff_t vmdk_size(struct loop_device *lo, struct lo_file *lo_file)
 +{
-+	struct vmdk *vmdk = lo->lo_file->parser_priv;
++	struct vmdk *vmdk = lo_file->parser_priv;
 +	return vmdk->size >> SEC_SHIFT;
 +}
 +
-+static int vmdk_sync(struct loop_device *lo)
++static int vmdk_sync(struct loop_device *lo, struct lo_file *lo_file)
 +{
-+	return loop_sync(lo, lo->lo_file);
++	return loop_sync(lo, lo_file);
 +}
 +
 +static int vmdk_sparse_to(struct lo_file **lo_file,
@@ -214,9 +216,11 @@ index 0000000..4d0b909
 +	return -EIO;
 +}
 +
-+static int vmdk_bio(struct loop_device *lo, struct bio *bio)
++static int vmdk_bio(struct loop_device *lo,
++		    struct lo_file *lo_file,
++		    struct bio *bio)
 +{
-+	return loop_sparse_io(lo, bio, vmdk_sparse_to);
++	return loop_sparse_io(lo, lo_file, bio, vmdk_sparse_to);
 +}
 +
 +static struct loop_parser vmdk_parser =
