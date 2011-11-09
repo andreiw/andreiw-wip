@@ -1,4 +1,4 @@
-From 6fa215d2acc0c32dfbcacae1cd26d8f45dd9a1d3 Mon Sep 17 00:00:00 2001
+From 47ba6a6944c85649f82c38a18a5b0544f1c80423 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
 Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.

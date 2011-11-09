@@ -1,4 +1,4 @@
-From 3de52adfa788394b9310c1f56d74954f261cc09b Mon Sep 17 00:00:00 2001
+From dd6c11eba9d05754a66af7e685b8b1ad3f569f9b Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
 Subject: [PATCH 3/5] Loop: VHD loop parser implementation.
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  657 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 666 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  671 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 680 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..f35020e
+index 0000000..466b326
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,657 @@
+@@ -0,0 +1,671 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -75,6 +75,7 @@ index 0000000..f35020e
 +#include <linux/init.h>
 +#include <linux/loop.h>
 +#include <linux/looputil.h>
++#include <linux/rwsem.h>
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("loop VHD parser");
@@ -176,6 +177,9 @@ index 0000000..f35020e
 +	struct vhd_footer footer_data;
 +	struct vhd_dyn    dyn;
 +	struct vhd_footer mirror;
++
++	/* Protects bio() calls. */
++	struct rw_semaphore sem;
 +
 +	/*
 +	 * Parsed from image. Crazy footer can be
@@ -439,8 +443,8 @@ index 0000000..f35020e
 +		       VHD_DNAME(vhd));
 +	       return -EINVAL;
 +	}
-+
-+	return ret;
++	init_rwsem(&vhd->sem);
++	return 0;
 +}
 +
 +static struct vhd *vhd_parse(struct loop_device *lo, struct lo_file *lo_file)
@@ -489,15 +493,16 @@ index 0000000..f35020e
 +		      struct lo_file *old_lo_file,
 +		      struct lo_file *new_lo_file)
 +{
++	int ret = -EPERM;
 +	struct vhd *vhd = old_lo_file->parser_priv;
 +	struct vhd *new_vhd = vhd_parse(lo, new_lo_file);
 +	if (IS_ERR(new_vhd)) {
 +		new_vhd = NULL;
 +		printk(KERN_ERR "%s: changed-to image not VHD\n",
 +		       VHD_DNAME(vhd));
++		ret = -EINVAL;
 +		goto out;
 +	}
-+	new_lo_file->parser_priv = new_vhd;
 +
 +	if (vhd->size != new_vhd->size) {
 +		printk(KERN_ERR "%s: changed-to image mismatched disk size\n",
@@ -521,13 +526,12 @@ index 0000000..f35020e
 +		goto out;
 +	}
 +
++	new_lo_file->parser_priv = new_vhd;
 +	return 0;
 +out:
-+	printk(KERN_ERR "%s: loop change aborted\n",
-+	       VHD_DNAME(vhd));
 +	if (new_vhd)
 +		kfree(new_vhd);
-+	return -EINVAL;
++	return ret;
 +}
 +
 +static int vhd_init(struct loop_device *lo, struct lo_file *lo_file)
@@ -535,11 +539,6 @@ index 0000000..f35020e
 +	struct vhd *vhd = vhd_parse(lo, lo_file);
 +	if (IS_ERR(vhd))
 +		return PTR_ERR(vhd);
-+
-+	printk(KERN_INFO "%s: %s VHD %lld bytes\n",
-+	       VHD_DNAME(vhd),
-+	       vhd->type == FOOTER_TYPE_DYN ? "dynamic" : "fixed",
-+	       vhd->size);
 +	lo_file->parser_priv = vhd;
 +	return 0;
 +}
@@ -571,9 +570,6 @@ index 0000000..f35020e
 +static void vhd_release(struct loop_device *lo, struct lo_file *lo_file)
 +{
 +	struct vhd *vhd = lo_file->parser_priv;
-+
-+	if (!vhd)
-+		return;
 +
 +	vhd_sync(lo, lo_file);
 +	lo_file->parser_priv = NULL;
@@ -661,20 +657,38 @@ index 0000000..f35020e
 +		   struct lo_file *lo_file,
 +		   struct bio *bio)
 +{
++	int ret;
 +	struct vhd *vhd = lo_file->parser_priv;
 +
 +	if (vhd->type == FOOTER_TYPE_FIXED) {
 +		if (bio_rw(bio) == WRITE)
 +			return loop_send(lo, lo_file, bio,
-+					 ((loff_t) bio->bi_sector << SEC_SHIFT),
-+					 NULL);
++					((loff_t) bio->bi_sector << SEC_SHIFT),
++					NULL);
 +		else
 +			return loop_recv(lo, lo_file, bio,
 +					 ((loff_t) bio->bi_sector << SEC_SHIFT),
 +					 NULL);
 +	}
 +
-+	return loop_sparse_io(lo, lo_file, bio, vhd_sparse_to);
++	/*
++	 * Only bother with synchronization when dealing
++	 * with the sparse format, where a race can actually
++	 * garble the format.
++	 */
++
++	if (bio_rw(bio) != WRITE)
++		down_read(&vhd->sem);
++	else
++		down_write(&vhd->sem);
++
++	ret = loop_sparse_io(lo, lo_file, bio, vhd_sparse_to);
++
++	if (bio_rw(bio) != WRITE)
++		up_read(&vhd->sem);
++	else
++		up_write(&vhd->sem);
++	return ret;
 +}
 +
 +static struct loop_parser vhd_parser =

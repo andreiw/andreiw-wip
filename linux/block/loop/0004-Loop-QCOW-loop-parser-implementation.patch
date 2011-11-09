@@ -1,4 +1,4 @@
-From 44191fbdca455710652b8569e265889bbeb280c4 Mon Sep 17 00:00:00 2001
+From bdd53dce5cf52683aece167fc20f24db38e7a5b5 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
 Subject: [PATCH 4/5] Loop: QCOW loop parser implementation.
@@ -13,8 +13,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  425 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 434 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  450 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 459 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -50,10 +50,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..6cb0e28f
+index 0000000..a876057
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,450 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -78,6 +78,7 @@ index 0000000..6cb0e28f
 +#include <linux/init.h>
 +#include <linux/loop.h>
 +#include <linux/looputil.h>
++#include <linux/rwsem.h>
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("loop QCOW parser");
@@ -115,6 +116,9 @@ index 0000000..6cb0e28f
 +	struct lo_file  *backing;
 +	struct qcow_header header;
 +	loff_t file_size;
++
++	/* Protects bio() calls. */
++	struct rw_semaphore sem;
 +
 +	/* Parsed and created from header. */
 +	u64 l1_entries;
@@ -184,6 +188,7 @@ index 0000000..6cb0e28f
 +		ret = -EINVAL;
 +		goto out;
 +	}
++	init_rwsem(&qcow->sem);
 +	return 0;
 +out:
 +	kfree(qcow->backing_name);
@@ -220,7 +225,6 @@ index 0000000..6cb0e28f
 +		ret = -EPERM;
 +		goto out;
 +	}
-+
 +out:
 +	if (ret) {
 +		kfree(qcow);
@@ -245,19 +249,29 @@ index 0000000..6cb0e28f
 +	return true;
 +}
 +
++static void qcow_free(struct loop_device *lo, struct qcow *qcow)
++{
++	if (qcow->backing) {
++		loop_lo_file_put(lo, qcow->backing);
++		kfree(qcow->backing_name);
++	}
++	kfree(qcow);
++}
++
 +static int qcow_change(struct loop_device *lo,
 +		       struct lo_file *old_lo_file,
 +		       struct lo_file *new_lo_file)
 +{
++	int ret = -EPERM;
 +	struct qcow *qcow = old_lo_file->parser_priv;
 +	struct qcow *new_qcow = qcow_parse(lo, new_lo_file);
 +	if (IS_ERR(new_qcow)) {
 +		new_qcow = NULL;
 +		printk(KERN_ERR "%s: changed-to image not QCOW\n",
 +		       QCOW_DNAME(qcow));
++		ret = -EINVAL;
 +		goto out;
 +	}
-+	new_lo_file->parser_priv = new_qcow;
 +
 +	if (qcow->header.size != new_qcow->header.size) {
 +		printk(KERN_ERR "%s: changed-to image mismatched disk size\n",
@@ -287,11 +301,13 @@ index 0000000..6cb0e28f
 +		}
 +	}
 +
++	new_lo_file->parser_priv = new_qcow;
 +	return 0;
 +out:
 +
-+	/* Clean-up happens in loop_lo_file_put->qcow_release(). */
-+	return -EINVAL;
++	if (new_qcow)
++		qcow_free(lo, new_qcow);
++	return ret;
 +}
 +
 +static int qcow_init(struct loop_device *lo, struct lo_file *lo_file)
@@ -300,9 +316,13 @@ index 0000000..6cb0e28f
 +	if (IS_ERR(qcow))
 +		return PTR_ERR(qcow);
 +
-+	printk(KERN_INFO "%s: QCOW %lld bytes\n",
-+	       QCOW_DNAME(qcow),
-+	       qcow->header.size);
++	if (qcow->backing_name) {
++
++		/* Can't mount COW disk without its parent. */
++		qcow_free(lo, qcow);
++		return -EPERM;
++	}
++
 +	lo_file->parser_priv = qcow;
 +	return 0;
 +}
@@ -310,17 +330,8 @@ index 0000000..6cb0e28f
 +static void qcow_release(struct loop_device *lo, struct lo_file *lo_file)
 +{
 +	struct qcow *qcow = lo_file->parser_priv;
-+
-+	if (!qcow)
-+		return;
-+
++	qcow_free(lo, qcow);
 +	lo_file->parser_priv = NULL;
-+	if (qcow->backing) {
-+		loop_lo_file_put(lo, &qcow_parser,
-+				 qcow->backing);
-+		kfree(qcow->backing_name);
-+	}
-+	kfree(qcow);
 +}
 +
 +static loff_t qcow_size(struct loop_device *lo, struct lo_file *lo_file)
@@ -446,7 +457,21 @@ index 0000000..6cb0e28f
 +		    struct lo_file *lo_file,
 +		    struct bio *bio)
 +{
-+	return loop_sparse_io(lo, lo_file, bio, qcow_sparse_to);
++	int ret;
++	struct qcow *qcow = lo_file->parser_priv;
++
++	if (bio_rw(bio) != WRITE)
++		down_read(&qcow->sem);
++	else
++		down_write(&qcow->sem);
++
++	ret = loop_sparse_io(lo, lo_file, bio, qcow_sparse_to);
++	if (bio_rw(bio) != WRITE)
++		up_read(&qcow->sem);
++	else
++		up_write(&qcow->sem);
++
++	return ret;
 +}
 +
 +static struct loop_parser qcow_parser =
