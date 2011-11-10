@@ -1,0 +1,31 @@
+From 564ea8f479cb3c62b9cde03690c3429861887b34 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@vmware.com>
+Date: Tue, 8 Nov 2011 14:08:15 -0500
+Subject: [PATCH 2/2] include/log2.h: Fix rounddown_pow_of_two(1)
+
+1 is a power of two, therefore rounddown_pow_of_two(1) should return 1. It does
+in case the argument is a variable but in case it's a constant it behaves
+wrong and returns 0. Probably nobody ever did it so this was never noticed,
+however net/drivers/vmxnet3 with latest GCC does and breaks on unicpu systems.
+
+Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
+---
+ include/linux/log2.h |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/include/linux/log2.h b/include/linux/log2.h
+index 25b8086..ccda848 100644
+--- a/include/linux/log2.h
++++ b/include/linux/log2.h
+@@ -185,7 +185,7 @@ unsigned long __rounddown_pow_of_two(unsigned long n)
+ #define rounddown_pow_of_two(n)			\
+ (						\
+ 	__builtin_constant_p(n) ? (		\
+-		(n == 1) ? 0 :			\
++		(n == 1) ? 1 :			\
+ 		(1UL << ilog2(n))) :		\
+ 	__rounddown_pow_of_two(n)		\
+  )
+-- 
+1.7.7
+

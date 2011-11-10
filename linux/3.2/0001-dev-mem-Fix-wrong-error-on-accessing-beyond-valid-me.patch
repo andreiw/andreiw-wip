@@ -1,0 +1,55 @@
+From 0b7ce642a1eea34e9ae3930a053a61948b31bb8f Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@vmware.com>
+Date: Wed, 9 Nov 2011 18:31:19 -0500
+Subject: [PATCH 1/2] /dev/mem: Fix wrong error on accessing beyond valid
+ memory addresses.
+
+Currently this returns -EFAULT, but it really should be returning 0,
+as in - 0 bytes read or written. This is what you would get by
+opening a block device, seeking to the end, and trying to read
+something. Additionally, make lseek() check the sought-to offset
+to pass the valid_phys_addr_range test.
+
+Cc: H. Peter Anvin <hpa@zytor.com>
+Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
+---
+ drivers/char/mem.c |    9 +++++++--
+ 1 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/char/mem.c b/drivers/char/mem.c
+index 8fc04b4..02d0b1a 100644
+--- a/drivers/char/mem.c
++++ b/drivers/char/mem.c
+@@ -98,7 +98,7 @@ static ssize_t read_mem(struct file *file, char __user *buf,
+ 	char *ptr;
+ 
+ 	if (!valid_phys_addr_range(p, count))
+-		return -EFAULT;
++		return 0;
+ 	read = 0;
+ #ifdef __ARCH_HAS_NO_PAGE_ZERO_MAPPED
+ 	/* we don't have page 0 mapped on sparc and m68k.. */
+@@ -156,7 +156,7 @@ static ssize_t write_mem(struct file *file, const char __user *buf,
+ 	void *ptr;
+ 
+ 	if (!valid_phys_addr_range(p, count))
+-		return -EFAULT;
++		return 0;
+ 
+ 	written = 0;
+ 
+@@ -710,6 +710,11 @@ static loff_t memory_lseek(struct file *file, loff_t offset, int orig)
+ 	case SEEK_CUR:
+ 		offset += file->f_pos;
+ 	case SEEK_SET:
++		if (!valid_phys_addr_range(offset, 0)) {
++			ret = -EINVAL;
++			break;
++		}
++
+ 		/* to avoid userland mistaking f_pos=-9 as -EBADF=-9 */
+ 		if ((unsigned long long)offset >= ~0xFFFULL) {
+ 			ret = -EOVERFLOW;
+-- 
+1.7.7
+
