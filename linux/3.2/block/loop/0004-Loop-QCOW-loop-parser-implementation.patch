@@ -1,4 +1,4 @@
-From bdd53dce5cf52683aece167fc20f24db38e7a5b5 Mon Sep 17 00:00:00 2001
+From e8a99918d255745cad2d539c257d166c3a5e5df8 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
 Subject: [PATCH 4/5] Loop: QCOW loop parser implementation.
@@ -13,8 +13,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  450 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 459 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  440 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 449 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -50,10 +50,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..a876057
+index 0000000..abaefbc
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,440 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -78,14 +78,13 @@ index 0000000..a876057
 +#include <linux/init.h>
 +#include <linux/loop.h>
 +#include <linux/looputil.h>
-+#include <linux/rwsem.h>
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("loop QCOW parser");
 +MODULE_AUTHOR("Andrei Warkentin <andreiw@vmware.com>");
 +
 +#define QCOW_MAGIC		(*(u32 *) "QFI\xfb")
-+#define QCOW_DNAME(qcow)	((qcow)->lo->lo_disk->disk_name)
++#define DNAME(lo)		((lo)->lo_disk->disk_name)
 +#define L1_SIZE(entries)	((entries) * sizeof(u64))
 +#define L2_SIZE(entries)	((entries) * sizeof(u64))
 +#define B2M(bits)		((1 << (bits)) - 1)
@@ -128,27 +127,26 @@ index 0000000..a876057
 +	char *backing_name;
 +};
 +
-+static struct loop_parser qcow_parser;
-+
-+static int qcow_verify(struct loop_device *lo, struct qcow *qcow)
++static int qcow_verify(struct loop_device *lo,
++		       struct qcow *qcow)
 +{
 +	int ret = 0;
 +
 +	qcow->header.version = be32_to_cpu(qcow->header.version);
 +	if (qcow->header.version != 1) {
 +		printk(KERN_ERR "%s: unsupported version %d\n",
-+		       QCOW_DNAME(qcow),
++		       DNAME(lo),
 +		       qcow->header.version);
 +		return -EINVAL;
 +	}
 +
 +	qcow->header.backing_file_offset = be64_to_cpu(qcow->header.backing_file_offset);
 +	qcow->header.backing_file_size = be32_to_cpu(qcow->header.backing_file_size);
-+	if (qcow->header.backing_file_offset > qcow->file_size ||
++	if (qcow->header.backing_file_offset >= qcow->file_size ||
 +	    (qcow->header.backing_file_offset +
 +	     qcow->header.backing_file_size) > qcow->file_size) {
 +		printk(KERN_ERR "%s: corrupt backing file data\n",
-+		       QCOW_DNAME(qcow));
++		       DNAME(lo));
 +		return -EINVAL;
 +	}
 +	if (qcow->header.backing_file_size) {
@@ -170,7 +168,7 @@ index 0000000..a876057
 +
 +	if (qcow->header.crypt_method != 0) {
 +		printk(KERN_ERR "%s: encryption unsupported\n",
-+		       QCOW_DNAME(qcow));
++		       DNAME(lo));
 +		ret = -EINVAL;
 +		goto out;
 +	}
@@ -181,14 +179,14 @@ index 0000000..a876057
 +	qcow->l1_entries = qcow->header.size;
 +	qcow->l1_entries = round_up(qcow->l1_entries, qcow->l2_entries * qcow->cluster_size);
 +	do_div(qcow->l1_entries, qcow->l2_entries * qcow->cluster_size);
-+	if ((qcow->header.l1_table_offset + L1_SIZE(qcow->l1_entries)) >
++	if (qcow->header.l1_table_offset >= qcow->file_size ||
++            (qcow->header.l1_table_offset + L1_SIZE(qcow->l1_entries)) >
 +	    qcow->file_size) {
 +		printk(KERN_ERR "%s: corrupt L1 offset/entries\n",
-+		       QCOW_DNAME(qcow));
++		       DNAME(lo));
 +		ret = -EINVAL;
 +		goto out;
 +	}
-+	init_rwsem(&qcow->sem);
 +	return 0;
 +out:
 +	kfree(qcow->backing_name);
@@ -205,7 +203,6 @@ index 0000000..a876057
 +	if (!qcow)
 +		return ERR_PTR(-ENOMEM);
 +
-+	qcow->lo = lo;
 +	qcow->lo_file = lo_file;
 +	qcow->file_size = i_size_read(lo_file->file->f_mapping->host);
 +	ret = loop_read_kbuf(lo, lo_file, &qcow->header,
@@ -268,14 +265,14 @@ index 0000000..a876057
 +	if (IS_ERR(new_qcow)) {
 +		new_qcow = NULL;
 +		printk(KERN_ERR "%s: changed-to image not QCOW\n",
-+		       QCOW_DNAME(qcow));
++		       DNAME(lo));
 +		ret = -EINVAL;
 +		goto out;
 +	}
 +
 +	if (qcow->header.size != new_qcow->header.size) {
 +		printk(KERN_ERR "%s: changed-to image mismatched disk size\n",
-+		       QCOW_DNAME(qcow));
++		       DNAME(lo));
 +		goto out;
 +	}
 +
@@ -283,7 +280,7 @@ index 0000000..a876057
 +		if (!qcow_match_name(new_qcow->backing_name,
 +				    lo->lo_file_name)) {
 +			printk(KERN_ERR "%s: changed-to image parent doesn't match (%s vs %s)\n",
-+			       QCOW_DNAME(qcow),
++			       DNAME(lo),
 +			       new_qcow->backing_name,
 +			       lo->lo_file_name);
 +			goto out;
@@ -292,13 +289,6 @@ index 0000000..a876057
 +		/* Check file name against lo_file_name. */
 +		atomic_inc(&old_lo_file->ref);
 +		new_qcow->backing = old_lo_file;
-+	} else {
-+		/* For non-COW cases, the loop device has to be read-only */
-+		if (!(lo->lo_flags & LO_FLAGS_READ_ONLY)) {
-+			printk(KERN_ERR "%s: non-COW change permitted only on RO disks\n",
-+			       QCOW_DNAME(qcow));
-+			goto out;
-+		}
 +	}
 +
 +	new_lo_file->parser_priv = new_qcow;
@@ -345,7 +335,8 @@ index 0000000..a876057
 +	return loop_sync(lo, lo_file);
 +}
 +
-+static int qcow_sparse_to(struct lo_file **lo_file,
++static int qcow_sparse_to(struct loop_device *lo,
++			  struct lo_file **lo_file,
 +			  struct bio *bio,
 +			  loff_t pos,
 +			  unsigned int *len,
@@ -363,10 +354,7 @@ index 0000000..a876057
 +	*len = min(*len, (unsigned int) ((qcow->access_size -
 +					  (pos & (qcow->access_size - 1)))));
 +
-+	if (l1_index >= qcow->l1_entries)
-+		return -EINVAL;
-+
-+	ret = loop_read_kbuf(qcow->lo, qcow->lo_file, &l2pos,
++	ret = loop_read_kbuf(lo, qcow->lo_file, &l2pos,
 +			     sizeof(u64),
 +			     qcow->header.l1_table_offset +
 +			     l1_index * sizeof(u64));
@@ -387,29 +375,30 @@ index 0000000..a876057
 +		temp = cpu_to_be64(l2pos);
 +		qcow->file_size += L2_SIZE(qcow->l2_entries);
 +
-+		ret = loop_write_kbuf(qcow->lo, qcow->lo_file, &temp,
++		ret = loop_write_kbuf(lo, qcow->lo_file, &temp,
 +				      sizeof(u64),
 +				      qcow->header.l1_table_offset +
 +				      l1_index * sizeof(u64));
 +		if (ret)
 +			return ret;
 +
-+		ret = loop_write_zero(qcow->lo, qcow->lo_file,
++		ret = loop_write_zero(lo, qcow->lo_file,
 +				      L2_SIZE(qcow->l2_entries),
 +				      l2pos);
 +		if (ret)
 +			return ret;
-+	} else if ((l2pos + L2_SIZE(qcow->l2_entries)) >
-+		    qcow->file_size) {
++	} else if (l2pos >= qcow->file_size ||
++		   (l2pos + L2_SIZE(qcow->l2_entries)) >
++		   qcow->file_size) {
 +		printk(KERN_ERR "%s: corrupt L1 table\n",
-+		       QCOW_DNAME(qcow));
++		       DNAME(lo));
 +		return -EINVAL;
 +	}
 +
 +	l2_index = pos >> qcow->header.cluster_bits &
 +		B2M(qcow->header.l2_bits);
 +
-+	ret = loop_read_kbuf(qcow->lo, qcow->lo_file, &ffpos,
++	ret = loop_read_kbuf(lo, qcow->lo_file, &ffpos,
 +			     sizeof(u64),
 +			     l2pos +
 +			     l2_index * sizeof(u64));
@@ -429,27 +418,41 @@ index 0000000..a876057
 +		ffpos = qcow->file_size;
 +		temp = cpu_to_be64(ffpos);
 +		qcow->file_size += qcow->cluster_size;
-+		ret = loop_write_kbuf(qcow->lo, qcow->lo_file, &temp,
++		ret = loop_write_kbuf(lo, qcow->lo_file, &temp,
 +				      sizeof(u64),
 +				      l2pos +
 +				      l2_index * sizeof(u64));
 +		if (ret)
 +			return ret;
 +
-+		ret = loop_write_zero(qcow->lo, qcow->lo_file,
++		ret = loop_write_zero(lo, qcow->lo_file,
 +				      qcow->cluster_size,
 +				      ffpos);
 +		if (ret)
-+                  return ret;
-+	} else if ((ffpos + qcow->cluster_size) >
-+		   qcow->file_size) {
-+		printk(KERN_ERR "%s: corrupt L2 table\n",
-+		       QCOW_DNAME(qcow));
-+		return -EINVAL;
++			return ret;
++	} else {
++
++		/*
++		 * With the current shared sparse logic in looputil,
++		 * no way to do something like reading compressed
++		 * blocks.
++		*/
++		if (ffpos & ((loff_t) 1 << 63)) {
++			printk(KERN_ERR "%s: compression unsupported\n",
++			       DNAME(lo));
++			return -EINVAL;
++		}
++
++		if (ffpos >= qcow->file_size ||
++		    (ffpos + qcow->cluster_size) >
++		    qcow->file_size) {
++			printk(KERN_ERR "%s: corrupt L2 table\n",
++			       DNAME(lo));
++			return -EINVAL;
++		}
 +	}
 +
-+	ffpos += pos & B2M(qcow->header.cluster_bits);
-+	*fpos = ffpos;
++	*fpos = ffpos + (pos & B2M(qcow->header.cluster_bits));
 +	return 0;
 +}
 +
@@ -457,21 +460,8 @@ index 0000000..a876057
 +		    struct lo_file *lo_file,
 +		    struct bio *bio)
 +{
-+	int ret;
-+	struct qcow *qcow = lo_file->parser_priv;
-+
-+	if (bio_rw(bio) != WRITE)
-+		down_read(&qcow->sem);
-+	else
-+		down_write(&qcow->sem);
-+
-+	ret = loop_sparse_io(lo, lo_file, bio, qcow_sparse_to);
-+	if (bio_rw(bio) != WRITE)
-+		up_read(&qcow->sem);
-+	else
-+		up_write(&qcow->sem);
-+
-+	return ret;
++	return loop_sparse_io(lo, lo_file, bio, qcow_sparse_to)
++		? -EIO : 0;
 +}
 +
 +static struct loop_parser qcow_parser =

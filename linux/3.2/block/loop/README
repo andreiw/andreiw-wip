@@ -88,10 +88,11 @@ QCOW parser to-do:
 1) Support RW on v1 (done!)
 2) Support v2.
 3) Support COW disks (done!)
+4) Support compressed sectors (requires changes to generic sparse code).
 
 VMDK parser to do:
-1) Support RO on hosted extents.
-2) Support RW on hosted extents.
+1) Support RO on hosted extents (done!)
+2) Support RW on hosted extents (done!)
 3) Support ESX extents.
 4) Support COW.
 

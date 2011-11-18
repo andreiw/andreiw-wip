@@ -1,4 +1,4 @@
-From 2dbd15970c7fae923d27ffbfc8601b1be53ce42b Mon Sep 17 00:00:00 2001
+From 7254972c29d7893e9dd400f1ccf9df4b4251ef33 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:36:19 -0400
 Subject: [PATCH 1/5] Loop: Loop parser support.
@@ -8,12 +8,12 @@ disk image formats, such as VMDK, VHD and QCOW.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- drivers/block/loop.c |  672 ++++++++++++++++++++++++++++++++++----------------
- include/linux/loop.h |   71 +++++-
- 2 files changed, 523 insertions(+), 220 deletions(-)
+ drivers/block/loop.c |  676 +++++++++++++++++++++++++++++++++----------------
+ include/linux/loop.h |   73 +++++-
+ 2 files changed, 515 insertions(+), 234 deletions(-)
 
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
-index 4720c7a..d58ff76 100644
+index 4720c7a..53488a3 100644
 --- a/drivers/block/loop.c
 +++ b/drivers/block/loop.c
 @@ -80,9 +80,12 @@
@@ -167,7 +167,7 @@ index 4720c7a..d58ff76 100644
 +
  	do_lo_send = do_lo_send_aops;
 -	if (!(lo->lo_flags & LO_FLAGS_USE_AOPS)) {
-+	if (!(lo_file->flags & LO_FILE_FLAGS_USE_AOPS)) {
++	if (!(lo_file->flags & LO_FILE_USE_AOPS)) {
  		do_lo_send = do_lo_send_direct_write;
 -		if (lo->transfer != transfer_none) {
 +		if (transfer != transfer_none) {
@@ -265,7 +265,7 @@ index 4720c7a..d58ff76 100644
  		if (ret < 0)
  			break;
  		pos += bvec->bv_len;
-@@ -466,33 +462,49 @@ lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
+@@ -466,33 +462,48 @@ lo_receive(struct loop_device *lo, struct bio *bio, int bsize, loff_t pos)
  	return ret;
  }
  
@@ -277,24 +277,24 @@ index 4720c7a..d58ff76 100644
 -	loff_t pos;
  	int ret;
 +	struct file *file = lo_file->file;
-+
+ 
+-	pos = ((loff_t) bio->bi_sector << 9) + lo->lo_offset;
 +	ret = vfs_fsync(file, 0);
 +	if (unlikely(ret && ret != -EINVAL))
 +		ret = -EIO;
  
--	pos = ((loff_t) bio->bi_sector << 9) + lo->lo_offset;
+-	if (bio_rw(bio) == WRITE) {
+-		struct file *file = lo->lo_backing_file;
 +	return ret;
 +}
-+
+ 
 +EXPORT_SYMBOL(loop_sync);
 +
 +static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
 +{
 +	int ret;
- 
- 	if (bio_rw(bio) == WRITE) {
--		struct file *file = lo->lo_backing_file;
- 
++
++	if (bio_rw(bio) == WRITE) {
  		if (bio->bi_rw & REQ_FLUSH) {
 -			ret = vfs_fsync(file, 0);
 +			ret = lo->lo_file->parser->sync(lo, lo->lo_file);
@@ -324,7 +324,18 @@ index 4720c7a..d58ff76 100644
  
  out:
  	return ret;
-@@ -541,7 +553,7 @@ out:
+@@ -527,7 +538,9 @@ static int loop_make_request(struct request_queue *q, struct bio *old_bio)
+ 	spin_lock_irq(&lo->lo_lock);
+ 	if (lo->lo_state != Lo_bound)
+ 		goto out;
+-	if (unlikely(rw == WRITE && (lo->lo_flags & LO_FLAGS_READ_ONLY)))
++	if (unlikely(rw == WRITE &&
++		     (lo->lo_file->flags &
++		      LO_FILE_READ_ONLY)))
+ 		goto out;
+ 	loop_add_bio(lo, old_bio);
+ 	wake_up(&lo->lo_event);
+@@ -541,7 +554,7 @@ out:
  }
  
  struct switch_request {
@@ -333,7 +344,7 @@ index 4720c7a..d58ff76 100644
  	struct completion wait;
  };
  
-@@ -601,14 +613,14 @@ static int loop_thread(void *data)
+@@ -601,14 +614,14 @@ static int loop_thread(void *data)
   * First it needs to flush existing IO, it does this by sending a magic
   * BIO down the pipe. The completion of this BIO does the actual switch.
   */
@@ -350,7 +361,24 @@ index 4720c7a..d58ff76 100644
  	bio->bi_private = &w;
  	bio->bi_bdev = NULL;
  	loop_make_request(lo->lo_queue, bio);
-@@ -633,90 +645,263 @@ static int loop_flush(struct loop_device *lo)
+@@ -628,95 +641,270 @@ static int loop_flush(struct loop_device *lo)
+ 	return loop_switch(lo, NULL);
+ }
+ 
++static void loop_update_ro(struct loop_device *lo)
++{
++	set_device_ro(lo->lo_device, (lo->lo_file->flags &
++				      LO_FILE_READ_ONLY) != 0);
++
++	if (!(lo->lo_file->flags & LO_FILE_READ_ONLY) &&
++	    lo->lo_file->file->f_op->fsync)
++		blk_queue_flush(lo->lo_queue, REQ_FLUSH | REQ_FUA);
++	else
++		blk_queue_flush(lo->lo_queue, 0);
++}
++
+ /*
+  * Do the actual switch; called from the BIO completion routine
   */
  static void do_loop_switch(struct loop_device *lo, struct switch_request *p)
  {
@@ -367,14 +395,7 @@ index 4720c7a..d58ff76 100644
 +	 * The switch could have been from a RO parent to RW COW
 +	 * disk, so update RO policy during switch.
 +	 */
-+	set_device_ro(lo->lo_device,
-+		      (lo->lo_flags & LO_FLAGS_READ_ONLY) != 0);
-+
-+	if (!(lo->lo_flags & LO_FLAGS_READ_ONLY) &&
-+	    lo->lo_file->file->f_op->fsync)
-+		blk_queue_flush(lo->lo_queue, REQ_FLUSH | REQ_FUA);
-+	else
-+		blk_queue_flush(lo->lo_queue, 0);
++	loop_update_ro(lo);
 +out:
 +	complete(&p->wait);
 +}
@@ -430,7 +451,7 @@ index 4720c7a..d58ff76 100644
 +{
  	struct address_space *mapping;
 +	struct lo_file *lo_file;
-+	struct file *file;
++	struct file *file, *f;
 +	unsigned blocksize;
 +	struct inode *inode;
 +	int lo_file_flags = 0;
@@ -445,29 +466,20 @@ index 4720c7a..d58ff76 100644
 -		goto out;
 +		return ERR_PTR(-EBADF);
 +
-+	/*
-+	 * Avoid nesting. We do not want multiple
-+	 * lo_files and parsers attaching to the same file,
-+	 * from a data coherency point of view. This
-+	 * also means you do not have to check for recursive
-+	 * relationships, as a loop device will always bind
-+	 * to the lo_file backing an existing loop device.
-+	 */
-+	if (is_loop_device(file)) {
++	/* Avoid recursion */
++	f = file;
++	while (is_loop_device(f)) {
 +		struct loop_device *l;
 +
-+		l = file->f_mapping->host->i_bdev->bd_disk->private_data;
-+		spin_lock_irq(&l->lo_lock);
++		if (f->f_mapping->host->i_rdev ==
++		    file->f_mapping->host->i_rdev)
++			goto out;
++		l = f->f_mapping->host->i_bdev->bd_disk->private_data;
 +		if (l->lo_state == Lo_unbound) {
-+			spin_unlock_irq(&l->lo_lock);
 +			error = -EINVAL;
 +			goto out;
 +		}
-+		lo_file = l->lo_file;
-+		atomic_inc(&lo_file->ref);
-+		spin_unlock_irq(&l->lo_lock);
-+		fput(file);
-+		return lo_file;
++		f = l->lo_file->file;
 +	}
  
  	mapping = file->f_mapping;
@@ -486,7 +498,15 @@ index 4720c7a..d58ff76 100644
 +	}
 +
 +	if (mapping->a_ops->write_begin)
-+		lo_file_flags |= LO_FILE_FLAGS_USE_AOPS;
++		lo_file_flags |= LO_FILE_USE_AOPS;
++
++	if (!(file->f_mode & FMODE_WRITE)){
++		lo_file_flags |= LO_FILE_READ_ONLY;
++	}
++
++	if (!(lo_file_flags & LO_FILE_USE_AOPS) &&
++	    !file->f_op->write)
++		lo_file_flags |= LO_FILE_READ_ONLY;
 +
 +	blocksize = S_ISBLK(inode->i_mode) ?
 +		inode->i_bdev->bd_block_size : PAGE_SIZE;
@@ -551,55 +571,55 @@ index 4720c7a..d58ff76 100644
 + *    new backing store is the same size and type as the old
 + *    backing store.
 + * b) To mount COW/differencing disks for file formats supporting
-+ *    such. The parent image needs to be set_fd'd first, and the
-+ *    COW image can be switched to.
++ *    such.
   */
- static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
+-static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
++static int loop_change_fd(struct loop_device *lo,
++			  struct block_device *bdev,
  			  unsigned int arg)
  {
 -	struct file	*file, *old_file;
 -	struct inode	*inode;
 -	int		error;
-+	struct lo_file *lo_file, *old_lo_file;
-+	int error = 0;
- 
+-
 -	error = -ENXIO;
 -	if (lo->lo_state != Lo_bound)
-+	if (lo->lo_state != Lo_bound) {
-+		error = -ENXIO;
- 		goto out;
-+	}
+-		goto out;
++	struct lo_file *lo_file, *old_lo_file;
++	int error = 0;
  
 -	/* the loop device has to be read-only */
 -	error = -EINVAL;
 -	if (!(lo->lo_flags & LO_FLAGS_READ_ONLY))
-+	old_lo_file = lo->lo_file;
-+	lo_file = loop_lo_file_alloc(bdev, arg);
-+	if (IS_ERR(lo_file)) {
-+		error = PTR_ERR(lo_file);
++	if (lo->lo_state != Lo_bound) {
++		printk(KERN_ERR "%s: cannot change on unbound loop\n",
++		       lo->lo_disk->disk_name);
++		error = -ENXIO;
  		goto out;
 +	}
  
 -	error = -EBADF;
 -	file = fget(arg);
 -	if (!file)
-+	/*
-+	 * Can't be trying to change to fd of a loop device,
-+	 * because it would imply we're switching to share
-+	 * some other backing store, which neither fits
-+	 * in with the COW role nor with the HA role of
-+	 * loop_change_fd.
-+	 */
-+	if (lo_file->parser) {
-+		error = -EINVAL;
- 		goto out;
-+	}
+-		goto out;
++	old_lo_file = lo->lo_file;
  
 -	inode = file->f_mapping->host;
 -	old_file = lo->lo_backing_file;
--
++	/* The current lo_file has to be read-only */
++	if (!(old_lo_file->flags & LO_FILE_READ_ONLY)) {
++		printk(KERN_ERR "%s: cannot change from non-RO loop\n",
++		       lo->lo_disk->disk_name);
++		return -EINVAL;
++	}
+ 
 -	error = -EINVAL;
--
++	lo_file = loop_lo_file_alloc(bdev, arg);
++	if (IS_ERR(lo_file)) {
++		error = PTR_ERR(lo_file);
++		goto out;
++	}
+ 
 -	if (!S_ISREG(inode->i_mode) && !S_ISBLK(inode->i_mode))
 -		goto out_putf;
 +	/*
@@ -630,7 +650,7 @@ index 4720c7a..d58ff76 100644
  
 -	/* and ... switch */
 -	error = loop_switch(lo, file);
-+	/* Perform flush + switch. */
++	/* Perform switch. */
 +	error = loop_switch(lo, lo_file);
  	if (error)
 -		goto out_putf;
@@ -666,7 +686,7 @@ index 4720c7a..d58ff76 100644
  /* loop sysfs attributes */
  
  static ssize_t loop_attr_show(struct device *dev, char *page,
-@@ -744,8 +929,8 @@ static ssize_t loop_attr_backing_file_show(struct loop_device *lo, char *buf)
+@@ -744,8 +932,8 @@ static ssize_t loop_attr_backing_file_show(struct loop_device *lo, char *buf)
  	char *p = NULL;
  
  	spin_lock_irq(&lo->lo_lock);
@@ -677,7 +697,7 @@ index 4720c7a..d58ff76 100644
  	spin_unlock_irq(&lo->lo_lock);
  
  	if (IS_ERR_OR_NULL(p))
-@@ -810,87 +995,63 @@ static void loop_sysfs_exit(struct loop_device *lo)
+@@ -810,87 +998,46 @@ static void loop_sysfs_exit(struct loop_device *lo)
  static int loop_set_fd(struct loop_device *lo, fmode_t mode,
  		       struct block_device *bdev, unsigned int arg)
  {
@@ -722,6 +742,13 @@ index 4720c7a..d58ff76 100644
  
 -	mapping = file->f_mapping;
 -	inode = mapping->host;
+-
+-	if (!(file->f_mode & FMODE_WRITE))
+-		lo_flags |= LO_FLAGS_READ_ONLY;
+-
+-	error = -EINVAL;
+-	if (S_ISREG(inode->i_mode) || S_ISBLK(inode->i_mode)) {
+-		const struct address_space_operations *aops = mapping->a_ops;
 +	lo->lo_file = loop_lo_file_alloc(bdev, arg);
 +	if (IS_ERR(lo->lo_file)) {
 +		error = PTR_ERR(lo->lo_file);
@@ -729,64 +756,47 @@ index 4720c7a..d58ff76 100644
 +		goto out;
 +	}
  
--	if (!(file->f_mode & FMODE_WRITE))
--		lo_flags |= LO_FLAGS_READ_ONLY;
-+	if (!(lo->lo_file->file->f_mode & FMODE_WRITE))
-+		lo->lo_flags |= LO_FLAGS_READ_ONLY;
- 
--	error = -EINVAL;
--	if (S_ISREG(inode->i_mode) || S_ISBLK(inode->i_mode)) {
--		const struct address_space_operations *aops = mapping->a_ops;
-+	if (!(lo->lo_file->flags & LO_FILE_FLAGS_USE_AOPS) &&
-+	    !lo->lo_file->file->f_op->write)
-+		lo->lo_flags |= LO_FLAGS_READ_ONLY;
- 
 -		if (aops->write_begin)
 -			lo_flags |= LO_FLAGS_USE_AOPS;
 -		if (!(lo_flags & LO_FLAGS_USE_AOPS) && !file->f_op->write)
 -			lo_flags |= LO_FLAGS_READ_ONLY;
-+	lo->transfer = transfer_none;
-+	lo->lo_sizelimit = 0;
++	if (!(mode & FMODE_WRITE))
++		lo->lo_file->flags |= LO_FILE_READ_ONLY;
  
 -		lo_blocksize = S_ISBLK(inode->i_mode) ?
 -			inode->i_bdev->bd_block_size : PAGE_SIZE;
-+	if (lo->lo_file->parser) {
++	lo->transfer = transfer_none;
++	lo->lo_sizelimit = 0;
  
 -		error = 0;
-+		/*
-+		 * We're sharing an already in-use
-+		 * lo-file, and this implies no
-+		 * write access.
-+		 */
-+		lo->lo_flags |= LO_FLAGS_READ_ONLY;
- 	} else {
+-	} else {
 -		goto out_putf;
-+		error = loop_match_parser(lo, lo->lo_file);
-+		if (error)
-+			goto out_putlf;
- 	}
--
+-	}
++	error = loop_match_parser(lo, lo->lo_file);
++	if (error)
++		goto out_putlf;
+ 
 -	size = get_loop_size(lo, file);
 +	size = lo->lo_file->parser->size(lo, lo->lo_file);
 +	printk(KERN_INFO "%s: %s %lld bytes%s\n",
 +	       lo->lo_disk->disk_name,
 +	       lo->lo_file->parser->name,
 +	       size << 9,
-+	       (lo->lo_flags & LO_FLAGS_READ_ONLY) ?
++	       (lo->lo_file->flags & LO_FILE_READ_ONLY) ?
 +	       " (RO)" : "");
  
- 	if ((loff_t)(sector_t)size != size) {
+-	if ((loff_t)(sector_t)size != size) {
++	if ((loff_t)(sector_t) size != size) {
  		error = -EFBIG;
 -		goto out_putf;
 +		goto out_putlf;
  	}
  
- 	if (!(mode & FMODE_WRITE))
+-	if (!(mode & FMODE_WRITE))
 -		lo_flags |= LO_FLAGS_READ_ONLY;
 -
 -	set_device_ro(bdev, (lo_flags & LO_FLAGS_READ_ONLY) != 0);
-+		lo->lo_flags |= LO_FLAGS_READ_ONLY;
- 
+-
 -	lo->lo_blocksize = lo_blocksize;
  	lo->lo_device = bdev;
 -	lo->lo_flags = lo_flags;
@@ -797,32 +807,31 @@ index 4720c7a..d58ff76 100644
 -	lo->old_gfp_mask = mapping_gfp_mask(mapping);
 -	mapping_set_gfp_mask(mapping, lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS));
 -
-+	set_device_ro(bdev, (lo->lo_flags & LO_FLAGS_READ_ONLY) != 0);
  	bio_list_init(&lo->lo_bio_list);
  
  	/*
-@@ -900,8 +1061,9 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+@@ -899,17 +1046,14 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	 */
  	blk_queue_make_request(lo->lo_queue, loop_make_request);
  	lo->lo_queue->queuedata = lo;
- 
+-
 -	if (!(lo_flags & LO_FLAGS_READ_ONLY) && file->f_op->fsync)
 -		blk_queue_flush(lo->lo_queue, REQ_FLUSH);
-+	if (!(lo->lo_flags & LO_FLAGS_READ_ONLY) &&
-+	    lo->lo_file->file->f_op->fsync)
-+		blk_queue_flush(lo->lo_queue, REQ_FLUSH | REQ_FUA);
- 
+-
++	loop_update_ro(lo);
  	set_capacity(lo->lo_disk, size);
  	bd_set_size(bdev, size << 9);
-@@ -909,7 +1071,7 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
+ 	loop_sysfs_init(lo);
++
  	/* let user-space know about the new size */
  	kobject_uevent(&disk_to_dev(bdev->bd_disk)->kobj, KOBJ_CHANGE);
- 
+-
 -	set_blocksize(bdev, lo_blocksize);
 +	set_blocksize(bdev, lo->lo_file->blocksize);
  
  	lo->lo_thread = kthread_create(loop_thread, lo, "loop%d",
  						lo->lo_number);
-@@ -927,19 +1089,15 @@ out_clr:
+@@ -927,19 +1071,15 @@ out_clr:
  	loop_sysfs_exit(lo);
  	lo->lo_thread = NULL;
  	lo->lo_device = NULL;
@@ -846,7 +855,7 @@ index 4720c7a..d58ff76 100644
  	return error;
  }
  
-@@ -982,8 +1140,7 @@ loop_init_xfer(struct loop_device *lo, struct loop_func_table *xfer,
+@@ -982,8 +1122,7 @@ loop_init_xfer(struct loop_device *lo, struct loop_func_table *xfer,
  
  static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
  {
@@ -856,7 +865,7 @@ index 4720c7a..d58ff76 100644
  
  	if (lo->lo_state != Lo_bound)
  		return -ENXIO;
-@@ -991,7 +1148,7 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+@@ -991,7 +1130,7 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
  	if (lo->lo_refcnt > 1)	/* we needed one fd for the ioctl */
  		return -EBUSY;
  
@@ -865,7 +874,7 @@ index 4720c7a..d58ff76 100644
  		return -EINVAL;
  
  	spin_lock_irq(&lo->lo_lock);
-@@ -1001,7 +1158,8 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+@@ -1001,7 +1140,8 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
  	kthread_stop(lo->lo_thread);
  
  	spin_lock_irq(&lo->lo_lock);
@@ -875,7 +884,7 @@ index 4720c7a..d58ff76 100644
  	spin_unlock_irq(&lo->lo_lock);
  
  	loop_release_xfer(lo);
-@@ -1026,10 +1184,8 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+@@ -1026,10 +1166,8 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
  		/* let user-space know about this change */
  		kobject_uevent(&disk_to_dev(bdev->bd_disk)->kobj, KOBJ_CHANGE);
  	}
@@ -887,7 +896,7 @@ index 4720c7a..d58ff76 100644
  	if (max_part > 0 && bdev)
  		ioctl_by_bdev(bdev, BLKRRPART, 0);
  	mutex_unlock(&lo->lo_ctl_mutex);
-@@ -1039,7 +1195,7 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+@@ -1039,7 +1177,7 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
  	 * lock dependency possibility warning as fput can take
  	 * bd_mutex which is usually taken before lo_ctl_mutex.
  	 */
@@ -896,7 +905,7 @@ index 4720c7a..d58ff76 100644
  	return 0;
  }
  
-@@ -1115,13 +1271,13 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
+@@ -1115,13 +1253,13 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
  static int
  loop_get_status(struct loop_device *lo, struct loop_info64 *info)
  {
@@ -912,7 +921,7 @@ index 4720c7a..d58ff76 100644
  	if (error)
  		return error;
  	memset(info, 0, sizeof(*info));
-@@ -1551,6 +1707,34 @@ MODULE_PARM_DESC(max_part, "Maximum number of partitions per loop device");
+@@ -1551,6 +1689,34 @@ MODULE_PARM_DESC(max_part, "Maximum number of partitions per loop device");
  MODULE_LICENSE("GPL");
  MODULE_ALIAS_BLOCKDEV_MAJOR(LOOP_MAJOR);
  
@@ -947,7 +956,7 @@ index 4720c7a..d58ff76 100644
  int loop_register_transfer(struct loop_func_table *funcs)
  {
  	unsigned int n = funcs->number;
-@@ -1788,6 +1972,78 @@ static struct miscdevice loop_misc = {
+@@ -1788,6 +1954,74 @@ static struct miscdevice loop_misc = {
  MODULE_ALIAS_MISCDEV(LOOP_CTRL_MINOR);
  MODULE_ALIAS("devname:loop-control");
  
@@ -996,10 +1005,6 @@ index 4720c7a..d58ff76 100644
 +		      struct lo_file *old_lo_file,
 +		      struct lo_file *new_lo_file)
 +{
-+	/* the loop device has to be read-only */
-+	if (!(lo->lo_flags & LO_FLAGS_READ_ONLY))
-+		return -EINVAL;
-+
 +	/*
 +	 * (File) size of the new backing store needs to be the same.
 +	 * This is an extremely basic check.
@@ -1027,10 +1032,10 @@ index 4720c7a..d58ff76 100644
  {
  	int i, nr;
 diff --git a/include/linux/loop.h b/include/linux/loop.h
-index 683d698..dcaeadf 100644
+index 683d698..24923d8 100644
 --- a/include/linux/loop.h
 +++ b/include/linux/loop.h
-@@ -28,12 +28,34 @@ enum {
+@@ -28,12 +28,35 @@ enum {
  
  struct loop_func_table;
  
@@ -1038,7 +1043,8 @@ index 683d698..dcaeadf 100644
 + * Loop file flags
 + */
 +enum {
-+	LO_FILE_FLAGS_USE_AOPS	= 1,
++	LO_FILE_USE_AOPS	= 1,
++	LO_FILE_READ_ONLY	= 2,
 +};
 +
 +struct lo_file {
@@ -1065,7 +1071,7 @@ index 683d698..dcaeadf 100644
  	int		(*transfer)(struct loop_device *, int cmd,
  				    struct page *raw_page, unsigned raw_off,
  				    struct page *loop_page, unsigned loop_off,
-@@ -45,15 +67,11 @@ struct loop_device {
+@@ -45,15 +68,11 @@ struct loop_device {
  	struct loop_func_table *lo_encryption;
  	__u32           lo_init[2];
  	uid_t		lo_key_owner;	/* Who set the key */
@@ -1084,7 +1090,7 @@ index 683d698..dcaeadf 100644
  
  	spinlock_t		lo_lock;
  	struct bio_list		lo_bio_list;
-@@ -64,6 +82,7 @@ struct loop_device {
+@@ -64,6 +83,7 @@ struct loop_device {
  
  	struct request_queue	*lo_queue;
  	struct gendisk		*lo_disk;
@@ -1092,10 +1098,11 @@ index 683d698..dcaeadf 100644
  };
  
  #endif /* __KERNEL__ */
-@@ -73,7 +92,6 @@ struct loop_device {
+@@ -72,8 +92,6 @@ struct loop_device {
+  * Loop flags
   */
  enum {
- 	LO_FLAGS_READ_ONLY	= 1,
+-	LO_FLAGS_READ_ONLY	= 1,
 -	LO_FLAGS_USE_AOPS	= 2,
  	LO_FLAGS_AUTOCLEAR	= 4,
  };

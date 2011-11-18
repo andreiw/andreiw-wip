@@ -1,4 +1,4 @@
-From ba437be31a5a44c9abd438c70a312212041dbf74 Mon Sep 17 00:00:00 2001
+From 46ac91f789900ea7046f22f62addaff3d3bb49cc Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Thu, 20 Oct 2011 23:57:05 -0400
 Subject: [PATCH 5/5] Loop: VMDK parser implementation.
@@ -9,10 +9,10 @@ the hosted support first (since qemu-img generates those).
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- drivers/block/Kconfig    |    8 ++
+ drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/vmdkloop.c |  201 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 210 insertions(+), 0 deletions(-)
+ drivers/block/vmdkloop.c |  476 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 485 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vmdkloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -48,10 +48,10 @@ index 619635c..d1314ee 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vmdkloop.c b/drivers/block/vmdkloop.c
 new file mode 100644
-index 0000000..5d14a46
+index 0000000..ad55ce4
 --- /dev/null
 +++ b/drivers/block/vmdkloop.c
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,476 @@
 +/*
 +   Linux loop VMDK support.
 +
@@ -82,11 +82,13 @@ index 0000000..5d14a46
 +MODULE_DESCRIPTION("loop VMDK parser");
 +MODULE_AUTHOR("Andrei Warkentin <andreiw@vmware.com>");
 +
-+#define VMDK_DNAME(vmdk)	((vmdk)->lo->lo_disk->disk_name)
++#define DNAME(lo)		((lo)->lo_disk->disk_name)
++#define GD_SIZE(entries)	((entries) * sizeof(u32))
++#define GT_SIZE(entries)	((entries) * sizeof(u32))
 +#define SEC_SHIFT		(9)
 +#define SEC_SZ			(1 << SEC_SHIFT)
 +
-+#define COW_MAGIC			(*(u32 *) "COWD")
++#define COW_MAGIC			(*(u32 *) "DWOC")
 +#define COW_VERSION			(1)
 +#define COW_FLAGS			(3)
 +#define COWDISK_MAX_PARENT_FILELEN	(1024)
@@ -123,7 +125,7 @@ index 0000000..5d14a46
 +	u8 padding[396];
 +};
 +
-+#define SPARSE_MAGIC		(*(u32 *) "VMDK")
++#define SPARSE_MAGIC		(*(u32 *) "KDMV")
 +#define SPARSE_VERSION		(1)
 +#define SPARSE_FLAG_ENDL	(1 << 0)
 +#define SPARSE_FLAG_RGD		(1 << 1)
@@ -156,25 +158,173 @@ index 0000000..5d14a46
 +
 +struct vmdk
 +{
-+	struct loop_device *lo;
-+	struct lo_file     *lo_file;
++	struct lo_file *lo_file;
 +	union {
-+		struct cow_header cow;
-+		struct sparse_header sparse;
++		struct cow_header esx;
++		struct sparse_header hosted;
 +	};
 +	loff_t file_size;
-+	loff_t size;
++	loff_t sectors;
 +
 +	/* Parsed and created from header. */
-+	u64 gd_entries;
-+	u64 gt_entries;
 +	loff_t grain_size;
-+	unsigned int access_size;
++	loff_t gd_offset;
++	loff_t rgd_offset;
 +
++	u32 gt_entries;
++	u64 gd_entries;
++#define VMDK_HOSTED (1 << 0)
++#define VMDK_ESX    (1 << 1)
++	unsigned flags;
 +};
 +
-+static void vmdk_free(struct vmdk *vmdk)
++static int vmdk_verify_hosted(struct loop_device *lo,
++			      struct vmdk *vmdk)
 +{
++	u32 flags;
++	int ret = -EPERM;
++
++	if (le32_to_cpu(vmdk->hosted.version) != SPARSE_VERSION)
++		goto out;
++
++	flags = le32_to_cpu(vmdk->hosted.flags);
++	if (flags & SPARSE_FLAG_COMPRESS) {
++		printk(KERN_ERR "%s: Compressed hosted images unsupported\n",
++		       DNAME(lo));
++		goto out;
++	}
++
++	if (flags & SPARSE_FLAG_MARKERS) {
++		printk(KERN_ERR "%s: Streamed hosted images unsupported\n",
++		       DNAME(lo));
++		goto out;
++	}
++
++	if (flags & SPARSE_FLAG_ENDL) {
++		if (vmdk->hosted.single_endline != '\n')
++			goto out;
++		if (vmdk->hosted.non_endline != ' ')
++			goto out;
++		if (vmdk->hosted.double_endline1 != '\r')
++			goto out;
++		if (vmdk->hosted.double_endline2 != '\n')
++			goto out;
++	}
++
++	vmdk->grain_size = le64_to_cpu(vmdk->hosted.grain_size);
++	if (vmdk->grain_size <= 8 ||
++	    (vmdk->grain_size & (vmdk->grain_size - 1))) {
++		printk(KERN_ERR "%s: invalid grain size %llu sectors\n",
++		       DNAME(lo), vmdk->grain_size);
++		goto out;
++	}
++
++	vmdk->sectors = le64_to_cpu(vmdk->hosted.capacity);
++	if (vmdk->sectors % vmdk->grain_size != 0) {
++		printk(KERN_ERR "%s: bad capacity\n",
++		       DNAME(lo));
++		goto out;
++	}
++	
++	vmdk->grain_size <<= SEC_SHIFT;
++	vmdk->gt_entries = le32_to_cpu(vmdk->hosted.gtes);
++	vmdk->gd_entries = vmdk->sectors / (vmdk->grain_size * vmdk->gt_entries);
++	vmdk->gd_offset = le64_to_cpu(vmdk->hosted.gd_offset) << SEC_SHIFT;
++	if (vmdk->gd_offset >= vmdk->file_size ||
++	    vmdk->gd_offset + GD_SIZE(vmdk->gd_entries) > vmdk->file_size) {
++		printk(KERN_ERR "%s: bad grain directory\n",
++		       DNAME(lo));
++		goto out;
++	}
++
++	if (flags & SPARSE_FLAG_RGD) {
++		vmdk->rgd_offset = le64_to_cpu(vmdk->hosted.rgd_offset) << SEC_SHIFT;
++		if (vmdk->rgd_offset >= vmdk->file_size ||
++		    vmdk->rgd_offset + GD_SIZE(vmdk->gd_entries) > vmdk->file_size) {
++			printk(KERN_ERR "%s: bad redundant grain directory\n",
++			       DNAME(lo));
++			goto out;
++		}
++	}
++
++	if (le64_to_cpu(vmdk->hosted.overhead) > (vmdk->file_size >> SEC_SHIFT)) {
++		printk(KERN_ERR "%s: bad metadata\n",
++		       DNAME(lo));
++		goto out;
++	}
++
++	if (vmdk->hosted.unclean_shutdown) {
++		printk(KERN_ERR "%s: will not mount unclean VMDK, please check\n",
++		       DNAME(lo));
++		goto out;
++	}
++
++	if (!(vmdk->lo_file->flags & LO_FILE_READ_ONLY)) {
++		vmdk->hosted.unclean_shutdown = 1;
++		ret = loop_write_kbuf(lo, vmdk->lo_file, &vmdk->hosted,
++				      sizeof(vmdk->hosted), 0);
++		if (ret) {
++			printk(KERN_ERR "%s: I/O error mounting VMDK\n", DNAME(lo));
++			goto out;
++		}
++
++		ret = loop_sync(lo, vmdk->lo_file);
++		if (ret) {
++			printk(KERN_ERR "%s: sync error mounting VMDK\n", DNAME(lo));
++			goto out;
++		}
++	}
++
++	vmdk->flags |= VMDK_HOSTED;
++	ret = 0;
++out:
++	return ret;
++}
++
++static int vmdk_verify_esx(struct loop_device *lo,
++			   struct vmdk *vmdk)
++{
++	printk(KERN_ERR "%s: ESX images unsupported\n",
++	       DNAME(lo));
++	return -EPERM;
++}
++
++static struct vmdk *vmdk_parse(struct loop_device *lo,
++			       struct lo_file *lo_file)
++{
++	int ret;
++	struct vmdk *vmdk;
++
++	vmdk = kzalloc(sizeof(struct vmdk), GFP_KERNEL);
++	vmdk->lo_file = lo_file;
++	vmdk->file_size = i_size_read(lo_file->file->f_mapping->host);
++	ret = loop_read_kbuf(lo, lo_file, &vmdk->hosted,
++			     sizeof(vmdk->hosted),
++			     0);
++	if (ret)
++		goto out;
++
++	if (vmdk->hosted.magic == SPARSE_MAGIC) {
++		ret = vmdk_verify_hosted(lo, vmdk);
++		goto out;
++	}
++
++	ret = loop_read_kbuf(lo, lo_file, &vmdk->esx,
++			     sizeof(vmdk->esx),
++			     0);
++	if (ret)
++		goto out;
++
++	if (vmdk->esx.magic_number == COW_MAGIC)
++		ret = vmdk_verify_esx(lo, vmdk);
++	else
++		ret = -EINVAL;
++out:
++	if (ret) {
++		kfree(vmdk);
++		return ERR_PTR(ret);
++	}
++	return vmdk;
 +}
 +
 +static int vmdk_change(struct loop_device *lo,
@@ -186,20 +336,44 @@ index 0000000..5d14a46
 +
 +static int vmdk_init(struct loop_device *lo, struct lo_file *lo_file)
 +{
-+	return -EIO;
++	struct vmdk *vmdk = vmdk_parse(lo, lo_file);
++	if (IS_ERR(vmdk))
++		return PTR_ERR(vmdk);
++
++	lo_file->parser_priv = vmdk;
++	return 0;
 +}
 +
 +static void vmdk_release(struct loop_device *lo, struct lo_file *lo_file)
 +{
++	int ret;
 +	struct vmdk *vmdk = lo_file->parser_priv;
++
++	if (vmdk->flags & VMDK_HOSTED &&
++	    vmdk->hosted.unclean_shutdown) {
++		vmdk->hosted.unclean_shutdown = 0;
++		ret = loop_write_kbuf(lo, vmdk->lo_file, &vmdk->hosted,
++				      sizeof(vmdk->hosted), 0);
++		if (ret) {
++			printk(KERN_ERR "%s: I/O error closing VMDK\n", DNAME(lo));
++			goto out;
++		}
++
++		ret = loop_sync(lo, vmdk->lo_file);
++		if (ret) {
++			printk(KERN_ERR "%s: sync error closing VMDK\n", DNAME(lo));
++			goto out;
++		}
++	}
++out:
++	kfree(vmdk);
 +	lo_file->parser_priv = NULL;
-+	vmdk_free(vmdk);
 +}
 +
 +static loff_t vmdk_size(struct loop_device *lo, struct lo_file *lo_file)
 +{
 +	struct vmdk *vmdk = lo_file->parser_priv;
-+	return vmdk->size >> SEC_SHIFT;
++	return vmdk->sectors;
 +}
 +
 +static int vmdk_sync(struct loop_device *lo, struct lo_file *lo_file)
@@ -207,20 +381,121 @@ index 0000000..5d14a46
 +	return loop_sync(lo, lo_file);
 +}
 +
-+static int vmdk_sparse_to(struct lo_file **lo_file,
++static int vmdk_sparse_to(struct loop_device *lo,
++			  struct lo_file **lo_file,
 +			  struct bio *bio,
 +			  loff_t pos,
 +			  unsigned int *len,
 +			  loff_t *fpos)
 +{
-+	return -EIO;
++	int ret;
++	loff_t gt_pos, temp, ffpos;
++	loff_t entry = pos;
++	struct vmdk *vmdk = (*lo_file)->parser_priv;
++	u32 offset = do_div(entry,
++			    vmdk->grain_size *
++			    vmdk->gt_entries);
++	*len = min(*len, (unsigned int) ((vmdk->grain_size -
++					  (pos & (vmdk->grain_size - 1)))));
++
++	ret = loop_read_kbuf(lo, vmdk->lo_file, &gt_pos,
++			     sizeof(u32),
++			     vmdk->gd_offset + entry *
++			     sizeof(u32));
++	if (ret)
++		return ret;
++
++	if ((u32) gt_pos == 0) {
++		if (bio_rw(bio) != WRITE)
++			return -ENOENT;
++
++		gt_pos = vmdk->file_size;
++		vmdk->file_size += GT_SIZE(vmdk->gt_entries);
++		temp = cpu_to_le32(gt_pos >> SEC_SHIFT);
++		ret = loop_write_kbuf(lo, vmdk->lo_file, &temp,
++				      sizeof(u32),
++				      vmdk->gd_offset + entry *
++				      sizeof(u32));
++		if (ret)
++			return ret;
++
++		if(vmdk->rgd_offset) {
++			ret = loop_write_kbuf(lo, vmdk->lo_file, &temp,
++					      sizeof(u32),
++					      vmdk->rgd_offset + entry *
++					      sizeof(u32));
++			if (ret)
++				return ret;
++		}
++
++		ret = loop_write_zero(lo, vmdk->lo_file,
++				      GT_SIZE(vmdk->gt_entries),
++				      gt_pos);
++		if (ret)
++			return ret;
++	} else {
++		gt_pos = le32_to_cpu(gt_pos) << SEC_SHIFT;
++		if (gt_pos >= vmdk->file_size ||
++		    (gt_pos + GT_SIZE(vmdk->gt_entries)) >
++		    vmdk->file_size) {
++			printk(KERN_ERR "%s: bad grain directory\n",
++			       DNAME(lo));
++			return -EINVAL;
++		}
++	}
++
++	entry = offset;
++	offset = do_div(entry,
++			vmdk->grain_size);
++
++	ret = loop_read_kbuf(lo, vmdk->lo_file, &ffpos,
++			     sizeof(u32),
++			     gt_pos + entry *
++			     sizeof(u32));
++	if (ret)
++		return ret;
++
++	if ((u32) ffpos == 0) {
++		if (bio_rw(bio) != WRITE)
++			return -ENOENT;
++
++		ffpos = round_up(vmdk->file_size, vmdk->grain_size);
++		temp = cpu_to_le32(ffpos >> SEC_SHIFT);
++		vmdk->file_size = ffpos + vmdk->grain_size;
++		ret = loop_write_kbuf(lo, vmdk->lo_file, &temp,
++				      sizeof(u32),
++				      gt_pos + entry *
++				      sizeof(u32));
++		if (ret)
++			return ret;
++
++		ret = loop_write_zero(lo, vmdk->lo_file,
++				      vmdk->grain_size,
++				      ffpos);
++		if (ret)
++			return ret;
++	} else {
++		ffpos = le32_to_cpu(ffpos) << SEC_SHIFT;
++
++		if (ffpos >= vmdk->file_size ||
++		    (ffpos + vmdk->grain_size) >
++		    vmdk->file_size) {
++			printk(KERN_ERR "%s: bad grain table\n",
++			       DNAME(lo));
++			return -EINVAL;
++		}
++	}
++
++	*fpos = ffpos + offset;
++	return 0;
 +}
 +
 +static int vmdk_bio(struct loop_device *lo,
 +		    struct lo_file *lo_file,
 +		    struct bio *bio)
 +{
-+	return loop_sparse_io(lo, lo_file, bio, vmdk_sparse_to);
++	return loop_sparse_io(lo, lo_file, bio, vmdk_sparse_to) ?
++		-EIO : 0;
 +}
 +
 +static struct loop_parser vmdk_parser =

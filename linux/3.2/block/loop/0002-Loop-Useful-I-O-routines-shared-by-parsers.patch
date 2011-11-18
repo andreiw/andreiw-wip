@@ -1,4 +1,4 @@
-From 47ba6a6944c85649f82c38a18a5b0544f1c80423 Mon Sep 17 00:00:00 2001
+From 8242e69f05f61e07886a6dcb8c66faa72252d387 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
 Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
@@ -12,9 +12,9 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    4 +
  drivers/block/Makefile   |    1 +
- drivers/block/looputil.c |  241 ++++++++++++++++++++++++++++++++++++++++++++++
- include/linux/looputil.h |   62 ++++++++++++
- 4 files changed, 308 insertions(+), 0 deletions(-)
+ drivers/block/looputil.c |  306 ++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/looputil.h |   63 ++++++++++
+ 4 files changed, 374 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/looputil.c
  create mode 100644 include/linux/looputil.h
 
@@ -47,10 +47,10 @@ index 76646e9..eb3df97 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/looputil.c b/drivers/block/looputil.c
 new file mode 100644
-index 0000000..6f9c2df
+index 0000000..7d6445e
 --- /dev/null
 +++ b/drivers/block/looputil.c
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,306 @@
 +/*
 +   Useful routines shared by loop parsers.
 +
@@ -90,6 +90,7 @@ index 0000000..6f9c2df
 +	 * use BIO. It might be nicer to redo everything in loop-ng
 +	 * to use sg's and convert BIO nvecs to sg inside
 +	 * do_bio_filebacked.
++	 *
 +	 */
 +	while (len) {
 +		bv_offset = ((uintptr_t) kbuf) & ~PAGE_MASK;
@@ -128,21 +129,37 @@ index 0000000..6f9c2df
 +		    size_t len,
 +		    loff_t pos)
 +{
-+	int ret;
-+	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
-+	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++	unsigned vecs;
++	size_t cur_len;
++	int ret = 0;
++	struct bio *bio = NULL;
 +
-+	/*
-+	 * We end up describing a bogus range, which is safe,
-+	 * since it is ignored by transfer_zero.
-+	 */
-+	ret = loop_kbuf_to_bio(bio, NULL, len);
-+	if (ret)
-+		goto out;
++	while (len) {
++		cur_len = min(len, (size_t) BIO_MAX_SIZE);
++		vecs = (cur_len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++		bio = bio_alloc(GFP_KERNEL, vecs);
++		BUG_ON(!bio);
 +
-+	ret = loop_send(lo, lo_file, bio, pos, transfer_zero);
++		/*
++		 * We end up describing a bogus range, which is safe,
++		 * since it is ignored by transfer_zero.
++		 */
++		ret = loop_kbuf_to_bio(bio, NULL, cur_len);
++		if (ret)
++			goto out;
++
++		ret = loop_send(lo, lo_file, bio, pos, transfer_zero);
++		if (ret)
++			goto out;
++
++		bio_put(bio);
++		len -= cur_len;
++		pos += cur_len;
++	}
++
 +out:
-+	bio_put(bio);
++	if (len)
++		bio_put(bio);
 +	return ret;
 +}
 +
@@ -152,17 +169,39 @@ index 0000000..6f9c2df
 +		    size_t len,
 +		    loff_t pos)
 +{
-+	int ret;
-+	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
-+	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++	unsigned vecs;
++	size_t cur_len;
++	int ret = 0;
++	u8 *buf = kbuf;
++	struct bio *bio = NULL;
 +
-+	ret = loop_kbuf_to_bio(bio, (u8 *) kbuf, len);
-+	if (ret)
-+		goto out;
++	while (len) {
++		cur_len = min(len, (size_t) BIO_MAX_SIZE);
++		vecs = (cur_len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++		bio = bio_alloc(GFP_KERNEL, vecs);
++		BUG_ON(!bio);
 +
-+	ret = loop_send(lo, lo_file, bio, pos, NULL);
++		/*
++		 * We end up describing a bogus range, which is safe,
++		 * since it is ignored by transfer_zero.
++		 */
++		ret = loop_kbuf_to_bio(bio, buf, cur_len);
++		if (ret)
++			goto out;
++
++		ret = loop_send(lo, lo_file, bio, pos, NULL);
++		if (ret)
++			goto out;
++
++		bio_put(bio);
++		len -= cur_len;
++		pos += cur_len;
++		buf += cur_len;
++	}
++
 +out:
-+	bio_put(bio);
++	if (len)
++		bio_put(bio);
 +	return ret;
 +}
 +
@@ -172,17 +211,39 @@ index 0000000..6f9c2df
 +		   size_t len,
 +		   loff_t pos)
 +{
-+	int ret;
-+	unsigned nr_vecs = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
-+	struct bio *bio = bio_alloc(GFP_KERNEL, nr_vecs);
++	unsigned vecs;
++	size_t cur_len;
++	int ret = 0;
++	u8 *buf = kbuf;
++	struct bio *bio = NULL;
 +
-+	ret = loop_kbuf_to_bio(bio, (u8 *) kbuf, len);
-+	if (ret)
-+		goto out;
++	while (len) {
++		cur_len = min(len, (size_t) BIO_MAX_SIZE);
++		vecs = (cur_len + PAGE_SIZE - 1) >> PAGE_SHIFT;
++		bio = bio_alloc(GFP_KERNEL, vecs);
++		BUG_ON(!bio);
 +
-+	ret = loop_recv(lo, lo_file, bio, pos, NULL);
++		/*
++		 * We end up describing a bogus range, which is safe,
++		 * since it is ignored by transfer_zero.
++		 */
++		ret = loop_kbuf_to_bio(bio, buf, cur_len);
++		if (ret)
++			goto out;
++
++		ret = loop_recv(lo, lo_file, bio, pos, NULL);
++		if (ret)
++			goto out;
++
++		bio_put(bio);
++		len -= cur_len;
++		pos += cur_len;
++		buf += cur_len;
++	}
++
 +out:
-+	bio_put(bio);
++	if (len)
++		bio_put(bio);
 +	return ret;
 +}
 +
@@ -195,6 +256,8 @@ index 0000000..6f9c2df
 +{
 +	int ret;
 +	struct bio *bio = bio_alloc(GFP_KERNEL, 1);
++	BUG_ON(!bio);
++
 +	bio->bi_io_vec->bv_page = page;
 +	bio->bi_io_vec->bv_offset = offset;
 +	bio->bi_io_vec->bv_len = len;
@@ -213,6 +276,8 @@ index 0000000..6f9c2df
 +{
 +	int ret;
 +	struct bio *bio = bio_alloc(GFP_KERNEL, 1);
++	BUG_ON(!bio);
++
 +	bio->bi_io_vec->bv_page = page;
 +	bio->bi_io_vec->bv_offset = offset;
 +	bio->bi_io_vec->bv_len = len;
@@ -240,7 +305,7 @@ index 0000000..6f9c2df
 +		len = bv_len;
 +
 +		lo_f = lo_file;
-+		ret  = sparse_to(&lo_f, bio, pos, &len, &fpos);
++		ret  = sparse_to(lo, &lo_f, bio, pos, &len, &fpos);
 +
 +		if (ret == -ENOENT && bio_rw(bio) != WRITE) {
 +			ret = 0;
@@ -294,10 +359,10 @@ index 0000000..6f9c2df
 +}
 diff --git a/include/linux/looputil.h b/include/linux/looputil.h
 new file mode 100644
-index 0000000..74a2638
+index 0000000..d8a78d2
 --- /dev/null
 +++ b/include/linux/looputil.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,63 @@
 +/*
 +  Useful routines for loop parsers.
 +
@@ -349,7 +414,8 @@ index 0000000..74a2638
 +		    unsigned int offset,
 +		    unsigned int len,
 +		    loff_t pos);
-+typedef int (*loop_sparse_to_t)(struct lo_file **lo_file,
++typedef int (*loop_sparse_to_t)(struct loop_device *lo,
++				struct lo_file **lo_file,
 +				struct bio *bio,
 +				loff_t pos,
 +				unsigned int *len,
