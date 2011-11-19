@@ -1,4 +1,4 @@
-From 8242e69f05f61e07886a6dcb8c66faa72252d387 Mon Sep 17 00:00:00 2001
+From 0514411c4550e2c24b63e0f153057e0602c8b417 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sat, 15 Oct 2011 02:21:45 -0400
 Subject: [PATCH 2/5] Loop: Useful I/O routines shared by parsers.
@@ -12,9 +12,9 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    4 +
  drivers/block/Makefile   |    1 +
- drivers/block/looputil.c |  306 ++++++++++++++++++++++++++++++++++++++++++++++
- include/linux/looputil.h |   63 ++++++++++
- 4 files changed, 374 insertions(+), 0 deletions(-)
+ drivers/block/looputil.c |  322 ++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/looputil.h |   82 ++++++++++++
+ 4 files changed, 409 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/looputil.c
  create mode 100644 include/linux/looputil.h
 
@@ -47,10 +47,10 @@ index 76646e9..eb3df97 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/looputil.c b/drivers/block/looputil.c
 new file mode 100644
-index 0000000..7d6445e
+index 0000000..221cbe1
 --- /dev/null
 +++ b/drivers/block/looputil.c
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,322 @@
 +/*
 +   Useful routines shared by loop parsers.
 +
@@ -289,51 +289,66 @@ index 0000000..7d6445e
 +
 +static int loop_sparse_bvec(struct loop_device *lo,
 +			    struct lo_file *lo_file,
-+			    struct bio *bio,
 +			    struct bio_vec *bvec,
 +			    loff_t pos,
++			    bool write,
 +			    loop_sparse_to_t sparse_to)
 +{
 +	u8 *raw_buf;
-+	unsigned int len;
-+	struct lo_file *lo_f;
-+	int ret = 0;
-+	loff_t fpos = 0;
++	struct loop_sparse_in in;
++	struct loop_sparse_out out;
 +	unsigned int bv_len = bvec->bv_len;
++	int ret = 0;
++
++	in.write = write;
++	in.pos = pos;
 +
 +	while (bv_len) {
-+		len = bv_len;
++		in.len = bv_len;
++		ret = sparse_to(lo, &in, &out);
 +
-+		lo_f = lo_file;
-+		ret  = sparse_to(lo, &lo_f, bio, pos, &len, &fpos);
++		switch (ret) {
++		case LOOP_SPARSE_ZERO:
++		case LOOP_SPARSE_MEM:
 +
-+		if (ret == -ENOENT && bio_rw(bio) != WRITE) {
-+			ret = 0;
++			/*
++			 * These are used for sparse empty and
++			 * compressed sections only.
++			 */
++			BUG_ON(write);
 +			raw_buf = kmap_atomic(bvec->bv_page, KM_USER0) +
 +				bvec->bv_offset + bvec->bv_len - bv_len;
-+			memset(raw_buf, 0, len);
-+			kunmap_atomic(raw_buf, KM_USER0);
-+		} else if (!ret) {
-+			if (bio_rw(bio) == WRITE)
-+				ret = loop_write_page(lo, lo_f, bvec->bv_page,
-+						      bvec->bv_offset + bvec->bv_len -
-+						      bv_len, len, fpos);
++			if (ret == LOOP_SPARSE_ZERO)
++				memset(raw_buf, 0, out.len);
 +			else
-+				ret = loop_read_page(lo, lo_f, bvec->bv_page,
++				memcpy(raw_buf, out.offset, out.len);
++			kunmap_atomic(raw_buf, KM_USER0);
++			ret = 0;
++			break;
++		case LOOP_SPARSE_IO:
++			if (write)
++				ret = loop_write_page(lo, out.lo_file,
++						      bvec->bv_page,
++						      bvec->bv_offset + bvec->bv_len -
++						      bv_len, out.len, out.pos);
++			else
++				ret = loop_read_page(lo, out.lo_file,
++						     bvec->bv_page,
 +						     bvec->bv_offset + bvec->bv_len -
-+						     bv_len, len, fpos);
++						     bv_len, out.len, out.pos);
++			break;
 +		}
 +
 +		if (ret) {
 +			printk(KERN_ERR "%s: failed to %s: %d\n",
 +			       lo->lo_disk->disk_name,
-+                               bio_rw(bio) == WRITE ? "write" : "read",
++                               write ? "write" : "read",
 +			       ret);
 +			break;
 +		}
 +
-+		bv_len -= len;
-+		pos += len;
++		bv_len -= out.len;
++		in.pos += out.len;
 +	}
 +
 +	return ret;
@@ -350,8 +365,9 @@ index 0000000..7d6445e
 +	loff_t pos = ((loff_t) bio->bi_sector << 9);
 +
 +	bio_for_each_segment(bvec, bio, i) {
-+		ret = loop_sparse_bvec(lo, lo_file, bio, bvec,
-+				       pos, sparse_to);
++		ret = loop_sparse_bvec(lo, lo_file, bvec, pos,
++				       bio_rw(bio) == WRITE,
++				       sparse_to);
 +		pos += bvec->bv_len;
 +	}
 +
@@ -359,10 +375,10 @@ index 0000000..7d6445e
 +}
 diff --git a/include/linux/looputil.h b/include/linux/looputil.h
 new file mode 100644
-index 0000000..d8a78d2
+index 0000000..f6b972d
 --- /dev/null
 +++ b/include/linux/looputil.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,82 @@
 +/*
 +  Useful routines for loop parsers.
 +
@@ -414,12 +430,31 @@ index 0000000..d8a78d2
 +		    unsigned int offset,
 +		    unsigned int len,
 +		    loff_t pos);
++
++enum {
++	LOOP_SPARSE_IO,
++	LOOP_SPARSE_MEM,
++	LOOP_SPARSE_ZERO,
++};
++
++struct loop_sparse_in {
++	loff_t pos;
++	unsigned int len;
++	bool write;
++};
++
++struct loop_sparse_out {
++	union {
++		loff_t pos;
++		void  *offset;
++	};
++	struct lo_file *lo_file;
++	unsigned int len;
++};
++
 +typedef int (*loop_sparse_to_t)(struct loop_device *lo,
-+				struct lo_file **lo_file,
-+				struct bio *bio,
-+				loff_t pos,
-+				unsigned int *len,
-+				loff_t *fpos);
++				struct loop_sparse_in *in,
++				struct loop_sparse_out *out);
 +int loop_sparse_io(struct loop_device *lo,
 +		   struct lo_file *lo_file,
 +		   struct bio *bio,

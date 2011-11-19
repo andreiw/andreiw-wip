@@ -1,4 +1,4 @@
-From 170c720b854750fc15bfd5a2c1a357c8561baf6b Mon Sep 17 00:00:00 2001
+From 0a3b4d68f4c25e2bcb1ce65a2d457c3e7b2ea9d1 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 25 Sep 2011 23:37:26 -0400
 Subject: [PATCH 3/5] Loop: VHD loop parser implementation.
@@ -9,8 +9,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig   |    8 +
  drivers/block/Makefile  |    1 +
- drivers/block/vhdloop.c |  646 +++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 655 insertions(+), 0 deletions(-)
+ drivers/block/vhdloop.c |  645 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 654 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/vhdloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -46,10 +46,10 @@ index eb3df97..caf5b8e 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vhdloop.c b/drivers/block/vhdloop.c
 new file mode 100644
-index 0000000..58d804a
+index 0000000..c8e94b9
 --- /dev/null
 +++ b/drivers/block/vhdloop.c
-@@ -0,0 +1,646 @@
+@@ -0,0 +1,645 @@
 +/*
 +   Linux loop VHD support.
 +
@@ -561,18 +561,17 @@ index 0000000..58d804a
 +}
 +
 +static int vhd_sparse_to(struct loop_device *lo,
-+			 struct lo_file **lo_file,
-+			 struct bio *bio,
-+			 loff_t pos,
-+			 unsigned int *len,
-+			 loff_t *fpos)
++			 struct loop_sparse_in *in,
++			 struct loop_sparse_out *out)
 +{
 +	int ret;
 +	loff_t ffpos, temp;
-+	loff_t entry = pos;
-+	struct vhd *vhd = (*lo_file)->parser_priv;
++	loff_t entry = in->pos;
++	struct vhd *vhd = lo->lo_file->parser_priv;
 +	u32 offset = do_div(entry, vhd->block_unit);
-+	*len = min(*len, (unsigned int) ((SEC_SZ - (pos & (SEC_SZ - 1)))));
++	out->len = min(in->len, (unsigned int)
++		       ((SEC_SZ - (in->pos & (SEC_SZ - 1)))));
++	out->lo_file = vhd->lo_file;
 +
 +	ret = loop_read_kbuf(lo, vhd->lo_file, &ffpos,
 +			     sizeof(u32),
@@ -582,8 +581,8 @@ index 0000000..58d804a
 +		return ret;
 +
 +	if ((u32) ffpos == 0xFFFFFFFF) {
-+		if (bio_rw(bio) != WRITE)
-+			return -ENOENT;
++		if (!in->write)
++			return LOOP_SPARSE_ZERO;
 +
 +		ffpos = round_up(vhd->file_size - FOOTER_SZ(vhd), SEC_SZ);
 +		vhd->file_size = ffpos + vhd->block_unit +
@@ -628,9 +627,9 @@ index 0000000..58d804a
 +	 * where MSB is the lower sector number.
 +	 */
 +
-+	if (bio_rw(bio) != WRITE) {
++	if (!in->write) {
 +		if (!(entry & (1 << (7 - ((offset >> SEC_SHIFT) & 7)))))
-+			return -ENOENT;
++			return LOOP_SPARSE_ZERO;
 +	} else {
 +		entry |= 1 << (7 - (((offset >> SEC_SHIFT) & 7)));
 +		ret = loop_write_kbuf(lo, vhd->lo_file, &entry,
@@ -641,8 +640,8 @@ index 0000000..58d804a
 +			return ret;
 +	}
 +
-+	*fpos = ffpos + SECTOR_BMP_SZ(vhd->block_unit) + offset;
-+	return 0;
++	out->pos = ffpos + SECTOR_BMP_SZ(vhd->block_unit) + offset;
++	return LOOP_SPARSE_IO;
 +}
 +
 +static int vhd_bio(struct loop_device *lo,

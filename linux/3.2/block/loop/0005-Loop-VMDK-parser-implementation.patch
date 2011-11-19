@@ -1,4 +1,4 @@
-From 46ac91f789900ea7046f22f62addaff3d3bb49cc Mon Sep 17 00:00:00 2001
+From 44e8e065bbb505e2b81a24832cab2e1048b31528 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Thu, 20 Oct 2011 23:57:05 -0400
 Subject: [PATCH 5/5] Loop: VMDK parser implementation.
@@ -48,7 +48,7 @@ index 619635c..d1314ee 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/vmdkloop.c b/drivers/block/vmdkloop.c
 new file mode 100644
-index 0000000..ad55ce4
+index 0000000..d4ef41a
 --- /dev/null
 +++ b/drivers/block/vmdkloop.c
 @@ -0,0 +1,476 @@
@@ -382,21 +382,21 @@ index 0000000..ad55ce4
 +}
 +
 +static int vmdk_sparse_to(struct loop_device *lo,
-+			  struct lo_file **lo_file,
-+			  struct bio *bio,
-+			  loff_t pos,
-+			  unsigned int *len,
-+			  loff_t *fpos)
++			  struct loop_sparse_in *in,
++			  struct loop_sparse_out *out)
 +{
 +	int ret;
 +	loff_t gt_pos, temp, ffpos;
-+	loff_t entry = pos;
-+	struct vmdk *vmdk = (*lo_file)->parser_priv;
++	loff_t entry = in->pos;
++	struct vmdk *vmdk = lo->lo_file->parser_priv;
 +	u32 offset = do_div(entry,
 +			    vmdk->grain_size *
 +			    vmdk->gt_entries);
-+	*len = min(*len, (unsigned int) ((vmdk->grain_size -
-+					  (pos & (vmdk->grain_size - 1)))));
++
++	out->lo_file = vmdk->lo_file;
++	out->len = min(in->len, (unsigned int)
++		       ((vmdk->grain_size -
++			 (in->pos & (vmdk->grain_size - 1)))));
 +
 +	ret = loop_read_kbuf(lo, vmdk->lo_file, &gt_pos,
 +			     sizeof(u32),
@@ -406,8 +406,8 @@ index 0000000..ad55ce4
 +		return ret;
 +
 +	if ((u32) gt_pos == 0) {
-+		if (bio_rw(bio) != WRITE)
-+			return -ENOENT;
++		if (!in->write)
++			return LOOP_SPARSE_ZERO;
 +
 +		gt_pos = vmdk->file_size;
 +		vmdk->file_size += GT_SIZE(vmdk->gt_entries);
@@ -456,8 +456,8 @@ index 0000000..ad55ce4
 +		return ret;
 +
 +	if ((u32) ffpos == 0) {
-+		if (bio_rw(bio) != WRITE)
-+			return -ENOENT;
++		if (!in->write)
++			return LOOP_SPARSE_ZERO;
 +
 +		ffpos = round_up(vmdk->file_size, vmdk->grain_size);
 +		temp = cpu_to_le32(ffpos >> SEC_SHIFT);
@@ -486,8 +486,8 @@ index 0000000..ad55ce4
 +		}
 +	}
 +
-+	*fpos = ffpos + offset;
-+	return 0;
++	out->pos = ffpos + offset;
++	return LOOP_SPARSE_IO;
 +}
 +
 +static int vmdk_bio(struct loop_device *lo,

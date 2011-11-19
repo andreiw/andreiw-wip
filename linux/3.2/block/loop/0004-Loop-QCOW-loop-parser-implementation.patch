@@ -1,4 +1,4 @@
-From e8a99918d255745cad2d539c257d166c3a5e5df8 Mon Sep 17 00:00:00 2001
+From 343317cbe8e404cfa2276af15740be61db2aa1f2 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Mon, 17 Oct 2011 01:17:22 -0400
 Subject: [PATCH 4/5] Loop: QCOW loop parser implementation.
@@ -13,8 +13,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/block/Kconfig    |    8 +
  drivers/block/Makefile   |    1 +
- drivers/block/qcowloop.c |  440 ++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 449 insertions(+), 0 deletions(-)
+ drivers/block/qcowloop.c |  433 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 442 insertions(+), 0 deletions(-)
  create mode 100644 drivers/block/qcowloop.c
 
 diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
@@ -50,10 +50,10 @@ index caf5b8e..619635c 100644
  obj-$(CONFIG_VIODASD)		+= viodasd.o
 diff --git a/drivers/block/qcowloop.c b/drivers/block/qcowloop.c
 new file mode 100644
-index 0000000..abaefbc
+index 0000000..789aa1d
 --- /dev/null
 +++ b/drivers/block/qcowloop.c
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,433 @@
 +/*
 +   Linux loop QCOW support.
 +
@@ -336,23 +336,22 @@ index 0000000..abaefbc
 +}
 +
 +static int qcow_sparse_to(struct loop_device *lo,
-+			  struct lo_file **lo_file,
-+			  struct bio *bio,
-+			  loff_t pos,
-+			  unsigned int *len,
-+			  loff_t *fpos)
++			  struct loop_sparse_in *in,
++			  struct loop_sparse_out *out)
 +{
 +	int ret;
 +	u64 l1_index, l2_index;
 +	loff_t l2pos, temp, ffpos;
 +	struct qcow *qcow;
 +
++	out->lo_file = lo->lo_file;
 +retry:
-+	qcow = (*lo_file)->parser_priv;
-+	l1_index = pos >> (qcow->header.l2_bits +
-+			   qcow->header.cluster_bits);
-+	*len = min(*len, (unsigned int) ((qcow->access_size -
-+					  (pos & (qcow->access_size - 1)))));
++	qcow = out->lo_file->parser_priv;
++	l1_index = in->pos >> (qcow->header.l2_bits +
++			       qcow->header.cluster_bits);
++	out->len = min(in->len, (unsigned int)
++                       ((qcow->access_size -
++                         (in->pos & (qcow->access_size - 1)))));
 +
 +	ret = loop_read_kbuf(lo, qcow->lo_file, &l2pos,
 +			     sizeof(u64),
@@ -363,12 +362,12 @@ index 0000000..abaefbc
 +	l2pos = be64_to_cpu(l2pos);
 +
 +	if (!l2pos) {
-+		if (bio_rw(bio) != WRITE) {
++		if (!in->write) {
 +			if (qcow->backing) {
-+				*lo_file = qcow->backing;
++				out->lo_file = qcow->backing;
 +				goto retry;
 +			}
-+			return -ENOENT;
++			return LOOP_SPARSE_ZERO;
 +		}
 +
 +		l2pos = qcow->file_size;
@@ -395,7 +394,7 @@ index 0000000..abaefbc
 +		return -EINVAL;
 +	}
 +
-+	l2_index = pos >> qcow->header.cluster_bits &
++	l2_index = in->pos >> qcow->header.cluster_bits &
 +		B2M(qcow->header.l2_bits);
 +
 +	ret = loop_read_kbuf(lo, qcow->lo_file, &ffpos,
@@ -407,12 +406,12 @@ index 0000000..abaefbc
 +
 +	ffpos = be64_to_cpu(ffpos);
 +	if (!ffpos) {
-+		if (bio_rw(bio) != WRITE) {
++		if (!in->write) {
 +			if (qcow->backing) {
-+				*lo_file = qcow->backing;
++				out->lo_file = qcow->backing;
 +				goto retry;
 +			}
-+			return -ENOENT;
++			return LOOP_SPARSE_ZERO;
 +		}
 +
 +		ffpos = qcow->file_size;
@@ -431,12 +430,6 @@ index 0000000..abaefbc
 +		if (ret)
 +			return ret;
 +	} else {
-+
-+		/*
-+		 * With the current shared sparse logic in looputil,
-+		 * no way to do something like reading compressed
-+		 * blocks.
-+		*/
 +		if (ffpos & ((loff_t) 1 << 63)) {
 +			printk(KERN_ERR "%s: compression unsupported\n",
 +			       DNAME(lo));
@@ -452,8 +445,8 @@ index 0000000..abaefbc
 +		}
 +	}
 +
-+	*fpos = ffpos + (pos & B2M(qcow->header.cluster_bits));
-+	return 0;
++	out->pos = ffpos + (in->pos & B2M(qcow->header.cluster_bits));
++	return LOOP_SPARSE_IO;
 +}
 +
 +static int qcow_bio(struct loop_device *lo,
