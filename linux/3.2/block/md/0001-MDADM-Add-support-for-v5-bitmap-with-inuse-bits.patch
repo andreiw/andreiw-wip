@@ -1,0 +1,396 @@
+From 6234e9d8d67e848186c451b3aaf1ce77649a3cf1 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Mon, 16 Jan 2012 20:16:28 -0500
+Subject: [PATCH] MDADM: Add support for v5 bitmap (with inuse bits).
+
+This is used to support RAID1 synchronization optimization
+by avoiding synching unused blocks.
+
+TODO: Only create a bitmap with all chunks not inuse on
+array creation. On bitmap removal/add mark all chunks as used.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ bitmap.c |  121 +++++++++++++++++++++++++++++++++++++++++++++++++++++++-------
+ bitmap.h |   24 +++++++++++-
+ super0.c |   17 ++++++++-
+ super1.c |   34 ++++++++++++++---
+ 4 files changed, 173 insertions(+), 23 deletions(-)
+
+diff --git a/bitmap.c b/bitmap.c
+index c27688c..88ed338 100644
+--- a/bitmap.c
++++ b/bitmap.c
+@@ -71,9 +71,30 @@ typedef struct bitmap_info_s {
+ 	bitmap_super_t sb;
+ 	unsigned long long total_bits;
+ 	unsigned long long dirty_bits;
++	unsigned long long inuse_bits;
+ } bitmap_info_t;
+ 
+ /* count the dirty bits in the first num_bits of byte */
++inline int count_dirty_bits_byte_v5(char byte, int num_bits)
++{
++	int num = 0;
++
++	switch (num_bits) { /* fall through... */
++		case 8:
++		case 7:	if (byte &  64) num++;
++		case 6:
++		case 5:	if (byte &  16) num++;
++		case 4:
++		case 3:	if (byte &   4) num++;
++		case 2:
++		case 1:	if (byte &   1) num++;
++		default: break;
++	}
++
++	return num;
++}
++
++/* count the dirty bits in the first num_bits of byte */
+ inline int count_dirty_bits_byte(char byte, int num_bits)
+ {
+ 	int num = 0;
+@@ -84,7 +105,7 @@ inline int count_dirty_bits_byte(char byte, int num_bits)
+ 		case 6:	if (byte &  32) num++;
+ 		case 5:	if (byte &  16) num++;
+ 		case 4:	if (byte &   8) num++;
+-		case 3: if (byte &   4) num++;
++		case 3:	if (byte &   4) num++;
+ 		case 2:	if (byte &   2) num++;
+ 		case 1:	if (byte &   1) num++;
+ 		default: break;
+@@ -93,15 +114,61 @@ inline int count_dirty_bits_byte(char byte, int num_bits)
+ 	return num;
+ }
+ 
+-int count_dirty_bits(char *buf, int num_bits)
++/* count the in-use bits in the first num_bits of byte */
++inline int count_inuse_bits_byte_v5(char byte, int num_bits)
++{
++	int num = 0;
++
++	switch (num_bits) { /* fall through... */
++		case 8:	if (byte & 128) num++;
++		case 7:
++		case 6:	if (byte &  32) num++;
++		case 5:
++		case 4:	if (byte &   8) num++;
++		case 3:
++		case 2:	if (byte &   2) num++;
++		case 1:
++		default: break;
++	}
++
++	return num;
++}
++
++int count_inuse_bits(bitmap_info_t *info, char *buf, int num_bits)
+ {
+ 	int i, num = 0;
+ 
+-	for (i=0; i < num_bits / 8; i++)
+-		num += count_dirty_bits_byte(buf[i], 8);
++	for (i=0; i < num_bits / 8; i++) {
++		if (info->sb.version >= BITMAP_MAJOR_V5)
++			num += count_inuse_bits_byte_v5(buf[i], 8);
++	}
+ 
+-	if (num_bits % 8) /* not an even byte boundary */
+-		num += count_dirty_bits_byte(buf[i], num_bits % 8);
++	if (num_bits % 8) /* not an even byte boundary */ {
++		if (info->sb.version >= BITMAP_MAJOR_V5)
++			num += count_inuse_bits_byte_v5(buf[i],
++							num_bits % 8);
++	}
++
++	return num;
++}
++
++int count_dirty_bits(bitmap_info_t *info, char *buf, int num_bits)
++{
++	int i, num = 0;
++
++	for (i=0; i < num_bits / 8; i++) {
++		if (info->sb.version >= BITMAP_MAJOR_V5)
++			num += count_dirty_bits_byte_v5(buf[i], 8);
++		else
++			num += count_dirty_bits_byte(buf[i], 8);
++	}
++
++	if (num_bits % 8) /* not an even byte boundary */ {
++		if (info->sb.version >= BITMAP_MAJOR_V5)
++			num += count_dirty_bits_byte_v5(buf[i], num_bits % 8);
++		else
++			num += count_dirty_bits_byte(buf[i], num_bits % 8);
++	}
+ 
+ 	return num;
+ }
+@@ -127,7 +194,8 @@ bitmap_info_t *bitmap_fd_read(int fd, int brief)
+ 	/* Note: fd might be open O_DIRECT, so we must be
+ 	 * careful to align reads properly
+ 	 */
+-	unsigned long long total_bits = 0, read_bits = 0, dirty_bits = 0;
++	unsigned long long total_bits = 0, read_bits = 0;
++	unsigned long long inuse_bits = 0, dirty_bits = 0;
+ 	bitmap_info_t *info;
+ 	void *buf;
+ 	unsigned int n, skip;
+@@ -175,6 +243,10 @@ bitmap_info_t *bitmap_fd_read(int fd, int brief)
+ 	 */
+ 	total_bits = bitmap_bits(info->sb.sync_size, info->sb.chunksize);
+ 
++	/* Twice as many bits per chunk for V5. */
++	if (info->sb.version >= BITMAP_MAJOR_V5)
++		total_bits *= 2;
++
+ 	while(read_bits < total_bits) {
+ 		unsigned long long remaining = total_bits - read_bits;
+ 
+@@ -187,7 +259,9 @@ bitmap_info_t *bitmap_fd_read(int fd, int brief)
+ 		if (remaining > (n-skip) * 8) /* we want the full buffer */
+ 			remaining = (n-skip) * 8;
+ 
+-		dirty_bits += count_dirty_bits(buf+skip, remaining);
++		dirty_bits += count_dirty_bits(info, buf+skip, remaining);
++		if (info->sb.version >= BITMAP_MAJOR_V5)
++			inuse_bits += count_inuse_bits(info, buf+skip, remaining);
+ 
+ 		read_bits += remaining;
+ 		n = 0;
+@@ -203,6 +277,7 @@ out:
+ 	free(buf);
+ 	info->total_bits = total_bits;
+ 	info->dirty_bits = dirty_bits;
++	info->inuse_bits = inuse_bits;
+ 	return info;
+ }
+ 
+@@ -332,9 +407,22 @@ int ExamineBitmap(char *filename, int brief, struct supertype *st)
+ 					human_size(sb->sync_size * 512));
+ 	if (brief)
+ 		goto free_info;
+-	printf("          Bitmap : %llu bits (chunks), %llu dirty (%2.1f%%)\n",
+-			info->total_bits, info->dirty_bits,
+-			100.0 * info->dirty_bits / (info->total_bits?:1));
++
++	if (sb->version >= BITMAP_MAJOR_V5) {
++		printf("          Bitmap : %llu bits (%llu chunks), %llu dirty (%2.1f%%)",
++		       info->total_bits,
++		       info->total_bits / BITS_PER_CHUNK_V5,
++		       info->dirty_bits,
++		       100.0 * info->dirty_bits / ((info->total_bits / BITS_PER_CHUNK_V5)?:1));
++		printf(" %llu inuse (%2.1f%%)\n", info->inuse_bits,
++		       100.0 * info->inuse_bits / ((info->total_bits / BITS_PER_CHUNK_V5)?:1));
++	} else {
++		printf("          Bitmap : %llu bits (%llu chunks), %llu dirty (%2.1f%%)\n",
++		       info->total_bits,
++		       info->total_bits / BITS_PER_CHUNK,
++		       info->dirty_bits,
++		       100.0 * info->dirty_bits / ((info->total_bits / BITS_PER_CHUNK)?:1));
++	}
+ free_info:
+ 	free(info);
+ 	return rv;
+@@ -398,7 +486,10 @@ int CreateBitmap(char *filename, int force, char uuid[16],
+ 	}
+ 
+ 	/* calculate the size of the bitmap and write it to disk */
+-	bytes = (bitmap_bits(array_size, chunksize) + 7) / 8;
++	if (major >= BITMAP_MAJOR_V5)
++		bytes = (bitmap_bits(array_size, chunksize) + 7) / 4;
++	else
++		bytes = (bitmap_bits(array_size, chunksize) + 7) / 8;
+ 	if (!bytes) {
+ 		rv = 0;
+ 		goto out;
+@@ -406,7 +497,11 @@ int CreateBitmap(char *filename, int force, char uuid[16],
+ 
+ 	filesize = bytes + sizeof(sb);
+ 
+-	memset(block, 0xff, sizeof(block));
++	/* Don't mark inuse bit as set. */
++	if (major >= BITMAP_MAJOR_V5)
++		memset(block, 0x55, sizeof(block));
++	else
++		memset(block, 0xff, sizeof(block));
+ 
+ 	while (bytes > 0) {
+ 		if (fwrite(block, sizeof(block), 1, fp) != 1) {
+diff --git a/bitmap.h b/bitmap.h
+index c8725a3..658083d 100644
+--- a/bitmap.h
++++ b/bitmap.h
+@@ -7,11 +7,26 @@
+ #define BITMAP_H 1
+ 
+ #define BITMAP_MAJOR_LO 3
++
+ /* version 4 insists the bitmap is in little-endian order
+  * with version 3, it is host-endian which is non-portable
+  */
+-#define BITMAP_MAJOR_HI 4
+-#define	BITMAP_MAJOR_HOSTENDIAN 3
++#define BITMAP_MAJOR_HOSTENDIAN 3
++#define BITMAP_MAJOR_LITLENDIAN 4
++
++/* version 5 changes the on-disk bitmap - every second
++ * bit now indicates whether the chunk is free or not.
++ */
++#define BITMAP_MAJOR_V5 5
++#define BITMAP_MAJOR_HI 5
++
++#define BITS_PER_CHUNK    (1)
++#define BITS_PER_CHUNK_V5 (2)
++
++#define BITMAP_EMPTY (0xff)
++
++/* Chunks not marked as in use. */
++#define BITMAP_EMPTY_V5 (0x55)
+ 
+ #define BITMAP_MINOR 39
+ 
+@@ -82,6 +97,11 @@
+ #define PAGE_BITS (PAGE_SIZE << 3)
+ #define PAGE_BIT_SHIFT (PAGE_SHIFT + 3)
+ 
++#define PAGE_BITS_V5 (PAGE_SIZE << 2)
++#define PAGE_BIT_SHIFT_V5 (PAGE_SHIFT + 2)
++#define PAGE_BIT_WRI (0)
++#define PAGE_BIT_INU (1)
++
+ typedef __u16 bitmap_counter_t;
+ #define COUNTER_BITS 16
+ #define COUNTER_BIT_SHIFT 4
+diff --git a/super0.c b/super0.c
+index dab85db..2200547 100644
+--- a/super0.c
++++ b/super0.c
+@@ -1006,6 +1006,10 @@ static int add_internal_bitmap0(struct supertype *st, int *chunkp,
+ 
+ 	min_chunk = 4096; /* sub-page chunks don't work yet.. */
+ 	bits = (size * 512) / min_chunk + 1;
++
++	if (major >= BITMAP_MAJOR_V5)
++		bits *= 2;
++
+ 	while (bits > max_bits) {
+ 		min_chunk *= 2;
+ 		bits = (bits+1)/2;
+@@ -1061,6 +1065,7 @@ static int write_bitmap0(struct supertype *st, int fd)
+ 	unsigned long long dsize;
+ 	unsigned long long offset;
+ 	mdp_super_t *sb = st->sb;
++	bitmap_super_t *bms = (	bitmap_super_t *) ((char*)sb)+MD_SB_BYTES;
+ 
+ 	int rv = 0;
+ 
+@@ -1082,7 +1087,11 @@ static int write_bitmap0(struct supertype *st, int fd)
+ 	if (lseek64(fd, offset + 4096, 0)< 0LL)
+ 		return 3;
+ 
+-	memset(buf, 0xff, 4096);
++	if (__le64_to_cpu(bms->version) >= BITMAP_MAJOR_V5)
++		memset(buf, BITMAP_EMPTY_V5, 4096);
++	else
++		memset(buf, BITMAP_EMPTY, 4096);
++
+ 	memcpy(buf,  ((char*)sb)+MD_SB_BYTES, sizeof(bitmap_super_t));
+ 	towrite = 60*1024;
+ 	while (towrite > 0) {
+@@ -1094,7 +1103,11 @@ static int write_bitmap0(struct supertype *st, int fd)
+ 			towrite -= n;
+ 		else
+ 			break;
+-		memset(buf, 0xff, 4096);
++
++		if (__le64_to_cpu(bms->version) >= BITMAP_MAJOR_V5)
++			memset(buf, BITMAP_EMPTY_V5, 4096);
++		else
++			memset(buf, BITMAP_EMPTY, 4096);
+ 	}
+ 	fsync(fd);
+ 	if (towrite)
+diff --git a/super1.c b/super1.c
+index 867aa58..32b6737 100644
+--- a/super1.c
++++ b/super1.c
+@@ -1034,10 +1034,10 @@ static unsigned long choose_bm_space(unsigned long devsize)
+ 	 */
+ 	if (devsize < 64*2) return 0;
+ 	if (devsize - 64*2 >= 200*1024*1024*2)
+-		return 128*2;
++		return 256*2;
+ 	if (devsize - 4*2 > 8*1024*1024*2)
+-		return 64*2;
+-	return 4*2;
++		return 128*2;
++	return 8*2;
+ }
+ 
+ static void free_super1(struct supertype *st);
+@@ -1564,7 +1564,12 @@ add_internal_bitmap1(struct supertype *st,
+ 	max_bits = (room * 512 - sizeof(bitmap_super_t)) * 8;
+ 
+ 	min_chunk = 4096; /* sub-page chunks don't work yet.. */
++
+ 	bits = (size*512)/min_chunk +1;
++
++	/* Twice as many if we're keeping track of in-use chunks. */
++	if (major >= BITMAP_MAJOR_V5)
++		bits *= 2;
+ 	while (bits > max_bits) {
+ 		min_chunk *= 2;
+ 		bits = (bits+1)/2;
+@@ -1586,7 +1591,11 @@ add_internal_bitmap1(struct supertype *st,
+ 		 * the bitmap
+ 		 */
+ 		bits = (size*512) / chunk + 1;
+-		room = ((bits+7)/8 + sizeof(bitmap_super_t) +4095)/4096;
++
++		if (major >= BITMAP_MAJOR_V5)
++			room = ((bits+7)/4+ sizeof(bitmap_super_t) +4095)/4096;
++		else
++			room = ((bits+7)/8 + sizeof(bitmap_super_t) +4095)/4096;
+ 		room *= 8; /* convert 4K blocks to sectors */
+ 		offset = -room;
+ 	}
+@@ -1640,10 +1649,19 @@ static int write_bitmap1(struct supertype *st, int fd)
+ 
+ 	locate_bitmap1(st, fd);
+ 
+-	memset(buf, 0xff, 4096);
++	if (__le64_to_cpu(bms->version) >= BITMAP_MAJOR_V5)
++		memset(buf, BITMAP_EMPTY_V5, 4096);
++	else
++		memset(buf, BITMAP_EMPTY, 4096);
++
+ 	memcpy(buf, ((char*)sb)+1024, sizeof(bitmap_super_t));
+ 
+ 	towrite = __le64_to_cpu(bms->sync_size) / (__le32_to_cpu(bms->chunksize)>>9);
++
++	/* Twice as many bits for the V5 version. */
++	if (__le64_to_cpu(bms->version) >= BITMAP_MAJOR_V5)
++		towrite *= 2;
++
+ 	towrite = (towrite+7) >> 3; /* bits to bytes */
+ 	towrite += sizeof(bitmap_super_t);
+ 	towrite = ROUND_UP(towrite, 512);
+@@ -1656,7 +1674,11 @@ static int write_bitmap1(struct supertype *st, int fd)
+ 			towrite -= n;
+ 		else
+ 			break;
+-		memset(buf, 0xff, 4096);
++
++		if (__le64_to_cpu(bms->version) >= BITMAP_MAJOR_V5)
++			memset(buf, BITMAP_EMPTY_V5, 4096);
++		else
++			memset(buf, BITMAP_EMPTY, 4096);
+ 	}
+ 	fsync(fd);
+ 	if (towrite)
+-- 
+1.7.8.3
+
