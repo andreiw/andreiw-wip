@@ -1,0 +1,529 @@
+From 97f728f302e14f440d6a199fd813f77e03a373f1 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@vmware.com>
+Date: Sat, 28 Jan 2012 00:03:56 -0500
+Subject: [PATCH] BINFMT: PE32/PE32+ support.
+
+Beginnings of rudimentary PE32/PE32+ support.
+So far:
+1) No relocations.
+2) No imports.
+3) Section memory size == section file size.
+
+Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
+---
+ arch/x86/Kconfig            |    1 +
+ arch/x86/include/asm/pe32.h |   14 ++
+ fs/Kconfig.binfmt           |   10 ++
+ fs/Makefile                 |    1 +
+ fs/binfmt_pe32.c            |  302 +++++++++++++++++++++++++++++++++++++++++++
+ include/linux/pe32.h        |  123 ++++++++++++++++++
+ 6 files changed, 451 insertions(+), 0 deletions(-)
+ create mode 100644 arch/x86/include/asm/pe32.h
+ create mode 100644 fs/binfmt_pe32.c
+ create mode 100644 include/linux/pe32.h
+
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index a150f4c..5d0ef83 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -17,6 +17,7 @@ config X86_64
+ config X86
+ 	def_bool y
+ 	select HAVE_AOUT if X86_32
++	select HAVE_PE32
+ 	select HAVE_UNSTABLE_SCHED_CLOCK
+ 	select HAVE_IDE
+ 	select HAVE_OPROFILE
+diff --git a/arch/x86/include/asm/pe32.h b/arch/x86/include/asm/pe32.h
+new file mode 100644
+index 0000000..ad1d9fe
+--- /dev/null
++++ b/arch/x86/include/asm/pe32.h
+@@ -0,0 +1,14 @@
++#ifndef _ASM_X86_PE32_H
++#define _ASM_X86_PE32_H
++
++#ifdef CONFIG_X86_64
++#define PE32_MACHINE IMAGE_FILE_MACHINE_AMD64
++#define pe32_opt pe32_opt64
++#define PE32_OPT_MAGIC PE32_OPT64_MAGIC
++#else
++#define PE32_MACHINE IMAGE_FILE_MACHINE_IA32
++#define pe32_opt pe32_opt32
++#define PE32_OPT_MAGIC PE32_OPT32_MAGIC
++#endif
++
++#endif
+diff --git a/fs/Kconfig.binfmt b/fs/Kconfig.binfmt
+index e95d1b6..711c127 100644
+--- a/fs/Kconfig.binfmt
++++ b/fs/Kconfig.binfmt
+@@ -87,6 +87,16 @@ config BINFMT_SHARED_FLAT
+ config HAVE_AOUT
+        def_bool n
+ 
++config HAVE_PE32
++       def_bool n
++
++config BINFMT_PE32
++        bool "Kernel support for PE32 binaries"
++        depends on HAVE_PE32
++	default n
++        ---help---
++          Support PE-COFF executables. Meant for NT personality support.
++
+ config BINFMT_AOUT
+ 	tristate "Kernel support for a.out and ECOFF binaries"
+ 	depends on HAVE_AOUT
+diff --git a/fs/Makefile b/fs/Makefile
+index 93804d4..1448ff3 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -32,6 +32,7 @@ obj-$(CONFIG_AIO)               += aio.o
+ obj-$(CONFIG_FILE_LOCKING)      += locks.o
+ obj-$(CONFIG_COMPAT)		+= compat.o compat_ioctl.o
+ obj-$(CONFIG_BINFMT_AOUT)	+= binfmt_aout.o
++obj-$(CONFIG_BINFMT_PE32)	+= binfmt_pe32.o
+ obj-$(CONFIG_BINFMT_EM86)	+= binfmt_em86.o
+ obj-$(CONFIG_BINFMT_MISC)	+= binfmt_misc.o
+ 
+diff --git a/fs/binfmt_pe32.c b/fs/binfmt_pe32.c
+new file mode 100644
+index 0000000..a9aad44
+--- /dev/null
++++ b/fs/binfmt_pe32.c
+@@ -0,0 +1,302 @@
++/*
++ *  linux/fs/binfmt_pe32.c:
++ *  Copyright (C) 2012 Andrei Warkentin
++ *
++ *  Based on linux/fs/binfmt_aout.c:
++ *  Copyright (C) 1991, 1992, 1996  Linus Torvalds
++ */
++
++#include <linux/module.h>
++
++#include <linux/time.h>
++#include <linux/kernel.h>
++#include <linux/mm.h>
++#include <linux/mman.h>
++#include <linux/pe32.h>
++#include <linux/errno.h>
++#include <linux/signal.h>
++#include <linux/string.h>
++#include <linux/fs.h>
++#include <linux/file.h>
++#include <linux/stat.h>
++#include <linux/fcntl.h>
++#include <linux/ptrace.h>
++#include <linux/user.h>
++#include <linux/binfmts.h>
++#include <linux/personality.h>
++#include <linux/init.h>
++#include <linux/coredump.h>
++#include <linux/slab.h>
++
++#include <asm/system.h>
++#include <asm/uaccess.h>
++#include <asm/cacheflush.h>
++
++static int load_pe32_binary(struct linux_binprm *, struct pt_regs * regs);
++
++static struct linux_binfmt pe32_format = {
++	.module		= THIS_MODULE,
++	.load_binary	= load_pe32_binary,
++};
++
++/*
++ * These are the functions used to load PE32 binaries.
++ */
++
++static int load_pe32_binary(struct linux_binprm *bprm, struct pt_regs *regs)
++{
++	int ret;
++	loff_t pos;
++	loff_t size;
++	loff_t file_size;
++	uint32_t base;
++	struct pe32_sechdr *sec;
++	unsigned long start_code, start_data, start_bss;
++	unsigned long end_code, end_data, end_bss;
++	unsigned long rlim, sections, i;
++	struct pe32_coff *coff = NULL;
++	struct pe32_opt *opt = NULL;
++	struct pe32_sechdr *secs = NULL;
++	loff_t mem_size = 0;
++
++	pos = le32_to_cpu(*(uint32_t *)(bprm->buf + PE32_SIGNATURE_OFFSET));
++	if (pos >= sizeof(bprm->buf) - sizeof(PE32_SIGNATURE))
++		return -ENOEXEC;
++
++	if (le32_to_cpu(*(uint32_t *)(bprm->buf + pos)) !=
++	    *(uint32_t *)PE32_SIGNATURE)
++		return -ENOEXEC;
++
++	/*
++	 * Requires a mmap handler. This prevents people from using a.out
++	 * as part of an exploit attack against /proc-related vulnerabilities.
++	 */
++	if (!bprm->file->f_op || !bprm->file->f_op->mmap)
++		return -ENOEXEC;
++	file_size = i_size_read(bprm->file->f_path.dentry->d_inode);
++
++	pos += sizeof(PE32_SIGNATURE);
++	coff = kmalloc(sizeof(*coff), GFP_KERNEL);
++	if (!coff) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	ret = kernel_read(bprm->file, pos,
++			  (uint8_t *) coff,
++			  sizeof(*coff));
++	if (ret != sizeof(*coff)) {
++		if (ret >= 0)
++			ret = -EIO;
++		goto out;
++	}
++
++	if (le16_to_cpu(coff->machine) != PE32_MACHINE) {
++		ret = -ENOEXEC;
++		goto out;
++	}
++
++	size = le16_to_cpu(coff->sizeof_opt);
++	if (size < sizeof(*opt)) {
++		ret = -ENOEXEC;
++		goto out;
++	}
++
++	pos += sizeof(*coff);
++	opt = kmalloc(size, GFP_KERNEL);
++	if (!opt) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	ret = kernel_read(bprm->file, pos,
++			  (uint8_t *) opt,
++			  size);
++	if (ret != size) {
++		if (ret >= 0)
++			ret = -EIO;
++		goto out;
++	}
++
++	if (le16_to_cpu(opt->magic) !=
++	    PE32_OPT_MAGIC) {
++		ret = -ENOEXEC;
++		goto out;
++	}
++	base = le32_to_cpu(opt->image_base);
++
++	pos += size;
++	sections = le32_to_cpu(coff->sections);
++	size = sections * sizeof(*secs);
++	if (pos + size > file_size) {
++		ret = -ENOEXEC;
++		goto out;
++	}
++	secs = kcalloc(le32_to_cpu(coff->sections),
++		       sizeof(*secs),
++		       GFP_KERNEL);
++	if (!secs) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	ret = kernel_read(bprm->file, pos,
++			  (uint8_t *) secs,
++			  size);
++	if (ret != size) {
++		if (ret >= 0)
++			ret = -EIO;
++		goto out;
++	}
++
++	for (i = 0, sec = secs; i < sections; i++, sec++) {
++		mem_size += sec->mem_size;
++		if (sec->mem_size) {
++			if (sec->relocs ||
++			    sec->mem_size != sec->file_size) {
++				ret = -ENOEXEC;
++				goto out;
++			}
++		}
++	}
++
++	/*
++	 * Check initial limits. This avoids letting people circumvent
++	 * size limits imposed on them by creating programs with large
++	 * arrays in the data or bss.
++	 */
++	rlim = rlimit(RLIMIT_DATA);
++	if (rlim >= RLIM_INFINITY)
++		rlim = ~0;
++
++	if (mem_size > rlim) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++
++	/* OK, This is the point of no return */
++	ret = flush_old_exec(bprm);
++	if (ret)
++		goto out;
++	set_personality(PER_LINUX);
++	setup_new_exec(bprm);
++
++	current->mm->start_stack = bprm->p;
++	current->mm->free_area_cache = current->mm->mmap_base;
++	current->mm->cached_hole_size = 0;
++	start_code = ~0UL;
++	end_code = 0;
++	start_data = ~0UL;
++	end_data = 0;
++	start_bss = ~0UL;
++	end_bss = 0;
++
++	/* 
++	 * Now we do a little grungy work by mmapping
++	 * the PE image into the correct location in memory.
++	 *
++	 * FIXMEs:
++	 * 1) Support file_size != mem_size.
++	 * 2) Support relocations.
++	 * 3) IAT + shared objects via UM helper to feed relevant FDs.
++	 */
++	for (i = 0, sec = secs; i < sections; i++, sec++) {
++		int sec_prot = 0;
++
++		if (!sec->mem_size)
++			continue;
++
++		if (sec->chars & IMAGE_SCN_MEM_EXEC)
++			sec_prot |= PROT_EXEC;
++		if (sec->chars & IMAGE_SCN_MEM_READ)
++			sec_prot |= PROT_READ;
++		if (sec->chars & IMAGE_SCN_MEM_WRITE)
++			sec_prot |= PROT_WRITE;
++
++		down_write(&current->mm->mmap_sem);
++
++		/* FIXME: Should take away the write after the read. */
++		ret = do_mmap(NULL, (base + sec->va) & PAGE_MASK, sec->mem_size,
++			      sec_prot | PROT_WRITE, MAP_FIXED | MAP_PRIVATE |
++			      (sec_prot & PROT_EXEC ? MAP_EXECUTABLE : 0), 0);
++		up_write(&current->mm->mmap_sem);
++		if (ret != ((base + sec->va) & PAGE_MASK)) {
++			ret = -ENOMEM;
++			send_sig(SIGKILL, current, 0);
++			goto out;
++		}
++
++		pos = sec->off_data;
++		ret = bprm->file->f_op->read(bprm->file,
++					     (char __user *) (uintptr_t) (base + sec->va),
++					     sec->file_size, &pos);
++		if (ret < 0) {
++			send_sig(SIGKILL, current, 0);
++			goto out;
++		}
++
++		if (sec->chars & IMAGE_SCN_CNT_CODE) {
++			if (base + sec->va < start_code)
++				start_code = base + sec->va;
++			if (base + sec->va + sec->mem_size > end_code)
++				end_code = base + sec->va + sec->mem_size;
++		}
++
++		if (sec->chars & IMAGE_SCN_CNT_IDATA) {
++			if (base + sec->va < start_data)
++				start_data = base + sec->va;
++			if (base + sec->va + sec->mem_size > end_data)
++				end_data = base + sec->va + sec->mem_size;
++		}
++
++		if (sec->chars & IMAGE_SCN_CNT_UDATA) {
++			if (base + sec->va < start_bss)
++				start_bss = base + sec->va;
++			if (base + sec->va + sec->mem_size > end_bss)
++				end_bss = base + sec->va + sec->mem_size;
++		}
++
++		flush_icache_range(base + sec->va, base + sec->va + sec->mem_size);
++	}
++
++	current->mm->start_code = start_code;
++	current->mm->end_code = end_code;
++	current->mm->start_data = start_data;
++	current->mm->end_data = end_data;
++	if (end_bss == 0) {
++		start_bss = end_data > end_code ?
++			end_data : end_code;
++		end_bss = start_bss;
++	}
++	current->mm->start_brk = start_bss;
++	current->mm->brk = end_bss;
++
++	install_exec_creds(bprm);
++ 	current->flags &= ~PF_FORKNOEXEC;
++
++	set_binfmt(&pe32_format);
++	start_thread(regs, base + opt->entry, current->mm->start_stack);
++out:
++	if (secs)
++		kfree(secs);
++	if (opt)
++		kfree(opt);
++	if (coff)
++		kfree(coff);
++	return ret;
++}
++
++static int __init init_pe32_binfmt(void)
++{
++	return register_binfmt(&pe32_format);
++}
++
++static void __exit exit_pe32_binfmt(void)
++{
++	unregister_binfmt(&pe32_format);
++}
++
++core_initcall(init_pe32_binfmt);
++module_exit(exit_pe32_binfmt);
++MODULE_LICENSE("GPL");
+diff --git a/include/linux/pe32.h b/include/linux/pe32.h
+new file mode 100644
+index 0000000..ae852c3
+--- /dev/null
++++ b/include/linux/pe32.h
+@@ -0,0 +1,123 @@
++#ifndef __PE32_H__
++#define __PE32_H__
++
++#include <asm/pe32.h>
++
++#define PE32_SIGNATURE_OFFSET 0x3c
++#define PE32_SIGNATURE "PE\0" /* PE\0\0 */
++
++struct pe32_coff {
++	uint16_t machine;
++#define IMAGE_FILE_MACHINE_AMD64 0x8664
++#define IMAGE_FILE_MACHINE_IA32  0x14c
++	uint16_t sections;
++	uint32_t time_date_stamp;
++	uint32_t pointer_to_symtab;
++	uint32_t number_of_syms;
++	uint16_t sizeof_opt;
++	uint16_t chars;
++/* COFF characteristics. */
++#define IMAGE_FILE_RELOCS_STRIPPED 0x1
++#define IMAGE_FILE_EXECUTABLE_IMAGE 0x2
++};
++
++struct pe32_opt32 {
++
++	/* Standard fields. */
++	uint16_t magic;
++#define PE32_OPT32_MAGIC 0x10b
++	uint8_t  major_linker_ver;
++	uint8_t  minor_linker_ver;
++	uint32_t sizeof_code;
++	uint32_t sizeof_idata;
++	uint32_t sizeof_udata;
++	uint32_t entry;
++	uint32_t base_of_code;
++	uint32_t base_of_data;
++
++	/* NT fields. */
++	uint32_t image_base;
++	uint32_t section_alignment;
++	uint32_t file_alignment;
++	uint16_t major_os;
++	uint16_t minor_os;
++	uint16_t major_image;
++	uint16_t minor_image;
++	uint16_t major_sub;
++	uint16_t minor_sub;
++	uint32_t win32_ver;
++	uint32_t sizeof_image;
++	uint32_t sizeof_headers;
++	uint32_t checksum;
++	uint16_t subsystem;
++	uint16_t dll_chars;
++	uint32_t sizeof_stack_res;
++	uint32_t sizeof_stack_commit;
++	uint32_t sizeof_heap_res;
++	uint32_t sizeof_heap_commit;
++	uint32_t loader_flags;
++	uint32_t rvas_and_sizes;
++};
++
++struct pe32_opt64 {
++
++	/* Standard fields. */
++	uint16_t magic;
++#define PE32_OPT64_MAGIC 0x20b
++	uint8_t  major_linker_ver;
++	uint8_t  minor_linker_ver;
++	uint32_t sizeof_code;
++	uint32_t sizeof_idata;
++	uint32_t sizeof_udata;
++	uint32_t entry;
++	uint32_t base_of_code;
++
++	/* NT fields. */
++	uint64_t image_base;
++	uint32_t section_alignment;
++	uint32_t file_alignment;
++	uint16_t major_os;
++	uint16_t minor_os;
++	uint16_t major_image;
++	uint16_t minor_image;
++	uint16_t major_sub;
++	uint16_t minor_sub;
++	uint32_t win32_ver;
++	uint32_t sizeof_image;
++	uint32_t sizeof_headers;
++	uint32_t checksum;
++	uint16_t subsystem;
++	uint16_t dll_chars;
++	uint64_t sizeof_stack_res;
++	uint64_t sizeof_stack_commit;
++	uint64_t sizeof_heap_res;
++	uint64_t sizeof_heap_commit;
++	uint32_t loader_flags;
++	uint32_t rvas_and_sizes;
++};
++
++struct pe32_dir {
++	uint32_t va;
++	uint32_t size;
++};
++
++struct pe32_sechdr {
++	uint8_t name[8];
++	uint32_t mem_size;
++	uint32_t va;
++	uint32_t file_size;
++	uint32_t off_data;
++	uint32_t off_rel;
++	uint32_t off_lines;
++	uint16_t relocs;
++	uint16_t lines;
++	uint32_t chars;
++#define IMAGE_SCN_CNT_CODE  0x00000020
++#define IMAGE_SCN_CNT_IDATA 0x00000040
++#define IMAGE_SCN_CNT_UDATA 0x00000080
++#define IMAGE_SCN_MEM_EXEC  0x20000000
++#define IMAGE_SCN_MEM_READ  0x40000000
++#define IMAGE_SCN_MEM_WRITE 0x80000000
++};
++
++#endif
+-- 
+1.7.4.1
+
