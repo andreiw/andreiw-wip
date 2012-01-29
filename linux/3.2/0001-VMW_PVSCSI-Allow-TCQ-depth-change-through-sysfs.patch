@@ -1,0 +1,80 @@
+From 8cd4ea83a557ba90f50740d6058c1d052654c9b7 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@vmware.com>
+Date: Fri, 2 Dec 2011 18:56:00 -0500
+Subject: [PATCH] VMW_PVSCSI: Allow TCQ depth change through sysfs.
+
+Lets pvscsi be like all the other SCSI drivers, with
+an adjustable at runtime queue depth.
+
+Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
+---
+ drivers/scsi/vmw_pvscsi.c |   39 +++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 39 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/scsi/vmw_pvscsi.c b/drivers/scsi/vmw_pvscsi.c
+index a18996d..21939ce 100644
+--- a/drivers/scsi/vmw_pvscsi.c
++++ b/drivers/scsi/vmw_pvscsi.c
+@@ -32,6 +32,7 @@
+ #include <scsi/scsi_host.h>
+ #include <scsi/scsi_cmnd.h>
+ #include <scsi/scsi_device.h>
++#include <scsi/scsi_tcq.h>
+ 
+ #include "vmw_pvscsi.h"
+ 
+@@ -721,6 +722,43 @@ static int pvscsi_queue_lck(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd
+ 
+ static DEF_SCSI_QCMD(pvscsi_queue)
+ 
++/**
++ * pvscsi_change_queue_depth - setting device queue depth
++ * @sdev: scsi device struct
++ * @qdepth: requested queue depth
++ * @reason: SCSI_QDEPTH_DEFAULT/SCSI_QDEPTH_QFULL/SCSI_QDEPTH_RAMP_UP
++ * (see include/scsi/scsi_host.h for definition)
++ *
++ * Returns queue depth.
++ */
++static int pvscsi_change_queue_depth(struct scsi_device *sdev, int qdepth, int reason)
++{
++	int max_depth;
++	struct Scsi_Host *shost = sdev->host;
++
++	if (reason == SCSI_QDEPTH_DEFAULT ||
++	    reason == SCSI_QDEPTH_RAMP_UP) {
++		max_depth = shost->can_queue;
++		if (!sdev->tagged_supported)
++			max_depth = 1;
++
++		if (qdepth > max_depth)
++			qdepth = max_depth;
++
++		scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), qdepth);
++	} else if (reason == SCSI_QDEPTH_QFULL)
++		scsi_track_queue_full(sdev, qdepth);
++
++	if (sdev->inquiry_len > 7)
++		sdev_printk(KERN_INFO, sdev, "qdepth(%d), tagged(%d), "
++			    "simple(%d), ordered(%d), scsi_level(%d), cmd_que(%d)\n",
++			    sdev->queue_depth, sdev->tagged_supported, sdev->simple_tags,
++			    sdev->ordered_tags, sdev->scsi_level,
++			    (sdev->inquiry[7] & 2) >> 1);
++
++       return sdev->queue_depth;
++}
++
+ static int pvscsi_abort(struct scsi_cmnd *cmd)
+ {
+ 	struct pvscsi_adapter *adapter = shost_priv(cmd->device->host);
+@@ -911,6 +949,7 @@ static struct scsi_host_template pvscsi_template = {
+ 	.dma_boundary			= UINT_MAX,
+ 	.max_sectors			= 0xffff,
+ 	.use_clustering			= ENABLE_CLUSTERING,
++	.change_queue_depth             = pvscsi_change_queue_depth,
+ 	.eh_abort_handler		= pvscsi_abort,
+ 	.eh_device_reset_handler	= pvscsi_device_reset,
+ 	.eh_bus_reset_handler		= pvscsi_bus_reset,
+-- 
+1.7.4.1
+
