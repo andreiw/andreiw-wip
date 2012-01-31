@@ -1,4 +1,4 @@
-From bde20e1ff5f9c4c7c7c569bc23dd4c6362d94788 Mon Sep 17 00:00:00 2001
+From 0b55e03181793a32f3a1de2489dbba2e917e9c17 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Tue, 17 Jan 2012 01:55:00 -0500
 Subject: [PATCH 2/2] MD: RAID1: Optimize synchronization to avoid blocks
@@ -42,13 +42,13 @@ changes.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- drivers/md/bitmap.c |  243 +++++++++++++++++++++++++++++++++++++++++++--------
+ drivers/md/bitmap.c |  233 ++++++++++++++++++++++++++++++++++++++++++--------
  drivers/md/bitmap.h |   43 +++++++---
  drivers/md/raid1.c  |   49 +++++++++--
- 3 files changed, 279 insertions(+), 56 deletions(-)
+ 3 files changed, 269 insertions(+), 56 deletions(-)
 
 diff --git a/drivers/md/bitmap.c b/drivers/md/bitmap.c
-index e786da6..3951000 100644
+index e786da6..0b47006 100644
 --- a/drivers/md/bitmap.c
 +++ b/drivers/md/bitmap.c
 @@ -656,6 +656,10 @@ success:
@@ -109,7 +109,7 @@ index e786da6..3951000 100644
  	unsigned long chunk = block >> CHUNK_BLOCK_SHIFT(bitmap);
  
  	if (!bitmap->filemap)
-@@ -875,16 +890,38 @@ static void bitmap_file_set_bit(struct bitmap *bitmap, sector_t block)
+@@ -875,16 +890,27 @@ static void bitmap_file_set_bit(struct bitmap *bitmap, sector_t block)
  	page = filemap_get_page(bitmap, chunk);
  	if (!page)
  		return;
@@ -122,17 +122,6 @@ index e786da6..3951000 100644
 -		set_bit(bit, kaddr);
 -	else
 -		__set_bit_le(bit, kaddr);
-+
-+	/* No point to flush the page if the chunk is already
-+	 * used. Once a chunk is set as used it stays that
-+	 * way until it gets discarded.
-+	 */
-+	if ((bitmap->flags & BITMAP_HOSTENDIAN ?
-+	     test_bit(bit_base + bit, kaddr) :
-+	     test_bit_le(bit_base + bit, kaddr)) == set) {
-+		kunmap_atomic(kaddr);
-+		return;
-+	}
 +
 +	if (bitmap->flags & BITMAP_HOSTENDIAN) {
 +		if (set)
@@ -154,7 +143,7 @@ index e786da6..3951000 100644
  	/* record page number so it gets flushed to disk when unplug occurs */
  	set_page_attr(bitmap, page, BITMAP_PAGE_DIRTY);
  }
-@@ -934,6 +971,7 @@ void bitmap_unplug(struct bitmap *bitmap)
+@@ -934,6 +960,7 @@ void bitmap_unplug(struct bitmap *bitmap)
  }
  EXPORT_SYMBOL(bitmap_unplug);
  
@@ -162,7 +151,7 @@ index e786da6..3951000 100644
  static void bitmap_set_memory_bits(struct bitmap *bitmap, sector_t offset, int needed);
  /* * bitmap_init_from_disk -- called at bitmap_create time to initialize
   * the in-memory bitmap from the on-disk bitmap -- also, sets up the
-@@ -950,7 +988,7 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
+@@ -950,7 +977,7 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
  {
  	unsigned long i, chunks, index, oldindex, bit;
  	struct page *page = NULL, *oldpage = NULL;
@@ -171,7 +160,7 @@ index e786da6..3951000 100644
  	struct file *file;
  	unsigned long bytes, offset;
  	int outofdate;
-@@ -967,7 +1005,13 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
+@@ -967,7 +994,13 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
  		printk(KERN_INFO "%s: bitmap file is out of date, doing full "
  			"recovery\n", bmname(bitmap));
  
@@ -186,7 +175,7 @@ index e786da6..3951000 100644
  	if (!bitmap->mddev->bitmap_info.external)
  		bytes += sizeof(bitmap_super_t);
  
-@@ -997,7 +1041,7 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
+@@ -997,7 +1030,7 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
  	oldindex = ~0L;
  
  	for (i = 0; i < chunks; i++) {
@@ -195,7 +184,7 @@ index e786da6..3951000 100644
  		index = file_page_index(bitmap, i);
  		bit = file_page_offset(bitmap, i);
  		if (index != oldindex) { /* this is a new page, read it in */
-@@ -1046,6 +1090,10 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
+@@ -1046,6 +1079,10 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
  				/*
  				 * if bitmap is out of date, dirty the
  				 * whole page and write it out
@@ -206,7 +195,7 @@ index e786da6..3951000 100644
  				 */
  				paddr = kmap_atomic(page);
  				memset(paddr + offset, 0xff,
-@@ -1063,16 +1111,27 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
+@@ -1063,16 +1100,27 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
  			b = test_bit(bit, paddr);
  		else
  			b = test_bit_le(bit, paddr);
@@ -235,7 +224,7 @@ index e786da6..3951000 100644
  	}
  
  	/* everything went OK */
-@@ -1085,8 +1144,8 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
+@@ -1085,8 +1133,8 @@ static int bitmap_init_from_disk(struct bitmap *bitmap, sector_t start)
  	}
  
  	printk(KERN_INFO "%s: bitmap initialized from disk: "
@@ -246,7 +235,7 @@ index e786da6..3951000 100644
  
  	return 0;
  
-@@ -1223,10 +1282,10 @@ void bitmap_daemon_work(struct mddev *mddev)
+@@ -1223,10 +1271,10 @@ void bitmap_daemon_work(struct mddev *mddev)
  					 &blocks, 0);
  		if (!bmc)
  			j |= PAGE_COUNTER_MASK;
@@ -260,7 +249,7 @@ index e786da6..3951000 100644
  				bitmap_count_page(bitmap,
  						  (sector_t)j << CHUNK_BLOCK_SHIFT(bitmap),
  						  -1);
-@@ -1242,8 +1301,8 @@ void bitmap_daemon_work(struct mddev *mddev)
+@@ -1242,8 +1290,8 @@ void bitmap_daemon_work(struct mddev *mddev)
  								 j),
  						paddr);
  				kunmap_atomic(paddr);
@@ -271,7 +260,7 @@ index e786da6..3951000 100644
  				set_page_attr(bitmap, page, BITMAP_PAGE_PENDING);
  				bitmap->allclean = 0;
  			}
-@@ -1314,6 +1373,56 @@ __acquires(bitmap->lock)
+@@ -1314,6 +1362,56 @@ __acquires(bitmap->lock)
  			&(bitmap->bp[page].map[pageoff]);
  }
  
@@ -328,7 +317,7 @@ index e786da6..3951000 100644
  int bitmap_startwrite(struct bitmap *bitmap, sector_t offset, unsigned long sectors, int behind)
  {
  	if (!bitmap)
-@@ -1335,7 +1444,8 @@ int bitmap_startwrite(struct bitmap *bitmap, sector_t offset, unsigned long sect
+@@ -1335,7 +1433,8 @@ int bitmap_startwrite(struct bitmap *bitmap, sector_t offset, unsigned long sect
  		bitmap_counter_t *bmc;
  
  		spin_lock_irq(&bitmap->lock);
@@ -338,7 +327,7 @@ index e786da6..3951000 100644
  		if (!bmc) {
  			spin_unlock_irq(&bitmap->lock);
  			return 0;
-@@ -1355,16 +1465,27 @@ int bitmap_startwrite(struct bitmap *bitmap, sector_t offset, unsigned long sect
+@@ -1355,16 +1454,28 @@ int bitmap_startwrite(struct bitmap *bitmap, sector_t offset, unsigned long sect
  			continue;
  		}
  
@@ -363,14 +352,15 @@ index e786da6..3951000 100644
 +		 * with resync problems.
 +		 */
 +		if (DISCARDING(bmc)) {
-+			*bmc = (*bmc & ~DISCARDING_MASK) + 1;
++			*bmc &= ~DISCARDING_MASK;
 +			bitmap_file_set_bit(bitmap, offset,
 +					    PAGE_BIT_INU, true);
 +		}
++                (*bmc)++;
  
  		spin_unlock_irq(&bitmap->lock);
  
-@@ -1397,7 +1518,8 @@ void bitmap_endwrite(struct bitmap *bitmap, sector_t offset, unsigned long secto
+@@ -1397,7 +1508,8 @@ void bitmap_endwrite(struct bitmap *bitmap, sector_t offset, unsigned long secto
  		bitmap_counter_t *bmc;
  
  		spin_lock_irqsave(&bitmap->lock, flags);
@@ -380,7 +370,7 @@ index e786da6..3951000 100644
  		if (!bmc) {
  			spin_unlock_irqrestore(&bitmap->lock, flags);
  			return;
-@@ -1417,7 +1539,12 @@ void bitmap_endwrite(struct bitmap *bitmap, sector_t offset, unsigned long secto
+@@ -1417,7 +1529,12 @@ void bitmap_endwrite(struct bitmap *bitmap, sector_t offset, unsigned long secto
  			wake_up(&bitmap->overflow_wait);
  
  		(*bmc)--;
@@ -394,7 +384,7 @@ index e786da6..3951000 100644
  			set_page_attr(bitmap,
  				      filemap_get_page(
  					      bitmap,
-@@ -1425,6 +1552,7 @@ void bitmap_endwrite(struct bitmap *bitmap, sector_t offset, unsigned long secto
+@@ -1425,6 +1542,7 @@ void bitmap_endwrite(struct bitmap *bitmap, sector_t offset, unsigned long secto
  				      BITMAP_PAGE_PENDING);
  			bitmap->allclean = 0;
  		}
@@ -402,7 +392,7 @@ index e786da6..3951000 100644
  		spin_unlock_irqrestore(&bitmap->lock, flags);
  		offset += blocks;
  		if (sectors > blocks)
-@@ -1445,7 +1573,8 @@ static int __bitmap_start_sync(struct bitmap *bitmap, sector_t offset, sector_t
+@@ -1445,7 +1563,8 @@ static int __bitmap_start_sync(struct bitmap *bitmap, sector_t offset, sector_t
  		return 1; /* always resync if no bitmap */
  	}
  	spin_lock_irq(&bitmap->lock);
@@ -412,7 +402,7 @@ index e786da6..3951000 100644
  	rv = 0;
  	if (bmc) {
  		/* locked */
-@@ -1458,6 +1587,9 @@ static int __bitmap_start_sync(struct bitmap *bitmap, sector_t offset, sector_t
+@@ -1458,6 +1577,9 @@ static int __bitmap_start_sync(struct bitmap *bitmap, sector_t offset, sector_t
  				*bmc &= ~NEEDED_MASK;
  			}
  		}
@@ -422,7 +412,7 @@ index e786da6..3951000 100644
  	}
  	spin_unlock_irq(&bitmap->lock);
  	return rv;
-@@ -1497,17 +1629,18 @@ void bitmap_end_sync(struct bitmap *bitmap, sector_t offset, sector_t *blocks, i
+@@ -1497,17 +1619,18 @@ void bitmap_end_sync(struct bitmap *bitmap, sector_t offset, sector_t *blocks, i
  		return;
  	}
  	spin_lock_irqsave(&bitmap->lock, flags);
@@ -444,7 +434,7 @@ index e786da6..3951000 100644
  				set_page_attr(bitmap,
  					      filemap_get_page(bitmap, offset >> CHUNK_BLOCK_SHIFT(bitmap)),
  					      BITMAP_PAGE_PENDING);
-@@ -1567,6 +1700,37 @@ void bitmap_cond_end_sync(struct bitmap *bitmap, sector_t sector)
+@@ -1567,6 +1690,37 @@ void bitmap_cond_end_sync(struct bitmap *bitmap, sector_t sector)
  }
  EXPORT_SYMBOL(bitmap_cond_end_sync);
  
@@ -482,7 +472,7 @@ index e786da6..3951000 100644
  static void bitmap_set_memory_bits(struct bitmap *bitmap, sector_t offset, int needed)
  {
  	/* For each chunk covered by any of these sectors, set the
-@@ -1577,19 +1741,22 @@ static void bitmap_set_memory_bits(struct bitmap *bitmap, sector_t offset, int n
+@@ -1577,19 +1731,22 @@ static void bitmap_set_memory_bits(struct bitmap *bitmap, sector_t offset, int n
  	sector_t secs;
  	bitmap_counter_t *bmc;
  	spin_lock_irq(&bitmap->lock);
@@ -508,7 +498,7 @@ index e786da6..3951000 100644
  	spin_unlock_irq(&bitmap->lock);
  }
  
-@@ -1602,7 +1769,7 @@ void bitmap_dirty_bits(struct bitmap *bitmap, unsigned long s, unsigned long e)
+@@ -1602,7 +1759,7 @@ void bitmap_dirty_bits(struct bitmap *bitmap, unsigned long s, unsigned long e)
  		sector_t sec = (sector_t)chunk << CHUNK_BLOCK_SHIFT(bitmap);
  		bitmap_set_memory_bits(bitmap, sec, 1);
  		spin_lock_irq(&bitmap->lock);
@@ -612,7 +602,7 @@ index af588ac..1b5aa0e 100644
  			unsigned long sectors, int behind);
  void bitmap_endwrite(struct bitmap *bitmap, sector_t offset,
 diff --git a/drivers/md/raid1.c b/drivers/md/raid1.c
-index a368db2..158bfcb 100644
+index a368db2..e4abaad 100644
 --- a/drivers/md/raid1.c
 +++ b/drivers/md/raid1.c
 @@ -835,6 +835,7 @@ static void make_request(struct mddev *mddev, struct bio * bio)
@@ -700,7 +690,7 @@ index a368db2..158bfcb 100644
 +
 +	/* A full range of REQ_DISCARDED blocks. */
 +	if (ret == 2) {
-+                bitmap_start_sync(mddev->bitmap, sector_nr, &sync_blocks, 0);
++		bitmap_start_sync(mddev->bitmap, sector_nr, &sync_blocks, 0);
 +		bitmap_cond_end_sync(mddev->bitmap, sector_nr);
 +		bitmap_end_sync(mddev->bitmap, sector_nr, &sync_blocks, 0);
 +		*skipped = 1;
@@ -723,7 +713,7 @@ index a368db2..158bfcb 100644
  	}
  
 +	/*
-+	 * FIXME: Limits should be based on slave devices.
++	 * FIXME: Figure out the correct limits.
 +	 */
 +	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, mddev->queue);
 +	mddev->queue->limits.max_discard_sectors = 2048;

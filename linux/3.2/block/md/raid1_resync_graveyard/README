@@ -1,0 +1,20 @@
+This is a graveyard for interesting, but ultimately unfeasable
+ideas w.r.t. improving resync performance by monitoring REQ_DISCARD
+requests.
+
+This patch set against MD and mdadm extends the on-disk bitmap with an
+in-use bit, and tracks REQ_DISCARD requests. Unfortunately, it's useless
+for bitmap chunk sizes > 4k (because the likelyhood of doing 64m discards is nil).
+
+0001-MDADM-Add-support-for-v5-bitmap-with-inuse-bits.patch
+0001-MD-Bitmap-version-cleanup.patch
+0002-MD-RAID1-Optimize-synchronization-to-avoid-blocks-ma.patch                        
+
+This patch attempts to improve on above by keeping ranges, and by
+removing the on-disk changes (which are unnecessary, due to the way
+fstrim and friends are used). However, it suffers from terrible
+worst case memory usage - you can't do better than a bit per block, and you're
+going to be in a world of pain if someone starts discarding every other 4K. Ex:
+1 MB of RAM to describe 2 MB of "hole punched" disk.
+
+0001-MD-RAID1-Optimize-resync-by-avoiding-discarded-block.patch

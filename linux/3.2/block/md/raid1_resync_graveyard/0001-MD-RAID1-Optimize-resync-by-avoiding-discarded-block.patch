@@ -1,0 +1,1047 @@
+From 6753aac2dfba4fafe0cf79b87c3685dceba8040e Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Mon, 30 Jan 2012 21:43:17 -0500
+Subject: [PATCH] MD: RAID1: Optimize resync by avoiding discarded blocks.
+
+Tracks REQ_DISCARD requests to improve resyncing, by avoiding
+blocks marked as discarded. This applies both to partial and
+full syncs.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ drivers/md/Kconfig   |   15 +
+ drivers/md/Makefile  |    1 +
+ drivers/md/discard.c |  745 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ drivers/md/discard.h |   74 +++++
+ drivers/md/raid1.c   |   66 +++++
+ drivers/md/raid1.h   |    5 +
+ 6 files changed, 906 insertions(+), 0 deletions(-)
+ create mode 100644 drivers/md/discard.c
+ create mode 100644 drivers/md/discard.h
+
+diff --git a/drivers/md/Kconfig b/drivers/md/Kconfig
+index faa4741..85576e7 100644
+--- a/drivers/md/Kconfig
++++ b/drivers/md/Kconfig
+@@ -99,6 +99,21 @@ config MD_RAID1
+ 
+ 	  If unsure, say Y.
+ 
++config MD_DISCARD_RANGES
++	depends on BLK_DEV_MD
++	tristate "Maintain discard ranges to optimize resync"
++	---help---
++	  Keep track of file system-issued REQ_DISCARD requests to
++	  reduce the amount of work to do during a resync. Currently
++	  used by RAID1.
++
++config MD_DISCARD_RANGES_DEBUG
++	tristate "Discard ranges support debugging"
++	depends on MD_DISCARD_RANGES
++	---help---
++	  Provide a sysfs interface for debugging discard ranges
++	  and run unit tests to ensure algorithm correctness.
++
+ config MD_RAID10
+ 	tristate "RAID-10 (mirrored striping) mode"
+ 	depends on BLK_DEV_MD
+diff --git a/drivers/md/Makefile b/drivers/md/Makefile
+index 046860c..d100a11 100644
+--- a/drivers/md/Makefile
++++ b/drivers/md/Makefile
+@@ -26,6 +26,7 @@ obj-$(CONFIG_MD_RAID10)		+= raid10.o
+ obj-$(CONFIG_MD_RAID456)	+= raid456.o
+ obj-$(CONFIG_MD_MULTIPATH)	+= multipath.o
+ obj-$(CONFIG_MD_FAULTY)		+= faulty.o
++obj-$(CONFIG_MD_DISCARD_RANGES)	+= discard.o
+ obj-$(CONFIG_BLK_DEV_MD)	+= md-mod.o
+ obj-$(CONFIG_BLK_DEV_DM)	+= dm-mod.o
+ obj-$(CONFIG_DM_BUFIO)		+= dm-bufio.o
+diff --git a/drivers/md/discard.c b/drivers/md/discard.c
+new file mode 100644
+index 0000000..13751be
+--- /dev/null
++++ b/drivers/md/discard.c
+@@ -0,0 +1,745 @@
++/*
++ * Time-stamp: <2012-01-30 21:33:48 andreiw>
++ * Copyright (C) 2012 Andrei Evgenievich Warkentin
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#include <linux/kernel.h>
++#include <linux/rbtree.h>
++#include <linux/blkdev.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include "discard.h"
++
++#ifdef CONFIG_MD_DISCARD_RANGES_DEBUG
++struct dsysfs_attr {
++	struct attribute attr;
++	ssize_t (*show)(struct discard_ranges *, char *);
++	ssize_t (*store)(struct discard_ranges *, const char *);
++};
++
++#define DATTR(_name) \
++struct dsysfs_attr dattr_##_name = \
++	__ATTR(_name, S_IRUGO, dattr_##_name##_show, NULL)
++
++static ssize_t dattr_show(struct kobject *kobj,
++			  struct attribute *attr,
++			  char *page)
++{
++	struct dsysfs_attr *dattr;
++	struct discard_ranges *ranges;
++
++	dattr = container_of(attr, struct dsysfs_attr, attr);
++	if (!dattr->show)
++		return -EIO;
++
++	ranges = container_of(kobj, struct discard_ranges, kobj);
++	return dattr->show(ranges, page);
++}
++
++static struct sysfs_ops dops = {
++	.show = dattr_show,
++};
++
++static ssize_t dattr_count_show(struct discard_ranges *ranges, char *page)
++{
++	return sprintf(page, "%llu\n", ranges->count);
++}
++
++static DATTR(count);
++
++static struct attribute *dattrs[] = {
++	&dattr_count.attr
++};
++
++static struct kobj_type dktype = {
++	.sysfs_ops = &dops,
++	.default_attrs = dattrs,
++};
++#endif /* CONFIG_MD_DISCARD_RANGES_DEBUG */
++
++static struct kmem_cache *discard_range_cache = NULL;
++
++/*
++ * Creates the slab to manage discard_range objects.
++ */
++int discard_ranges_init(void)
++{
++	discard_range_cache = kmem_cache_create("md_discard_range",
++						sizeof(struct discard_range),
++						0, 0, NULL);
++	if (!discard_range_cache)
++		return -ENOMEM;
++
++	return 0;
++}
++
++/*
++ * Tears down the slab to manage discard_range objects.
++ */
++void discard_ranges_fini(void)
++{
++	if (discard_range_cache) {
++		kmem_cache_destroy(discard_range_cache);
++		discard_range_cache = NULL;
++	}
++}
++
++/*
++ * Prepares a discard_ranges object for use by
++ * discard_mark, discard_unmark, and discard_contains
++ * routines.
++ */
++int discard_ranges_prep(struct discard_ranges *ranges,
++			struct kobject *kobj)
++{
++	ranges->root = RB_ROOT;
++	mutex_init(&ranges->mutex);
++
++#ifdef CONFIG_MD_DISCARD_RANGES_DEBUG
++	kobject_init(&ranges->kobj, &dktype);
++	ranges->count = 0;
++	if (kobj)
++		return kobject_add(&ranges->kobj,
++				   kobj, "discard_ranges");
++#endif /* CONFIG_MD_DISCARD_RANGES_DEBUG */
++	return 0;
++}
++
++/*
++ * Helper accessor for discard_range->max_end, simplifying
++ * for node being NULL.
++ */
++static sector_t discard_max_end(struct rb_node *node)
++{
++	sector_t ret = 0;
++	if (node) {
++		struct discard_range *data =
++			container_of(node,
++				     struct discard_range,
++				     node);
++		ret = data->max_end;
++	}
++	return ret;
++}
++
++/*
++ * Callback invoked on insert/erase operations on all nodes between
++ * the node being manipulated and the root. Used to implement
++ * an augmented tree, to simplify lookup of smallest overlapping range.
++ */
++static void discard_augment_cb(struct rb_node *node, void *__unused)
++{
++	struct discard_range *data;
++	sector_t max_end, child_max_end;
++
++	if (!node)
++		return;
++
++	data = container_of(node,
++			    struct discard_range,
++			    node);
++	max_end = data->end;
++
++	child_max_end = discard_max_end(node->rb_right);
++	if (child_max_end > max_end)
++		max_end = child_max_end;
++	
++	child_max_end = discard_max_end(node->rb_left);
++	if (child_max_end > max_end)
++		max_end = child_max_end;
++	data->max_end = max_end;
++}
++
++/*
++ * Erase a specific range object from the tree described
++ * by discard_ranges.
++ */
++static void drange_erase(struct discard_ranges *ranges,
++			 struct discard_range *range)
++{
++	struct rb_node *deepest;
++
++	deepest = rb_augment_erase_begin(&range->node);
++	rb_erase(&range->node, &ranges->root);
++	rb_augment_erase_end(deepest, discard_augment_cb, NULL);
++#ifdef CONFIG_MD_DISCARD_RANGES_DEBUG
++	ranges->count--;
++#endif /* CONFIG_MD_DISCARD_RANGES_DEBUG */
++}
++
++/*
++ * Opposite of discard_ranges_prep, tears down the
++ * discard_ranges object.
++ */
++void discard_ranges_clean(struct discard_ranges *ranges)
++{
++	struct rb_node *node;
++	node = rb_first(&ranges->root);
++
++	while (node) {
++		struct discard_range *data =
++			container_of(node,
++				     struct discard_range,
++				     node);
++		node = rb_next(node);
++		drange_erase(ranges, data);
++		kmem_cache_free(discard_range_cache, data);
++	}
++
++#ifdef CONFIG_MD_DISCARD_RANGES_DEBUG
++	kobject_put(&ranges->kobj);
++#endif /* CONFIG_MD_DISCARD_RANGES_DEBUG */
++}
++
++/*
++ * Insert a specific range object into the tree descirbed
++ * by the discard_ranges object. Pretty standard augmented
++ * insert.
++ */
++static int drange_insert(struct discard_ranges *ranges,
++			  struct discard_range *range)
++{
++	struct rb_node **new = &(ranges->root.rb_node);
++	struct rb_node *parent = NULL;
++
++	while (*new) {
++		struct discard_range *data =
++			container_of(*new,
++				     struct discard_range,
++				     node);
++		parent = *new;
++		if (range->start < data->start)
++			new = &((*new)->rb_left);
++		else if (range->start > data->start)
++			new = &((*new)->rb_right);
++		else
++			return -1;
++	}
++
++	rb_link_node(&range->node, parent, new);
++	rb_insert_color(&range->node, &ranges->root);
++	rb_augment_insert(&range->node, discard_augment_cb, NULL);
++#ifdef CONFIG_MD_DISCARD_RANGES_DEBUG
++	ranges->count++;
++#endif /* CONFIG_MD_DISCARD_RANGES_DEBUG */
++	return 0;
++}
++
++/*
++ * Returns the smallest range that overlaps the sector
++ * range [start, end] (inclusive).
++ */
++static struct discard_range *drange_overlap(struct discard_ranges *ranges,
++					    sector_t start,
++					    sector_t end)
++{
++	struct discard_range *match = NULL;
++	struct rb_node *node = ranges->root.rb_node;
++
++	while (node) {
++		struct discard_range *data =
++			container_of(node,
++				     struct discard_range,
++				     node);
++
++		/*
++		 * Extra check for rb_left necessary as 0
++		 * returned by max_end could be either actual
++		 * value or lack of node.
++		 */
++		if (discard_max_end(node->rb_left) >= start &&
++		    node->rb_left) {
++			node = node->rb_left;
++		} else if (end >= data->start &&
++			   data->end >= start) {
++			match = data;
++			break;
++		} else if (start > data->start)  {
++			node = node->rb_right;
++		} else {
++			break;
++		}
++	}
++
++	return match;
++}
++
++/*
++ * Removes a particular range [start, end] (inclusive),
++ * from the tree described by discard_ranges. In case
++ * of partial overlap conditions, clean up and adjusts existing
++ * discard_range objects.
++ */
++void discard_unmark(struct discard_ranges *ranges,
++		    sector_t start,
++		    sector_t end)
++{
++	struct discard_range *r;
++
++	mutex_lock(&ranges->mutex);
++	r = drange_overlap(ranges, start, end);
++	while (r && r->start <= end) {
++		struct rb_node *next;
++		sector_t o_start = r->start;
++		sector_t o_end = r->end;
++
++		next = rb_next(&r->node);
++		drange_erase(ranges, r);
++		if (o_start < start) {
++			r->end = start - 1;
++			BUG_ON(drange_insert(ranges, r));
++
++			/* Unmarking middle of a discard range. */
++			if (o_end > end) {
++				r = kmem_cache_zalloc(discard_range_cache,
++							 GFP_KERNEL);
++
++				/*
++				 * If we failed to get a node
++				 * to describe the second half,
++				 * too bad - we end up unmarking
++				 * more than we need to, so slightly
++				 * more to resync than needed to.
++				 */
++				if (!r)
++					break;
++
++				r->start = end + 1;
++				r->end = o_end;
++				BUG_ON(drange_insert(ranges, r));
++				break;
++			}
++		} else if (o_end > end) {
++			r->start = end + 1;
++			BUG_ON(drange_insert(ranges, r));
++		} else {
++			kmem_cache_free(discard_range_cache,
++					r);
++		}
++
++		if (next)
++			r = container_of(next, struct discard_range,
++					 node);
++		else
++			r = NULL;
++	}
++
++	mutex_unlock(&ranges->mutex);
++}
++
++/*
++ * Adds a particular range [start, end] to the tree
++ * described by ranges. Because we want to coalesce
++ * consecutive ranges, we perform a lookup on
++ * [start - 1, end + 1].
++ */
++void discard_mark(struct discard_ranges *ranges,
++		  sector_t start,
++		  sector_t end)
++{
++	struct discard_range *olap, *new;
++	sector_t s_start = start, s_end = end;
++
++	/*
++	 * Any ranges consecutive to the one we're interested in
++	 * we'll treat as overlapping, so we can join them.
++	 */
++	if (s_start != 0)
++		s_start--;
++
++	if (s_end + 1 != 0)
++		s_end++;
++
++	mutex_lock(&ranges->mutex);
++	if((olap = drange_overlap(ranges, s_start, s_end))) {
++		/* Possibly nothing to do. */
++		if (unlikely (olap->start == start &&
++			      olap->end == end)) {
++			mutex_unlock(&ranges->mutex);
++			return;
++		}
++	}
++
++	new = kmem_cache_zalloc(discard_range_cache, GFP_KERNEL);
++	if (!new) {
++		mutex_unlock(&ranges->mutex);
++		return;
++	}
++
++	new->start = start;
++	new->end = end;
++
++	while (olap && olap->start <= s_end) {
++		struct rb_node *next;
++
++		next = rb_next(&olap->node);
++		if (olap->start < new->start)
++			new->start = olap->start;
++		if (olap->end > new->end)
++			new->end = olap->end;
++
++		drange_erase(ranges, olap);
++		kmem_cache_free(discard_range_cache,
++				olap);
++		if (next)
++			olap = container_of(next, struct discard_range, node);
++		else
++			olap = NULL;
++	}
++
++	BUG_ON(drange_insert(ranges, new));
++	mutex_unlock(&ranges->mutex);
++}
++
++/*
++ * Returns the discard_range that contains the sector range, or NULL.
++ */
++struct discard_range *discard_contains(struct discard_ranges *ranges,
++				       sector_t start,
++                                       sector_t end)
++{
++	struct discard_range *range;
++	mutex_lock(&ranges->mutex);
++	range = drange_overlap(ranges, start, end);
++	mutex_unlock(&ranges->mutex);
++	return range;
++}
++
++/* Unit tests to enable easy testing of the discard_range logic. */
++#ifdef MD_DISCARD_RANGES_DEBUG
++
++/*
++ * Parses a string like "[start-end][start-end][start-end]..." to
++ * add new ranges to a discard_ranges object.
++ */
++static int __init discard_ranges_create(struct discard_ranges *ranges,
++					char *buf)
++{
++	int ret, read;
++	sector_t start, end;
++
++	while (1) {
++		ret = sscanf(buf, "[%lu-%lu]%n", &start, &end, &read);
++		if (ret != 2)
++			return 0;
++
++		ret = discard_mark(ranges, start, end);
++		if (ret)
++			return ret;
++		buf += read;
++	}
++
++	return ret;
++}
++
++/*
++ * Dumps the discard_ranges object as a string in the form
++ * "[start-end][start-end][start-end]...", where described
++ * ranges are in increasing order.
++ */
++static void __init discard_ranges_dump(struct discard_ranges *ranges,
++				       char *buf, size_t len)
++{
++	struct rb_node *node;
++	int off = 0;
++
++	for (node = rb_first(&ranges->root); node;) {
++		off += snprintf(buf + off, len - off, "[%lu-%lu]",
++			       rb_entry(node, struct discard_range, node)->start,
++			       rb_entry(node, struct discard_range, node)->end);
++		node = rb_next(node);
++
++		/* More nodes than expected. */
++		if ((off + 1) == len &&
++		    node &&
++		    len > 1) {
++			buf[len - 2] = '+';
++			break;
++		}
++	}
++	buf[len - 1] = '\0';
++}
++
++/*
++ * Discard ranges unit test. Creates a discard_ranges object
++ * based on the spec string in, performs operation
++ * specified by fn on range [start, end], and compares the
++ * resulting discard tree against the spec string expected.
++ */
++static __init int discard_ut(void (*fn)(struct discard_ranges *,
++					sector_t, sector_t),
++			     sector_t start, sector_t end,
++			     char *in,
++			     char *expected,
++			     char *name)
++{
++	int len;
++	int ret = 0;
++	char *out = NULL;
++	char *pre = NULL;
++	struct discard_ranges ranges;
++	static unsigned test = 0;
++
++	printk("[%04u] - ", test);
++
++	len = strlen(expected) + 1;
++	out = kzalloc(len, GFP_KERNEL);
++	if (!out) {
++		ret = -ENOMEM;
++		pre = "kzalloc fail";
++		goto out;
++	}
++
++	discard_ranges_prep(&ranges, NULL);
++	ret = discard_ranges_create(&ranges, in);
++	if (ret) {
++		pre = "ranges_create fail";
++		goto out;
++	}
++
++	fn(&ranges, start, end);
++	discard_ranges_dump(&ranges, out, len);
++out:
++	discard_ranges_clean(&ranges);
++	if (!ret && !strncmp(out, expected, len))
++		printk("PASS - %s\n", name);
++	else {
++		printk("FAIL - %s(%lu, %lu) - %s\n--> ",
++		       fn == discard_mark ? "mark" : "unmark",
++		       start, end, name);
++
++		if(pre)
++			printk("%s: %d\n", pre, ret);
++		else {
++			printk("expected %s\n"
++			       "--> got      %s\n"
++			       "--> retval   %d\n",
++			       expected, out, ret);
++			if (!ret)
++				ret = -EINVAL;
++		}
++	}
++
++	if (out)
++		kfree(out);
++	test++;
++	return ret;
++}
++
++/*
++ * Main unit test driver.
++ */
++int __init discard_ranges_test(void)
++{
++	int err = 0;
++	bool clean_slab = false;
++
++	printk("MD discard range tree sanity tests\n");
++	printk("----------------------------------\n");
++
++	if (!discard_range_cache) {
++		BUG_ON(discard_ranges_init());
++		clean_slab = true;
++	}
++
++	/* Marking tests. */
++	err |= discard_ut(discard_mark, 50, 100,
++			  "",
++			  "[50-100]",
++			  "first");
++	err |= discard_ut(discard_mark, 50, 100,
++			  "[50-100]",
++			  "[50-100]",
++			  "duplicate");
++	err |= discard_ut(discard_mark, 20, 30,
++			  "[50-100]",
++			  "[20-30][50-100]",
++			  "mark left");
++	err |= discard_ut(discard_mark, 200, 300,
++			  "[50-100]",
++			  "[50-100][200-300]",
++			  "mark right");
++	err |= discard_ut(discard_mark, 20, 100,
++			  "[20-30][50-100][200-300]",
++			  "[20-100][200-300]",
++			  "coalesce overlap");
++	err |= discard_ut(discard_mark, 50, 300,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-300]",
++			  "coalesce overlap");
++	err |= discard_ut(discard_mark, 20, 300,
++			  "[20-30][50-100][200-300]",
++			  "[20-300]",
++			  "coalesce overlap");
++	err |= discard_ut(discard_mark, 15, 100,
++			  "[20-30][50-100][200-300]",
++			  "[15-100][200-300]",
++			  "coalesce overlap left");
++	err |= discard_ut(discard_mark, 50, 301,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-301]",
++			  "coalesce overlap right");
++	err |= discard_ut(discard_mark, 10, 301,
++			  "[20-30][50-100][200-300]",
++			  "[10-301]",
++			  "coalesce overlap left right");
++	err |= discard_ut(discard_mark, 10, 30,
++			  "[20-30][50-100][200-300]",
++			  "[10-30][50-100][200-300]",
++			  "left overlap");
++	err |= discard_ut(discard_mark, 10, 29,
++			  "[20-30][50-100][200-300]",
++			  "[10-30][50-100][200-300]",
++			  "left overlap");
++	err |= discard_ut(discard_mark, 10, 28,
++			  "[20-30][50-100][200-300]",
++			  "[10-30][50-100][200-300]",
++			  "left overlap");
++	err |= discard_ut(discard_mark, 10, 20,
++			  "[20-30][50-100][200-300]",
++			  "[10-30][50-100][200-300]",
++			  "left overlap");
++	err |= discard_ut(discard_mark, 10, 19,
++			  "[20-30][50-100][200-300]",
++			  "[10-30][50-100][200-300]",
++			  "left consecutive");
++	err |= discard_ut(discard_mark, 200, 400,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100][200-400]",
++			  "right overlap");
++	err |= discard_ut(discard_mark, 201, 400,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100][200-400]",
++			  "right overlap");
++	err |= discard_ut(discard_mark, 202, 400,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100][200-400]",
++			  "right overlap");
++	err |= discard_ut(discard_mark, 300, 400,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100][200-400]",
++			  "right overlap");
++	err |= discard_ut(discard_mark, 301, 400,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100][200-400]",
++			  "right consecutive");
++
++	/* Unmarking tests. */
++	err |= discard_ut(discard_unmark, 20, 30,
++			  "[20-30][50-100][200-300]",
++			  "[50-100][200-300]",
++			  "unmark one");
++	err |= discard_ut(discard_unmark, 50, 100,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][200-300]",
++			  "unmark one");
++	err |= discard_ut(discard_unmark, 200, 300,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100]",
++			  "unmark one");
++	err |= discard_ut(discard_unmark, 10, 30,
++			  "[20-30][50-100][200-300]",
++			  "[50-100][200-300]",
++			  "unmark left overlap");
++	err |= discard_ut(discard_unmark, 10, 24,
++			  "[20-30][50-100][200-300]",
++			  "[25-30][50-100][200-300]",
++			  "unmark left overlap");
++	err |= discard_ut(discard_unmark, 20, 40,
++			  "[20-30][50-100][200-300]",
++			  "[50-100][200-300]",
++			  "unmark right overlap");
++	err |= discard_ut(discard_unmark, 26, 40,
++			  "[20-30][50-100][200-300]",
++			  "[20-25][50-100][200-300]",
++			  "unmark right overlap");
++	err |= discard_ut(discard_unmark, 26, 54,
++			  "[20-30][50-100][200-300]",
++			  "[20-25][55-100][200-300]",
++			  "unmark middle");
++	err |= discard_ut(discard_unmark, 21, 99,
++			  "[20-30][50-100][200-300]",
++			  "[20-20][100-100][200-300]",
++			  "unmark middle");
++	err |= discard_ut(discard_unmark, 20, 100,
++			  "[20-30][50-100][200-300]",
++			  "[200-300]",
++			  "unmark coalesce");
++	err |= discard_ut(discard_unmark, 19, 101,
++			  "[20-30][50-100][200-300]",
++			  "[200-300]",
++			  "unmark coalesce");
++	err |= discard_ut(discard_unmark, 10, 19,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100][200-300]",
++			  "unmark next left");
++	err |= discard_ut(discard_unmark, 31, 35,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100][200-300]",
++			  "unmark next right");
++	err |= discard_ut(discard_unmark, 301, 350,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-100][200-300]",
++			  "unmark next right");
++	err |= discard_ut(discard_unmark, 10, 99,
++			  "[20-30][50-100][200-300]",
++			  "[100-100][200-300]",
++			  "unmark left coalesce");
++	err |= discard_ut(discard_unmark, 10, 94,
++			  "[20-30][50-100][200-300]",
++			  "[95-100][200-300]",
++			  "unmark left coalesce");
++	err |= discard_ut(discard_unmark, 56, 400,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-55]",
++			  "unmark right coalesce");
++	err |= discard_ut(discard_unmark, 51, 400,
++			  "[20-30][50-100][200-300]",
++			  "[20-30][50-50]",
++			  "unmark right coalesce");
++	err |= discard_ut(discard_unmark, 20, 300,
++			  "[20-30][50-100][200-300]",
++			  "",
++			  "unmark all");
++	err |= discard_ut(discard_unmark, 21, 299,
++			  "[20-30][50-100][200-300]",
++			  "[20-20][300-300]",
++			  "unmark middle");
++	err |= discard_ut(discard_unmark, 20, 299,
++			  "[20-30][50-100][200-300]",
++			  "[300-300]",
++			  "unmark middle");
++	err |= discard_ut(discard_unmark, 21, 300,
++			  "[20-30][50-100][200-300]",
++			  "[20-20]",
++			  "unmark middle");
++	err |= discard_ut(discard_unmark, 10, 350,
++			  "[20-30][50-100][200-300]",
++			  "",
++			  "unmark all overlap");
++	if (err)
++		panic("MD discard range tests failed\n");
++
++	if (clean_slab) {
++		discard_ranges_fini();
++		BUG_ON(discard_range_cache);
++	}
++	return 0;
++}
++
++subsys_initcall(discard_ranges_test);
++#endif /* CONFIG_MD_DISCARD_RANGES_DEBUG */
+diff --git a/drivers/md/discard.h b/drivers/md/discard.h
+new file mode 100644
+index 0000000..57607ee
+--- /dev/null
++++ b/drivers/md/discard.h
+@@ -0,0 +1,74 @@
++/*
++ * Time-stamp: <2012-01-30 21:18:52 andreiw>
++ * Copyright (C) 2012 Andrei Evgenievich Warkentin
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef _DISCARD_H
++#define _DISCARD_H
++
++/*
++ * An individual range of discarded sectors.
++ */
++struct discard_range {
++	struct rb_node node;
++
++	/* Inclusive. */
++	sector_t start;
++	sector_t end;
++
++	/* Helps with figuring out overlaps. */
++	sector_t max_end;
++};
++
++/*
++ * A discard_ranges object describes all ranges
++ * that were marked as discarded. Coalescing is
++ * performed on overlapping and consecutive ranges.
++ */
++struct discard_ranges {
++	struct rb_root root;
++
++	/*
++	 * Simplified locking for RADIO, use
++	 * a relativistic algorithm approach
++	 * for locking between updates eventually.
++	 */
++	struct mutex mutex;
++
++#ifdef CONFIG_MD_DISCARD_RANGES_DEBUG
++	/* Debug interface. */
++	uint64_t count;
++	struct kobject kobj;
++#endif /* CONFIG_MD_DISCARD_RANGES_DEBUG */
++};
++
++int discard_ranges_init(void);
++void discard_ranges_fini(void);
++int discard_ranges_prep(struct discard_ranges *ranges,
++			struct kobject *kobj);
++void discard_ranges_clean(struct discard_ranges *ranges);
++void discard_unmark(struct discard_ranges *ranges,
++		    sector_t start,
++		    sector_t end);
++void discard_mark(struct discard_ranges *ranges,
++		  sector_t start,
++		  sector_t end);
++struct discard_range *discard_contains(struct discard_ranges *ranges,
++				       sector_t start,
++                                       sector_t end);
++
++#endif /* _DISCARD_H */
+diff --git a/drivers/md/raid1.c b/drivers/md/raid1.c
+index a368db2..542754e 100644
+--- a/drivers/md/raid1.c
++++ b/drivers/md/raid1.c
+@@ -38,6 +38,7 @@
+ #include <linux/seq_file.h>
+ #include <linux/ratelimit.h>
+ #include "md.h"
++#include "discard.h"
+ #include "raid1.h"
+ #include "bitmap.h"
+ 
+@@ -849,6 +850,18 @@ static void make_request(struct mddev *mddev, struct bio * bio)
+ 
+ 	md_write_start(mddev, bio); /* wait on superblock update early */
+ 
++#ifdef CONFIG_MD_DISCARD_RANGES
++	if (bio->bi_rw & REQ_DISCARD) {
++		discard_mark(&conf->dranges, bio->bi_sector,
++			     bio->bi_sector +
++			     (bio->bi_size >> 9) -
++			     1);
++		bio_endio(bio,0);
++		md_write_end(mddev);
++		return;
++	}
++#endif /* CONFIG_MD_DISCARD_RANGES */
++
+ 	if (bio_data_dir(bio) == WRITE &&
+ 	    bio->bi_sector + bio->bi_size/512 > mddev->suspend_lo &&
+ 	    bio->bi_sector < mddev->suspend_hi) {
+@@ -1106,6 +1119,13 @@ read_again:
+ 			    !waitqueue_active(&bitmap->behind_wait))
+ 				alloc_behind_pages(mbio, r1_bio);
+ 
++#ifdef CONFIG_MD_DISCARD_RANGES
++			discard_unmark(&conf->dranges, r1_bio->sector,
++				       r1_bio->sector +
++				       r1_bio->sectors -
++				       1);
++#endif /* CONFIG_MD_DISCARD_RANGES */
++
+ 			bitmap_startwrite(bitmap, r1_bio->sector,
+ 					  r1_bio->sectors,
+ 					  test_bit(R1BIO_BehindIO,
+@@ -2179,6 +2199,7 @@ static sector_t sync_request(struct mddev *mddev, sector_t sector_nr, int *skipp
+ {
+ 	struct r1conf *conf = mddev->private;
+ 	struct r1bio *r1_bio;
++	struct discard_range *r;
+ 	struct bio *bio;
+ 	sector_t max_sector, nr_sectors;
+ 	int disk = -1;
+@@ -2228,6 +2249,22 @@ static sector_t sync_request(struct mddev *mddev, sector_t sector_nr, int *skipp
+ 		*skipped = 1;
+ 		return sync_blocks;
+ 	}
++
++#ifdef CONFIG_MD_DISCARD_RANGES
++	r = discard_contains(&conf->dranges, sector_nr,
++			     sector_nr + sync_blocks - 1);
++
++	if (r) {
++		if (r->start > sector_nr) {
++			/* Resync less than sync_blocks. */
++			sync_blocks = r->start + 1 - sector_nr;
++		} else {
++			*skipped = 1;
++			return r->end + 1 - sector_nr;
++		}
++	}
++#endif /* CONFIG_MD_DISCARD_RANGES */
++
+ 	/*
+ 	 * If there is non-resync activity waiting for a turn,
+ 	 * and resync is going fast enough,
+@@ -2566,6 +2603,14 @@ static struct r1conf *setup_conf(struct mddev *mddev)
+ 		goto abort;
+ 	}
+ 
++#ifdef CONFIG_MD_DISCARD_RANGES
++	err = discard_ranges_prep(&conf->dranges, &mddev->kobj);
++	if (err) {
++		md_unregister_thread(&mddev->thread);
++		goto abort;
++	}
++#endif /* CONFIG_MD_DISCARD_RANGES */
++
+ 	return conf;
+ 
+  abort:
+@@ -2625,6 +2670,16 @@ static int run(struct mddev *mddev)
+ 		}
+ 	}
+ 
++#ifdef CONFIG_MD_DISCARD_RANGES
++	/*
++	 * FIXME: Figure out the correct limits when we decide to
++	 * pass the discard downwards.
++	 */
++	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, mddev->queue);
++	mddev->queue->limits.max_discard_sectors = UINT_MAX;
++	mddev->queue->limits.discard_granularity = 4096;
++#endif /* CONFIG_MD_DISCARD_RANGES */
++
+ 	mddev->degraded = 0;
+ 	for (i=0; i < conf->raid_disks; i++)
+ 		if (conf->mirrors[i].rdev == NULL ||
+@@ -2677,6 +2732,9 @@ static int stop(struct mddev *mddev)
+ 	raise_barrier(conf);
+ 	lower_barrier(conf);
+ 
++#ifdef CONFIG_MD_DISCARD_RANGES
++	discard_ranges_clean(&conf->dranges);
++#endif /* CONFIG_MD_DISCARD_RANGES */
+ 	md_unregister_thread(&mddev->thread);
+ 	if (conf->r1bio_pool)
+ 		mempool_destroy(conf->r1bio_pool);
+@@ -2876,11 +2934,19 @@ static struct md_personality raid1_personality =
+ 
+ static int __init raid_init(void)
+ {
++#ifdef CONFIG_MD_DISCARD_RANGES
++	int ret = discard_ranges_init();
++	if (ret)
++		return ret;
++#endif /* CONFIG_MD_DISCARD_RANGES */
+ 	return register_md_personality(&raid1_personality);
+ }
+ 
+ static void raid_exit(void)
+ {
++#ifdef CONFIG_MD_DISCARD_RANGES
++	discard_ranges_fini();
++#endif /* CONFIG_MD_DISCARD_RANGES */
+ 	unregister_md_personality(&raid1_personality);
+ }
+ 
+diff --git a/drivers/md/raid1.h b/drivers/md/raid1.h
+index 80ded13..dcacd3b 100644
+--- a/drivers/md/raid1.h
++++ b/drivers/md/raid1.h
+@@ -94,6 +94,11 @@ struct r1conf {
+ 	 * the new thread here until we fully activate the array.
+ 	 */
+ 	struct md_thread	*thread;
++
++	/*
++	 * discard ranges to improve resync.
++	 */
++	struct discard_ranges dranges;
+ };
+ 
+ /*
+-- 
+1.7.8.3
+
