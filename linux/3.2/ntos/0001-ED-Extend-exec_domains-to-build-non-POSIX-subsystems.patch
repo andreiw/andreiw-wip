@@ -1,0 +1,237 @@
+From 200f40cf984b858eddac57252877148d799370e0 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@vmware.com>
+Date: Thu, 2 Feb 2012 13:18:00 -0500
+Subject: [PATCH 1/3] ED: Extend exec_domains to build non-POSIX subsystems.
+
+* Allows exec_domains to use completely different
+  syscalls from Linux, allowing creating NT or OSX
+  subsystems (x64 implementation only)
+* Allows creation of personalities that cannot be
+  switched to from userspace.
+* Exit hook.
+* Signal dispatch hook.
+
+Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
+---
+ arch/x86/include/asm/thread_info.h |    7 ++++++-
+ arch/x86/kernel/asm-offsets.c      |    2 ++
+ arch/x86/kernel/entry_64.S         |   22 ++++++++++++++++++++++
+ include/linux/personality.h        |   10 +++++++++-
+ kernel/exec_domain.c               |   19 +++++++++++++++++++
+ kernel/exit.c                      |    3 +++
+ kernel/signal.c                    |    6 ++++++
+ 7 files changed, 67 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/include/asm/thread_info.h b/arch/x86/include/asm/thread_info.h
+index 114dca1..3f72bf3 100644
+--- a/arch/x86/include/asm/thread_info.h
++++ b/arch/x86/include/asm/thread_info.h
+@@ -26,6 +26,7 @@ struct exec_domain;
+ struct thread_info {
+ 	struct task_struct	*task;		/* main task structure */
+ 	struct exec_domain	*exec_domain;	/* execution domain */
++	void			*exec_private;	/* execution domain private */
+ 	__u32			flags;		/* low level flags */
+ 	__u32			status;		/* thread synchronous flags */
+ 	__u32			cpu;		/* current CPU */
+@@ -48,6 +49,7 @@ struct thread_info {
+ {						\
+ 	.task		= &tsk,			\
+ 	.exec_domain	= &default_exec_domain,	\
++	.exec_private	= NULL,			\
+ 	.flags		= 0,			\
+ 	.cpu		= 0,			\
+ 	.preempt_count	= INIT_PREEMPT_COUNT,	\
+@@ -96,6 +98,7 @@ struct thread_info {
+ #define TIF_BLOCKSTEP		25	/* set when we want DEBUGCTLMSR_BTF */
+ #define TIF_LAZY_MMU_UPDATES	27	/* task is updating the mmu lazily */
+ #define TIF_SYSCALL_TRACEPOINT	28	/* syscall tracepoint instrumentation */
++#define TIF_SYSCALL_EXECDOMAIN  29      /* syscall done through exec domain handler */
+ 
+ #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
+ #define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
+@@ -118,11 +121,13 @@ struct thread_info {
+ #define _TIF_BLOCKSTEP		(1 << TIF_BLOCKSTEP)
+ #define _TIF_LAZY_MMU_UPDATES	(1 << TIF_LAZY_MMU_UPDATES)
+ #define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
++#define _TIF_SYSCALL_EXECDOMAIN (1 << TIF_SYSCALL_EXECDOMAIN)
+ 
+ /* work to do in syscall_trace_enter() */
+ #define _TIF_WORK_SYSCALL_ENTRY	\
+ 	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_EMU | _TIF_SYSCALL_AUDIT |	\
+-	 _TIF_SECCOMP | _TIF_SINGLESTEP | _TIF_SYSCALL_TRACEPOINT)
++	 _TIF_SECCOMP | _TIF_SINGLESTEP | _TIF_SYSCALL_TRACEPOINT |	\
++	 _TIF_SYSCALL_EXECDOMAIN)
+ 
+ /* work to do in syscall_trace_leave() */
+ #define _TIF_WORK_SYSCALL_EXIT	\
+diff --git a/arch/x86/kernel/asm-offsets.c b/arch/x86/kernel/asm-offsets.c
+index 68de2dc..72c0466 100644
+--- a/arch/x86/kernel/asm-offsets.c
++++ b/arch/x86/kernel/asm-offsets.c
+@@ -33,6 +33,8 @@ void common(void) {
+ 	OFFSET(TI_status, thread_info, status);
+ 	OFFSET(TI_addr_limit, thread_info, addr_limit);
+ 	OFFSET(TI_preempt_count, thread_info, preempt_count);
++	OFFSET(TI_exec_domain, thread_info, exec_domain);
++	OFFSET(ED_handler, exec_domain, handler);
+ 
+ 	BLANK();
+ 	OFFSET(crypto_tfm_ctx_offset, crypto_tfm, __crt_ctx);
+diff --git a/arch/x86/kernel/entry_64.S b/arch/x86/kernel/entry_64.S
+index 940ba71..6f4d4b9 100644
+--- a/arch/x86/kernel/entry_64.S
++++ b/arch/x86/kernel/entry_64.S
+@@ -589,11 +589,33 @@ tracesys:
+ 	FIXUP_TOP_OF_STACK %rdi
+ 	movq %rsp,%rdi
+ 	call syscall_trace_enter
++
++	/* Call the domain exec syscall handler. */
++	testl $(_TIF_SYSCALL_EXECDOMAIN),TI_flags+THREAD_INFO(%rsp,RIP-R15)
++	jz normal_sys
++
++	movq TI_exec_domain+THREAD_INFO(%rsp,RIP-R15),%rax
++	movq ED_handler(%rax),%rax
++	movq ORIG_RAX-R15(%rsp),%rdi
++	movq %rsp,%rsi
++	call *%rax
++	
++	/*
++	 * Reload arg registers from stack in case exec_domain syscall changed them.
++	 */
++
++	LOAD_ARGS ARGOFFSET, 0
++	RESTORE_REST
++	jmp int_ret_from_sys_call
++	
++normal_sys:
++
+ 	/*
+ 	 * Reload arg registers from stack in case ptrace changed them.
+ 	 * We don't reload %rax because syscall_trace_enter() returned
+ 	 * the value it wants us to use in the table lookup.
+ 	 */
++
+ 	LOAD_ARGS ARGOFFSET, 1
+ 	RESTORE_REST
+ 	cmpq $__NR_syscall_max,%rax
+diff --git a/include/linux/personality.h b/include/linux/personality.h
+index 8fc7dd1a..51d254f 100644
+--- a/include/linux/personality.h
++++ b/include/linux/personality.h
+@@ -9,6 +9,7 @@
+ 
+ struct exec_domain;
+ struct pt_regs;
++struct thread_info;
+ 
+ extern int		register_exec_domain(struct exec_domain *);
+ extern int		unregister_exec_domain(struct exec_domain *);
+@@ -27,6 +28,7 @@ enum {
+ 	FDPIC_FUNCPTRS =	0x0080000,	/* userspace function ptrs point to descriptors
+ 						 * (signal handling)
+ 						 */
++	NOT_BY_SYSCALL =	0x0001000,
+ 	MMAP_PAGE_ZERO =	0x0100000,
+ 	ADDR_COMPAT_LAYOUT =	0x0200000,
+ 	READ_IMPLIES_EXEC =	0x0400000,
+@@ -83,15 +85,21 @@ enum {
+ 
+ /*
+  * Description of an execution domain.
+- * 
++ *
+  * The first two members are refernced from assembly source
+  * and should stay where they are unless explicitly needed.
+  */
+ typedef void (*handler_t)(int, struct pt_regs *);
++typedef void (*clean_t)(struct thread_info *t);
++typedef int (*prepare_t)(struct thread_info *t);
++typedef int (*signal_t)(int signr);
+ 
+ struct exec_domain {
+ 	const char		*name;		/* name of the execdomain */
+ 	handler_t		handler;	/* handler for syscalls */
++	clean_t			clean;		/* called on thread exit */
++	prepare_t		prepare;	/* called on thread inti */
++	signal_t		signal;		/* calle on signal delivery */
+ 	unsigned char		pers_low;	/* lowest personality */
+ 	unsigned char		pers_high;	/* highest personality */
+ 	unsigned long		*signal_map;	/* signal mapping */
+diff --git a/kernel/exec_domain.c b/kernel/exec_domain.c
+index 0dbeae3..ad874e5 100644
+--- a/kernel/exec_domain.c
++++ b/kernel/exec_domain.c
+@@ -136,11 +136,27 @@ unregister:
+ 
+ int __set_personality(unsigned int personality)
+ {
++	int ret = 0;
+ 	struct exec_domain *oep = current_thread_info()->exec_domain;
+ 
+ 	current_thread_info()->exec_domain = lookup_exec_domain(personality);
+ 	current->personality = personality;
++	if (oep->clean)
++		oep->clean(current_thread_info());
++
+ 	module_put(oep->module);
++	if (current_thread_info()->exec_domain->prepare) {
++		ret = current_thread_info()->exec_domain->prepare(current_thread_info());
++		if (ret)
++			return ret;
++	}
++
++#ifdef TIF_SYSCALL_EXECDOMAIN
++	if (current_thread_info()->exec_domain->handler != &default_handler)
++		set_tsk_thread_flag(current, TIF_SYSCALL_EXECDOMAIN);
++	else
++		clear_tsk_thread_flag(current, TIF_SYSCALL_EXECDOMAIN);
++#endif
+ 
+ 	return 0;
+ }
+@@ -183,6 +199,9 @@ SYSCALL_DEFINE1(personality, unsigned int, personality)
+ {
+ 	unsigned int old = current->personality;
+ 
++	if (personality & NOT_BY_SYSCALL)
++		return -EPERM;
++
+ 	if (personality != 0xffffffff)
+ 		set_personality(personality);
+ 
+diff --git a/kernel/exit.c b/kernel/exit.c
+index c447382..fc58187 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -996,6 +996,9 @@ void do_exit(long code)
+ 	if (group_dead)
+ 		disassociate_ctty(1);
+ 
++	/* Clean up exec_domain. */
++	if (task_thread_info(tsk)->exec_domain->clean)
++		task_thread_info(tsk)->exec_domain->clean(task_thread_info(tsk));
+ 	module_put(task_thread_info(tsk)->exec_domain->module);
+ 
+ 	proc_exit_connector(tsk);
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 412f0dc..a5f0aff 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -2261,6 +2261,12 @@ relock:
+ 		/* Trace actually delivered signals. */
+ 		trace_signal_deliver(signr, info, ka);
+ 
++		/* Let the exec_domain handle the signal. */
++		if (current_thread_info()->exec_domain->signal) {
++			if (!current_thread_info()->exec_domain->signal(signr))
++				continue;
++		}
++
+ 		if (ka->sa.sa_handler == SIG_IGN) /* Do nothing.  */
+ 			continue;
+ 		if (ka->sa.sa_handler != SIG_DFL) {
+-- 
+1.7.8.3
+

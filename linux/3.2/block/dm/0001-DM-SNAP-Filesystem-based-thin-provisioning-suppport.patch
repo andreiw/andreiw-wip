@@ -1,0 +1,1602 @@
+From c45cfd630f689a064e32f7d9b5ee57a5148d6cda Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Fri, 24 Feb 2012 18:44:07 -0500
+Subject: [PATCH 3/3] DM-SNAP: Filesystem-based thin provisioning suppport.
+
+WIP.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ drivers/md/Makefile             |    2 +-
+ drivers/md/dm-exception-store.c |  122 +++++-
+ drivers/md/dm-exception-store.h |   18 +-
+ drivers/md/dm-snap-file.c       | 1022 +++++++++++++++++++++++++++++++++++++++
+ drivers/md/dm-snap.c            |   64 +--
+ drivers/md/dm-table.c           |   53 ++-
+ include/linux/device-mapper.h   |    2 +
+ 7 files changed, 1216 insertions(+), 67 deletions(-)
+ create mode 100644 drivers/md/dm-snap-file.c
+
+diff --git a/drivers/md/Makefile b/drivers/md/Makefile
+index 046860c..04745f3 100644
+--- a/drivers/md/Makefile
++++ b/drivers/md/Makefile
+@@ -6,7 +6,7 @@ dm-mod-y	+= dm.o dm-table.o dm-target.o dm-linear.o dm-stripe.o \
+ 		   dm-ioctl.o dm-io.o dm-kcopyd.o dm-sysfs.o
+ dm-multipath-y	+= dm-path-selector.o dm-mpath.o
+ dm-snapshot-y	+= dm-snap.o dm-exception-store.o dm-snap-transient.o \
+-		    dm-snap-persistent.o
++		    dm-snap-persistent.o dm-snap-file.o
+ dm-mirror-y	+= dm-raid1.o
+ dm-log-userspace-y \
+ 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
+diff --git a/drivers/md/dm-exception-store.c b/drivers/md/dm-exception-store.c
+index 042e719..ccad631 100644
+--- a/drivers/md/dm-exception-store.c
++++ b/drivers/md/dm-exception-store.c
+@@ -13,12 +13,37 @@
+ #include <linux/vmalloc.h>
+ #include <linux/module.h>
+ #include <linux/slab.h>
++#include <linux/fs.h>
+ 
+ #define DM_MSG_PREFIX "snapshot exception stores"
++#define COW_FILE_I_FLAGS (S_SWAPFILE | S_NOATIME | S_NOCMTIME | S_NOQUOTA)
+ 
+ static LIST_HEAD(_exception_store_types);
+ static DEFINE_SPINLOCK(_lock);
+ 
++void dm_exception_store_lock_cow_file(struct dm_exception_store *store)
++{
++	struct inode *i;
++
++	BUG_ON(!store->cow_file);
++
++	i = store->cow_file->f_mapping->host;
++	mutex_lock(&i->i_mutex);
++	i->i_flags |= COW_FILE_I_FLAGS;
++	mutex_unlock(&i->i_mutex);
++}
++
++void dm_exception_store_unlock_cow_file(struct dm_exception_store *store)
++{
++	struct inode *i;
++
++	BUG_ON(!store->cow_file);
++	i = store->cow_file->f_mapping->host;
++	mutex_lock(&i->i_mutex);
++	i->i_flags &= ~COW_FILE_I_FLAGS;
++	mutex_unlock(&i->i_mutex);
++}
++
+ static struct dm_exception_store_type *__find_exception_store_type(const char *name)
+ {
+ 	struct dm_exception_store_type *type;
+@@ -199,11 +224,13 @@ int dm_exception_store_create(struct dm_target *ti, int argc, char **argv,
+ 			      struct dm_exception_store **store)
+ {
+ 	int r = 0;
++	struct file *f = NULL;
++	struct inode *i = NULL;
+ 	struct dm_exception_store_type *type = NULL;
+ 	struct dm_exception_store *tmp_store;
+ 	char persistent;
+ 
+-	if (argc < 2) {
++	if (argc < 3) {
+ 		ti->error = "Insufficient exception store arguments";
+ 		return -EINVAL;
+ 	}
+@@ -214,13 +241,15 @@ int dm_exception_store_create(struct dm_target *ti, int argc, char **argv,
+ 		return -ENOMEM;
+ 	}
+ 
+-	persistent = toupper(*argv[0]);
++	persistent = toupper(*argv[1]);
+ 	if (persistent == 'P')
+ 		type = get_type("P");
+ 	else if (persistent == 'N')
+ 		type = get_type("N");
++	else if (persistent == 'F')
++		type = get_type("F");
+ 	else {
+-		ti->error = "Persistent flag is not P or N";
++		ti->error = "Persistent flag is not F, P or N";
+ 		r = -EINVAL;
+ 		goto bad_type;
+ 	}
+@@ -231,10 +260,70 @@ int dm_exception_store_create(struct dm_target *ti, int argc, char **argv,
+ 		goto bad_type;
+ 	}
+ 
++	if (persistent != 'F') {
++		r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table),
++				  &tmp_store->cow);
++		if (r) {
++			ti->error = "Cannot get COW device";
++			goto bad_cow;
++		}
++	} else {
++		f = filp_open(argv[0],
++			      O_CREAT | O_LARGEFILE |
++			      ((dm_table_get_mode(ti->table) & FMODE_WRITE) ? O_RDWR : O_RDONLY),
++			      0);
++		if (IS_ERR(f)) {
++			ti->error = "Cannot open COW file";
++			r = PTR_ERR(f);
++			goto bad_cow;
++		}
++		i = f->f_mapping->host;
++		if (!S_ISREG(i->i_mode)) {
++			ti->error = "COW file not a regular file";
++			r = -EINVAL;
++			goto bad_cow_file;
++		}
++
++		if (!i->i_sb->s_bdev) {
++			ti->error = "COW file not backed by block device";
++			return -EINVAL;
++		}
++
++
++		/*
++		 * dm_snap_origin_dm should return the bdev of the
++		 * dm origin target.
++		 */
++		/* if (i->i_sb->s_bdev != dm_snap_origin_dm(snap)) { */
++		/* 	ti->error = "COW file not backed by origin device"; */
++		/* 	return -EINVAL; */
++		/* 	goto bad_cow_file; */
++		/* } */
++
++		mutex_lock(&i->i_mutex);
++		if (IS_SWAPFILE(i)) {
++			mutex_unlock(&i->i_mutex);
++			ti->error = "COW file already pinned (in use? swap?)";
++			r = -EINVAL;
++			goto bad_cow_file;
++		}
++		mutex_unlock(&i->i_mutex);
++
++		printk("calling dm_get_dev for COW backing");
++		r = dm_get_dev(ti, dm_snap_origin(snap)->bdev->bd_dev,
++			       dm_table_get_mode(ti->table),
++			       &tmp_store->cow);
++		if (r) {
++			ti->error = "Cannot get COW file device";
++			goto bad_cow_file;
++		}
++	}
++
+ 	tmp_store->type = type;
+ 	tmp_store->snap = snap;
++	tmp_store->cow_file = f;
+ 
+-	r = set_chunk_size(tmp_store, argv[1], &ti->error);
++	r = set_chunk_size(tmp_store, argv[2], &ti->error);
+ 	if (r)
+ 		goto bad;
+ 
+@@ -244,11 +333,16 @@ int dm_exception_store_create(struct dm_target *ti, int argc, char **argv,
+ 		goto bad;
+ 	}
+ 
+-	*args_used = 2;
++	*args_used = 3;
+ 	*store = tmp_store;
+ 	return 0;
+ 
+ bad:
++	dm_put_device(ti, tmp_store->cow);
++bad_cow_file:
++	if (f)
++		filp_close(f, NULL);
++bad_cow:
+ 	put_type(type);
+ bad_type:
+ 	kfree(tmp_store);
+@@ -256,9 +350,14 @@ bad_type:
+ }
+ EXPORT_SYMBOL(dm_exception_store_create);
+ 
+-void dm_exception_store_destroy(struct dm_exception_store *store)
++void dm_exception_store_destroy(struct dm_target *ti,
++				struct dm_exception_store *store)
+ {
++
+ 	store->type->dtr(store);
++	dm_put_device(ti, store->cow);
++	if (store->cow_file)
++		filp_close(store->cow_file, NULL);
+ 	put_type(store->type);
+ 	kfree(store);
+ }
+@@ -280,16 +379,25 @@ int dm_exception_store_init(void)
+ 		goto persistent_fail;
+ 	}
+ 
++	r = dm_file_snapshot_init();
++	if (r) {
++		DMERR("Unable to register pfile exception store type");
++		goto file_fail;
++	}
++
+ 	return 0;
+ 
+-persistent_fail:
++file_fail:
+ 	dm_persistent_snapshot_exit();
++persistent_fail:
++	dm_transient_snapshot_exit();
+ transient_fail:
+ 	return r;
+ }
+ 
+ void dm_exception_store_exit(void)
+ {
++	dm_file_snapshot_exit();
+ 	dm_persistent_snapshot_exit();
+ 	dm_transient_snapshot_exit();
+ }
+diff --git a/drivers/md/dm-exception-store.h b/drivers/md/dm-exception-store.h
+index 0b25362..1eb60c8 100644
+--- a/drivers/md/dm-exception-store.h
++++ b/drivers/md/dm-exception-store.h
+@@ -116,6 +116,8 @@ struct dm_snapshot;
+ struct dm_exception_store {
+ 	struct dm_exception_store_type *type;
+ 	struct dm_snapshot *snap;
++	struct dm_dev *cow;
++	struct file *cow_file;
+ 
+ 	/* Size of data blocks saved - must be a power of 2 */
+ 	unsigned chunk_size;
+@@ -199,6 +201,14 @@ static inline chunk_t sector_to_chunk(struct dm_exception_store *store,
+ 	return sector >> store->chunk_shift;
+ }
+ 
++static inline loff_t cow_file_size(struct dm_exception_store *store)
++{
++	return i_size_read(store->cow_file->f_mapping->host);
++}
++
++void dm_exception_store_lock_cow_file(struct dm_exception_store *store);
++void dm_exception_store_unlock_cow_file(struct dm_exception_store *store);
++
+ int dm_exception_store_type_register(struct dm_exception_store_type *type);
+ int dm_exception_store_type_unregister(struct dm_exception_store_type *type);
+ 
+@@ -210,14 +220,18 @@ int dm_exception_store_create(struct dm_target *ti, int argc, char **argv,
+ 			      struct dm_snapshot *snap,
+ 			      unsigned *args_used,
+ 			      struct dm_exception_store **store);
+-void dm_exception_store_destroy(struct dm_exception_store *store);
++void dm_exception_store_destroy(struct dm_target *ti,
++				struct dm_exception_store *store);
+ 
+ int dm_exception_store_init(void);
+ void dm_exception_store_exit(void);
+ 
+ /*
+- * Two exception store implementations.
++ * Three exception store implementations.
+  */
++int dm_file_snapshot_init(void);
++void dm_file_snapshot_exit(void);
++
+ int dm_persistent_snapshot_init(void);
+ void dm_persistent_snapshot_exit(void);
+ 
+diff --git a/drivers/md/dm-snap-file.c b/drivers/md/dm-snap-file.c
+new file mode 100644
+index 0000000..4791955
+--- /dev/null
++++ b/drivers/md/dm-snap-file.c
+@@ -0,0 +1,1022 @@
++/*
++ * Copyright (C) 2001-2002 Sistina Software (UK) Limited.
++ * Copyright (C) 2006-2008 Red Hat GmbH
++ * Copyright (C) Andrei Warkentin <andreiw@vmware.com>
++ *
++ * This file is released under the GPL.
++ */
++
++#include "dm-exception-store.h"
++
++#include <linux/mm.h>
++#include <linux/pagemap.h>
++#include <linux/vmalloc.h>
++#include <linux/export.h>
++#include <linux/slab.h>
++#include <linux/dm-io.h>
++
++#define DM_MSG_PREFIX "file snapshot"
++
++/*-----------------------------------------------------------------
++ * File snapshots, by file we mean that the snapshot
++ * will be backed by blocks that belong to an inode.
++ *---------------------------------------------------------------*/
++
++/*
++ * We need to store a record of which parts of the origin have
++ * been copied to the snapshot file.  The snapshot code
++ * requires that we copy exception chunks to chunk aligned areas
++ * of the COW store.  It makes sense therefore, to store the
++ * metadata in chunk size blocks.
++ *
++ * There is no backward or forward compatibility implemented,
++ * snapshots with different disk versions than the kernel will
++ * not be usable.  It is expected that you will blank out
++ * the start of a fresh COW file before calling the snapshot
++ * constructor, or better yet, delete the file.
++ *
++ * The first chunk of the COW file just contains the header.
++ * After this there is a chunk filled with exception metadata,
++ * followed by as many exception chunks as can fit in the
++ * metadata areas.
++ *
++ * All on disk structures are in little-endian format.  The end
++ * of the exceptions info is indicated by an exception with a
++ * new_chunk of 0, which is invalid since it would point to the
++ * header chunk.
++ */
++
++/*
++ * Magic for file snapshots: "SnAf" - Feeble isn't it.
++ */
++#define SNAF_MAGIC 0x10315e43
++
++/*
++ * The on-disk version of the metadata.
++ */
++#define SNAPSHOT_FILE_VERSION 1
++
++#define NUM_SNAPSHOT_HDR_CHUNKS 1
++
++struct file_header {
++	__le32 magic;
++
++	/*
++	 * Is this snapshot valid.  There is no way of recovering
++	 * an invalid snapshot.
++	 */
++	__le32 valid;
++
++	/*
++	 * Simple, incrementing version. no backward
++	 * compatibility.
++	 */
++	__le32 version;
++
++	/* In sectors */
++	__le32 chunk_size;
++} __packed;
++
++struct file_exception {
++	__le64 old_chunk;
++	__le64 new_chunk;
++} __packed;
++
++struct core_exception {
++	uint64_t old_chunk;
++	uint64_t new_chunk;
++};
++
++struct commit_callback {
++	void (*callback)(void *, int success);
++	void *context;
++};
++
++/*
++ * The top level structure for a file exception store.
++ */
++struct pstore {
++	struct dm_exception_store *store;
++	int version;
++	int valid;
++	uint32_t exceptions_per_area;
++
++	/*
++	 * Now that we have an asynchronous kcopyd there is no
++	 * need for large chunk sizes, so it wont hurt to have a
++	 * whole chunks worth of metadata in memory at once.
++	 */
++	void *area;
++
++	/*
++	 * An area of zeros used to clear the next area.
++	 */
++	void *zero_area;
++  
++	/*
++	 * An area used for header. The header can be written
++	 * concurrently with metadata (when invalidating the snapshot),
++	 * so it needs a separate buffer.
++	 */
++	void *header_area;
++
++	/*
++	 * Used to keep track of which metadata area the data in
++	 * 'chunk' refers to.
++	 */
++	chunk_t current_area;
++
++	/*
++	 * The next free chunk for an exception.
++	 *
++	 * When creating exceptions, all the chunks here and above are
++	 * free.  It holds the next chunk to be allocated.  On rare
++	 * occasions (e.g. after a system crash) holes can be left in
++	 * the exception store because chunks can be committed out of
++	 * order.
++	 *
++	 * When merging exceptions, it does not necessarily mean all the
++	 * chunks here and above are free.  It holds the value it would
++	 * have held if all chunks had been committed in order of
++	 * allocation.  Consequently the value may occasionally be
++	 * slightly too low, but since it's only used for 'status' and
++	 * it can never reach its minimum value too early this doesn't
++	 * matter.
++	 */
++
++	chunk_t next_free;
++
++	/*
++	 * The index of next free exception in the current
++	 * metadata area.
++	 */
++	uint32_t current_committed;
++
++	atomic_t pending_count;
++	uint32_t callback_count;
++	struct commit_callback *callbacks;
++	struct dm_io_client *io_client;
++
++	struct work_struct fallocate_work;
++	struct workqueue_struct *metadata_wq;
++	struct workqueue_struct *fallocate_wq;
++};
++
++static int alloc_area(struct pstore *ps)
++{
++	int r = -ENOMEM;
++	size_t len;
++
++	len = ps->store->chunk_size << SECTOR_SHIFT;
++
++	/*
++	 * Allocate the chunk_size block of memory that will hold
++	 * a single metadata area.
++	 */
++	ps->area = vmalloc(len);
++	if (!ps->area)
++		goto err_area;
++
++	ps->zero_area = vzalloc(len);
++	if (!ps->zero_area)
++		goto err_zero_area;
++
++	ps->header_area = vmalloc(len);
++	if (!ps->header_area)
++		goto err_header_area;
++
++	return 0;
++
++err_header_area:
++	vfree(ps->zero_area);
++err_zero_area:
++	vfree(ps->area);
++
++err_area:
++	return r;
++}
++
++static void free_area(struct pstore *ps)
++{
++	if (ps->area)
++		vfree(ps->area);
++	ps->area = NULL;
++
++	if (ps->zero_area)
++		vfree(ps->zero_area);
++	ps->zero_area = NULL;
++
++	if (ps->header_area)
++		vfree(ps->header_area);
++	ps->header_area = NULL;
++}
++
++struct mdata_req {
++	struct dm_io_region *where;
++	struct dm_io_request *io_req;
++	struct work_struct work;
++	int result;
++};
++
++static void do_metadata(struct work_struct *work)
++{
++	struct mdata_req *req = container_of(work, struct mdata_req, work);
++
++	req->result = dm_io(req->io_req, 1, req->where, NULL);
++}
++
++/*
++ * Read or write a chunk aligned and sized block of data from
++ * the device backing the COW file. Note! This is used to
++ * read/write metadata only, and here chunks are logical, i.e.
++ * chunk 0 refers to the first chunk_size in cow_file.
++ *
++ * Compare that to chunk numbers in file_exception, which are
++ * physical, i.e. new_chunk is relative to the bdev backing cow_file.
++ */
++static int chunk_io(struct pstore *ps, void *area, chunk_t chunk, int rw,
++		    int metadata)
++{
++	struct dm_io_region where = {
++		.bdev = dm_snap_cow(ps->store->snap)->bdev,
++		.sector = bmap(ps->store->cow_file->f_mapping->host,
++			       chunk) <<
++		ps->store->chunk_shift,
++		.count = ps->store->chunk_size,
++	};
++	struct dm_io_request io_req = {
++		.bi_rw = rw,
++		.mem.type = DM_IO_VMA,
++		.mem.ptr.vma = area,
++		.client = ps->io_client,
++		.notify.fn = NULL,
++	};
++	struct mdata_req req;
++
++	/* bmap shouldn't fail. */
++	if (!where.sector) {
++		printk("\n\n\nbmap of chunk %d got zerso\n", chunk);
++                printk("rw == READ = %d\n", rw == READ);
++		while(1);
++	} else {
++          //		printk("chunk_io chunk %d is bmapped to %d(block %d)\n", chunk, where.sector, where.sector >> ps->store->chunk_shift);
++        }
++
++	if (!metadata)
++		return dm_io(&io_req, 1, &where, NULL);
++
++	req.where = &where;
++	req.io_req = &io_req;
++
++	/*
++	 * Issue the synchronous I/O from a different thread
++	 * to avoid generic_make_request recursion.
++	 */
++	INIT_WORK_ONSTACK(&req.work, do_metadata);
++	queue_work(ps->metadata_wq, &req.work);
++	flush_work(&req.work);
++
++	return req.result;
++}
++
++/*
++ * Convert a metadata area index to a chunk index.
++ */
++static chunk_t area_location(struct pstore *ps, chunk_t area)
++{
++	return NUM_SNAPSHOT_HDR_CHUNKS + ((ps->exceptions_per_area + 1) * area);
++}
++
++static void zero_memory_area(struct pstore *ps)
++{
++	memset(ps->area, 0, ps->store->chunk_size << SECTOR_SHIFT);
++}
++
++static int zero_disk_area(struct pstore *ps, chunk_t area)
++{
++	return chunk_io(ps, ps->zero_area, area_location(ps, area), WRITE, 0);
++}
++
++static void do_fallocate_work(struct work_struct *work)
++{
++	int r;
++	sector_t total_secs;
++	sector_t needed_secs;
++	struct pstore *ps = container_of(work,
++					 struct pstore,
++					 fallocate_work);
++
++	needed_secs = area_location(ps, ps->current_area + 2) <<
++		ps->store->chunk_shift;
++	total_secs = cow_file_size(ps->store) >> SECTOR_SHIFT;
++
++	if (total_secs < needed_secs) {
++		r = do_fallocate(ps->store->cow_file,
++				 0,
++				 total_secs << SECTOR_SHIFT,
++				 (needed_secs - total_secs) << SECTOR_SHIFT);
++		if (r)
++			DMERR("couldn't grow COW file by %d secs\n", needed_secs - total_secs);
++		else {
++                  //			printk("grew COW file by %d secs\n", needed_secs - total_secs);
++                }
++	} else {
++          //		printk("no need to fallocate - n %d t %d\n", needed_secs, total_secs);
++	}
++}
++
++/*
++ * Read or write a metadata area.  Remembering to skip the first
++ * chunk which holds the header.
++ */
++static int area_io(struct pstore *ps, int rw)
++{
++	int r;
++	chunk_t chunk = area_location(ps, ps->current_area);
++	sector_t file_secs = cow_file_size(ps->store) >> SECTOR_SHIFT;
++	sector_t new_secs = (chunk + 1) << ps->store->chunk_shift;
++
++	/* Is there enough room? */
++	if (new_secs > file_secs) {
++		DMERR("not enough space in area_io :-(\n");
++		return -ENOSPC;
++	}
++
++        //        printk("file secs = 0x%x\n", file_secs);
++        //        printk("new secs = 0x%x, chunk %d\n", new_secs, chunk);
++	r = chunk_io(ps, ps->area, chunk, rw, 0);
++	if (r)
++		return r;
++
++	queue_work(ps->fallocate_wq, &ps->fallocate_work);
++	return 0;
++}
++
++static int read_header(struct pstore *ps, int *new_snapshot)
++{
++	int r;
++	struct inode *i;
++	struct file_header *fh;
++	unsigned chunk_size;
++
++	/*
++	 * store->chunk_size MUST be equivalent to COW FS blocksize,
++	 * since that is the largest granularity fallocate is guaranteed
++	 * on. TODO: flag for fallocate to ensure guarantee consecutive
++	 * backing blocks for a specified size.
++	 */
++	i = ps->store->cow_file->f_mapping->host;
++	ps->store->chunk_size = i->i_sb->s_blocksize >> 9;
++        //	printk("chunk_size = %d\n", ps->store->chunk_size);
++	ps->store->chunk_mask = ps->store->chunk_size - 1;
++	ps->store->chunk_shift = ffs(ps->store->chunk_size) - 1;
++
++	ps->io_client = dm_io_client_create();
++	if (IS_ERR(ps->io_client))
++		return PTR_ERR(ps->io_client);
++
++	r = alloc_area(ps);
++	if (r)
++		return r;
++
++	/*
++	 * COW file is empty, clearly it's a new snapshot.
++	 */
++	if (!cow_file_size(ps->store)) {
++		*new_snapshot = 1;
++		return 0;
++	}
++
++        //        printk("calling header read\n");
++	r = chunk_io(ps, ps->header_area, 0, READ, 1);
++	if (r)
++		goto bad;
++
++	fh = ps->header_area;
++
++	if (le32_to_cpu(fh->magic) == 0) {
++		*new_snapshot = 1;
++		return 0;
++	}
++
++	if (le32_to_cpu(fh->magic) != SNAF_MAGIC) {
++		DMWARN("Invalid or corrupt snapshot");
++		r = -ENXIO;
++		goto bad;
++	}
++
++	*new_snapshot = 0;
++	ps->valid = le32_to_cpu(fh->valid);
++	ps->version = le32_to_cpu(fh->version);
++	chunk_size = le32_to_cpu(fh->chunk_size);
++
++	if (ps->store->chunk_size != chunk_size)
++		DMERR("COW chunk size %u doesn't match FS block size %u.",
++		      chunk_size, ps->store->chunk_size);
++
++	return 0;
++bad:
++	free_area(ps);
++	return r;
++}
++
++static int write_header(struct pstore *ps)
++{
++	struct file_header *fh;
++
++	memset(ps->header_area, 0, ps->store->chunk_size << SECTOR_SHIFT);
++
++	fh = ps->header_area;
++	fh->magic = cpu_to_le32(SNAF_MAGIC);
++	fh->valid = cpu_to_le32(ps->valid);
++	fh->version = cpu_to_le32(ps->version);
++	fh->chunk_size = cpu_to_le32(ps->store->chunk_size);
++
++        //        printk("calling write_header\n");
++	return chunk_io(ps, ps->header_area, 0, WRITE, 1);
++}
++
++/*
++ * Access functions for the disk exceptions, these do the endian conversions.
++ */
++static struct file_exception *get_exception(struct pstore *ps, uint32_t index)
++{
++	BUG_ON(index >= ps->exceptions_per_area);
++
++	return ((struct file_exception *) ps->area) + index;
++}
++
++static void read_exception(struct pstore *ps,
++			   uint32_t index, struct core_exception *result)
++{
++	struct file_exception *de = get_exception(ps, index);
++
++	/* copy it */
++	result->old_chunk = le64_to_cpu(de->old_chunk);
++	result->new_chunk = le64_to_cpu(de->new_chunk);
++}
++
++static void write_exception(struct pstore *ps,
++			    uint32_t index, struct core_exception *e)
++{
++	struct file_exception *de = get_exception(ps, index);
++
++	/* copy it */
++	de->old_chunk = cpu_to_le64(e->old_chunk);
++	de->new_chunk = cpu_to_le64(e->new_chunk);
++}
++
++static void clear_exception(struct pstore *ps, uint32_t index)
++{
++	struct file_exception *de = get_exception(ps, index);
++
++	/* clear it */
++	de->old_chunk = 0;
++	de->new_chunk = 0;
++}
++
++/*
++ * Every time a new exception is made or read.
++ */
++static inline void update_next_free(struct pstore *ps)
++{
++	uint32_t stride;
++	chunk_t next_free;
++
++	stride = (ps->exceptions_per_area + 1);
++	next_free = ++ps->next_free;
++	if (sector_div(next_free, stride) == 1)
++		ps->next_free++;
++}
++
++/*
++ * Registers the exceptions that are present in the current area.
++ * 'full' is filled in to indicate if the area has been
++ * filled.
++ */
++static int insert_exceptions(struct pstore *ps,
++			     int (*callback)(void *callback_context,
++					     chunk_t old, chunk_t new),
++			     void *callback_context,
++			     int *full)
++{
++	int r;
++	unsigned int i;
++	struct core_exception e;
++
++	/* presume the area is full */
++	*full = 1;
++
++	for (i = 0; i < ps->exceptions_per_area; i++) {
++		read_exception(ps, i, &e);
++
++		/*
++		 * If the new_chunk is pointing at the start of
++		 * the COW device, where the first metadata area
++		 * is we know that we've hit the end of the
++		 * exceptions.  Therefore the area is not full.
++		 */
++		if (e.new_chunk == 0LL) {
++			ps->current_committed = i;
++			*full = 0;
++			break;
++		}
++
++		update_next_free(ps);
++                //                printk("added new exception %lld %lld\n", e.old_chunk, e.new_chunk);
++
++		/*
++		 * Otherwise we add the exception to the snapshot.
++		 */
++		r = callback(callback_context, e.old_chunk, e.new_chunk);
++		if (r)
++			return r;
++	}
++
++	return 0;
++}
++
++static int read_exceptions(struct pstore *ps,
++			   int (*callback)(void *callback_context, chunk_t old,
++					   chunk_t new),
++			   void *callback_context)
++{
++	int r, full = 1;
++
++	/*
++	 * Keeping reading chunks and inserting exceptions until
++	 * we find a partially full area.
++	 */
++	for (ps->current_area = 0; full; ps->current_area++) {
++		r = area_io(ps, READ);
++		if (r)
++			return r;
++
++		r = insert_exceptions(ps, callback, callback_context, &full);
++		if (r)
++			return r;
++	}
++
++	ps->current_area--;
++        //	printk("AFTER READING ----next_free %lld\n", ps->next_free);
++
++	return 0;
++}
++
++static struct pstore *get_info(struct dm_exception_store *store)
++{
++	return (struct pstore *) store->context;
++}
++
++static void file_usage(struct dm_exception_store *store,
++			     sector_t *total_sectors,
++			     sector_t *sectors_allocated,
++			     sector_t *metadata_sectors)
++{
++	struct pstore *ps = get_info(store);
++
++	*sectors_allocated = ps->next_free * store->chunk_size;
++	*total_sectors = get_dev_size(dm_snap_cow(store->snap)->bdev);
++
++	/*
++	 * First chunk is the fixed header.
++	 * Then there are (ps->current_area + 1) metadata chunks, each one
++	 * separated from the next by ps->exceptions_per_area data chunks.
++	 */
++	*metadata_sectors = (ps->current_area + 1 + NUM_SNAPSHOT_HDR_CHUNKS) *
++			    store->chunk_size;
++}
++
++static void file_dtr(struct dm_exception_store *store)
++{
++	struct pstore *ps = get_info(store);
++
++	destroy_workqueue(ps->fallocate_wq);
++	destroy_workqueue(ps->metadata_wq);
++
++	dm_exception_store_unlock_cow_file(store);
++
++	/* Created in read_header */
++	if (ps->io_client)
++		dm_io_client_destroy(ps->io_client);
++	free_area(ps);
++
++	/* Allocated in file_read_metadata */
++	if (ps->callbacks)
++		vfree(ps->callbacks);
++
++	kfree(ps);
++}
++
++static int file_read_metadata(struct dm_exception_store *store,
++				    int (*callback)(void *callback_context,
++						    chunk_t old, chunk_t new),
++				    void *callback_context)
++{
++	int r, uninitialized_var(new_snapshot);
++	struct pstore *ps = get_info(store);
++
++	/*
++	 * Read the snapshot header.
++	 */
++	r = read_header(ps, &new_snapshot);
++	if (r)
++		return r;
++
++	/*
++	 * Now we know correct chunk_size, complete the initialisation.
++	 */
++	ps->exceptions_per_area = (ps->store->chunk_size << SECTOR_SHIFT) /
++				  sizeof(struct file_exception);
++	ps->callbacks = dm_vcalloc(ps->exceptions_per_area,
++				   sizeof(*ps->callbacks));
++	if (!ps->callbacks)
++		return -ENOMEM;
++
++	/*
++	 * Do we need to setup a new snapshot ?
++	 */
++	if (new_snapshot) {
++		if (!(ps->store->cow_file->f_mode & FMODE_WRITE)) {
++			DMERR("cannot create new snapshot in read-only file");
++			return -EINVAL;
++		}
++		
++		/*
++		 * To avoid having to erase old section of the
++		 * COW file, we truncate it for simplicity's sake.
++		 *
++		 * Another alternative is wipe the file now through
++		 * the filesystem, which should be safe since the
++		 * snapshot is not up yet. This will allow reuse of
++		 * nice fully linear preallocated snaps.
++		 */
++		r = do_truncate(ps->store->cow_file->f_path.dentry,
++				0,
++				0,
++				ps->store->cow_file);
++		if (r) {
++			DMERR("truncating COW file failed: %d", r);
++			return r;
++		}
++
++		ps->current_area = 0;
++		zero_memory_area(ps);
++
++                //		printk("fallocating for at least two areas\n");
++		queue_work(ps->fallocate_wq, &ps->fallocate_work);
++		flush_work(&ps->fallocate_work);
++                //		printk("done fallocating for at least two areas\n");
++
++		r = write_header(ps);
++		if (r) {
++			DMWARN("write_header failed");
++			return r;
++		}
++
++		r = zero_disk_area(ps, 0);
++		if (r)
++			DMWARN("zero_disk_area(0) failed");
++		return r;
++	}
++
++	dm_exception_store_lock_cow_file(store);
++
++	/*
++	 * Sanity checks.
++	 */
++	if (ps->version != SNAPSHOT_FILE_VERSION) {
++		DMWARN("unable to handle snapshot file version %d",
++		       ps->version);
++		return -EINVAL;
++	}
++
++	/*
++	 * Metadata are valid, but snapshot is invalidated
++	 */
++	if (!ps->valid)
++		return 1;
++
++	/*
++	 * Read the metadata.
++	 */
++	r = read_exceptions(ps, callback, callback_context);
++
++	return r;
++}
++
++static int file_prepare_exception(struct dm_exception_store *store,
++					struct dm_exception *e)
++{
++	struct pstore *ps = get_info(store);
++	sector_t size = cow_file_size(store) >> SECTOR_SHIFT;
++	sector_t new_size = (ps->next_free + 1) * store->chunk_size;
++
++        //        printk("next free chunk = %d\n", ps->next_free);
++        //        printk("current_area = %d\n", ps->current_area);
++        //        printk("current_area location = %d\n", area_location(ps, ps->current_area));
++        //        printk("next area location = %d\n", area_location(ps, ps->current_area + 1));
++
++	/* Is there enough room? */
++	if (size < new_size) {
++          DMERR("not enough space in fpe :-( 0x%x versus 0x%x\n", size, new_size);
++		return -ENOSPC;
++	}
++
++	/*
++	 * Populate the exception with the physical chunk relative
++	 * to the bdev backing cow_file. This way we don't need to
++	 * touch the logic in dm-snap.c AND we don't take the penalty
++	 * of invoking bmap() on every access, just once when we
++	 * create the exception. Remember! chunk and block size
++         * have to be equivalent...
++	 */
++	e->new_chunk = bmap(store->cow_file->f_mapping->host,
++			    ps->next_free);
++
++        //        printk("chunk %d is bmapped to %d\n", ps->next_free, e->new_chunk);
++
++	/*
++	 * Move onto the next free pending, making sure to take
++	 * into account the location of the metadata chunks.
++	 */
++	update_next_free(ps);
++        //	printk("----next_free %lld\n", ps->next_free);
++
++	atomic_inc(&ps->pending_count);
++	queue_work(ps->fallocate_wq, &ps->fallocate_work);
++	return 0;
++}
++
++static void file_commit_exception(struct dm_exception_store *store,
++					struct dm_exception *e,
++					void (*callback) (void *, int success),
++					void *callback_context)
++{
++	unsigned int i;
++	struct pstore *ps = get_info(store);
++	struct core_exception ce;
++	struct commit_callback *cb;
++
++	ce.old_chunk = e->old_chunk;
++	ce.new_chunk = e->new_chunk;
++	write_exception(ps, ps->current_committed++, &ce);
++
++	/*
++	 * Add the callback to the back of the array.  This code
++	 * is the only place where the callback array is
++	 * manipulated, and we know that it will never be called
++	 * multiple times concurrently.
++	 */
++	cb = ps->callbacks + ps->callback_count++;
++	cb->callback = callback;
++	cb->context = callback_context;
++
++	/*
++	 * If there are exceptions in flight and we have not yet
++	 * filled this metadata area there's nothing more to do.
++	 */
++	if (!atomic_dec_and_test(&ps->pending_count) &&
++	    (ps->current_committed != ps->exceptions_per_area))
++		return;
++
++	/*
++	 * If we completely filled the current area, then wipe the next one.
++	 */
++	if ((ps->current_committed == ps->exceptions_per_area) &&
++	    zero_disk_area(ps, ps->current_area + 1))
++		ps->valid = 0;
++
++	/*
++	 * Commit exceptions to disk.
++	 */
++	if (ps->valid && area_io(ps, WRITE_FLUSH_FUA))
++		ps->valid = 0;
++
++	/*
++	 * Advance to the next area if this one is full.
++	 */
++	if (ps->current_committed == ps->exceptions_per_area) {
++		ps->current_committed = 0;
++		ps->current_area++;
++		zero_memory_area(ps);
++	}
++
++	for (i = 0; i < ps->callback_count; i++) {
++		cb = ps->callbacks + i;
++		cb->callback(cb->context, ps->valid);
++	}
++
++	ps->callback_count = 0;
++}
++
++static int file_prepare_merge(struct dm_exception_store *store,
++				    chunk_t *last_old_chunk,
++				    chunk_t *last_new_chunk)
++{
++	struct pstore *ps = get_info(store);
++	struct core_exception ce;
++	int nr_consecutive;
++	int r;
++
++	/*
++	 * When current area is empty, move back to preceding area.
++	 */
++	if (!ps->current_committed) {
++		/*
++		 * Have we finished?
++		 */
++		if (!ps->current_area)
++			return 0;
++
++		ps->current_area--;
++		r = area_io(ps, READ);
++		if (r < 0)
++			return r;
++		ps->current_committed = ps->exceptions_per_area;
++	}
++
++	read_exception(ps, ps->current_committed - 1, &ce);
++	*last_old_chunk = ce.old_chunk;
++	*last_new_chunk = ce.new_chunk;
++
++	/*
++	 * Find number of consecutive chunks within the current area,
++	 * working backwards.
++	 */
++	for (nr_consecutive = 1; nr_consecutive < ps->current_committed;
++	     nr_consecutive++) {
++		read_exception(ps, ps->current_committed - 1 - nr_consecutive,
++			       &ce);
++		if (ce.old_chunk != *last_old_chunk - nr_consecutive ||
++		    ce.new_chunk != *last_new_chunk - nr_consecutive)
++			break;
++	}
++
++	return nr_consecutive;
++}
++
++static int file_commit_merge(struct dm_exception_store *store,
++				   int nr_merged)
++{
++	int r, i;
++	struct pstore *ps = get_info(store);
++
++	BUG_ON(nr_merged > ps->current_committed);
++
++	for (i = 0; i < nr_merged; i++)
++		clear_exception(ps, ps->current_committed - 1 - i);
++
++	r = area_io(ps, WRITE_FLUSH_FUA);
++	if (r < 0)
++		return r;
++
++	ps->current_committed -= nr_merged;
++
++	/*
++	 * At this stage, only file_usage() uses ps->next_free, so
++	 * we make no attempt to keep ps->next_free strictly accurate
++	 * as exceptions may have been committed out-of-order originally.
++	 * Once a snapshot has become merging, we set it to the value it
++	 * would have held had all the exceptions been committed in order.
++	 *
++	 * ps->current_area does not get reduced by prepare_merge() until
++	 * after commit_merge() has removed the nr_merged previous exceptions.
++	 */
++	ps->next_free = area_location(ps, ps->current_area) +
++			ps->current_committed + 1;
++
++	return 0;
++}
++
++static void file_drop_snapshot(struct dm_exception_store *store)
++{
++	struct pstore *ps = get_info(store);
++
++	ps->valid = 0;
++	if (write_header(ps))
++		DMWARN("write header failed");
++}
++
++static int file_ctr(struct dm_exception_store *store,
++			  unsigned argc, char **argv)
++{
++	struct pstore *ps;
++
++	if(!store->cow_file)
++		return -EINVAL;
++
++	/* allocate the pstore */
++	ps = kzalloc(sizeof(*ps), GFP_KERNEL);
++	if (!ps)
++		return -ENOMEM;
++
++	ps->store = store;
++	ps->valid = 1;
++	ps->version = SNAPSHOT_FILE_VERSION;
++	ps->area = NULL;
++	ps->zero_area = NULL;
++	ps->header_area = NULL;
++	ps->next_free = NUM_SNAPSHOT_HDR_CHUNKS + 1; /* header and 1st area */
++	ps->current_committed = 0;
++
++	ps->callback_count = 0;
++	atomic_set(&ps->pending_count, 0);
++	ps->callbacks = NULL;
++
++	ps->metadata_wq = alloc_workqueue("ksnapfio", WQ_MEM_RECLAIM, 0);
++	if (!ps->metadata_wq) {
++		DMERR("couldn't start header metadata update thread");
++		goto err;
++	}
++
++	ps->fallocate_wq = alloc_workqueue("ksnapffa", WQ_MEM_RECLAIM | WQ_HIGHPRI | WQ_NON_REENTRANT, 0);
++	if (!ps->fallocate_wq) {
++		DMERR("couldn't start fallocate thread");
++		goto err;
++	}
++
++	INIT_WORK(&ps->fallocate_work, do_fallocate_work);
++	store->context = ps;
++	return 0;
++err:
++	if (ps->fallocate_wq)
++		destroy_workqueue(ps->fallocate_wq);
++	if (ps->metadata_wq)
++		destroy_workqueue(ps->metadata_wq);
++	kfree(ps);
++	return -ENOMEM;
++}
++
++static unsigned file_status(struct dm_exception_store *store,
++				  status_type_t status, char *result,
++				  unsigned maxlen)
++{
++	unsigned sz = 0;
++
++	switch (status) {
++	case STATUSTYPE_INFO:
++		break;
++	case STATUSTYPE_TABLE:
++		DMEMIT(" F %llu", (unsigned long long)store->chunk_size);
++	}
++
++	return sz;
++}
++
++static struct dm_exception_store_type _file_type = {
++	.name = "file",
++	.module = THIS_MODULE,
++	.ctr = file_ctr,
++	.dtr = file_dtr,
++	.read_metadata = file_read_metadata,
++	.prepare_exception = file_prepare_exception,
++	.commit_exception = file_commit_exception,
++	.prepare_merge = file_prepare_merge,
++	.commit_merge = file_commit_merge,
++	.drop_snapshot = file_drop_snapshot,
++	.usage = file_usage,
++	.status = file_status,
++};
++
++static struct dm_exception_store_type _file_compat_type = {
++	.name = "F",
++	.module = THIS_MODULE,
++	.ctr = file_ctr,
++	.dtr = file_dtr,
++	.read_metadata = file_read_metadata,
++	.prepare_exception = file_prepare_exception,
++	.commit_exception = file_commit_exception,
++	.prepare_merge = file_prepare_merge,
++	.commit_merge = file_commit_merge,
++	.drop_snapshot = file_drop_snapshot,
++	.usage = file_usage,
++	.status = file_status,
++};
++
++int dm_file_snapshot_init(void)
++{
++	int r;
++
++	r = dm_exception_store_type_register(&_file_type);
++	if (r) {
++		DMERR("Unable to register file exception store type");
++		return r;
++	}
++
++	r = dm_exception_store_type_register(&_file_compat_type);
++	if (r) {
++		DMERR("Unable to register old-style file exception "
++		      "store type");
++		dm_exception_store_type_unregister(&_file_type);
++		return r;
++	}
++
++	return r;
++}
++
++void dm_file_snapshot_exit(void)
++{
++	dm_exception_store_type_unregister(&_file_type);
++	dm_exception_store_type_unregister(&_file_compat_type);
++}
+diff --git a/drivers/md/dm-snap.c b/drivers/md/dm-snap.c
+index 6f75887..a26cd92 100644
+--- a/drivers/md/dm-snap.c
++++ b/drivers/md/dm-snap.c
+@@ -48,7 +48,6 @@ struct dm_snapshot {
+ 	struct rw_semaphore lock;
+ 
+ 	struct dm_dev *origin;
+-	struct dm_dev *cow;
+ 
+ 	struct dm_target *ti;
+ 
+@@ -82,7 +81,10 @@ struct dm_snapshot {
+ 	mempool_t *tracked_chunk_pool;
+ 	struct hlist_head tracked_chunk_hash[DM_TRACKED_CHUNK_HASH_SIZE];
+ 
+-	/* The on disk metadata handler */
++	/*
++	 * The on disk metadata handler.
++	 * N.B. struct dm_dev *cow is here.
++	 */
+ 	struct dm_exception_store *store;
+ 
+ 	struct dm_kcopyd_client *kcopyd_client;
+@@ -133,7 +135,7 @@ EXPORT_SYMBOL(dm_snap_origin);
+ 
+ struct dm_dev *dm_snap_cow(struct dm_snapshot *s)
+ {
+-	return s->cow;
++	return s->store->cow;
+ }
+ EXPORT_SYMBOL(dm_snap_cow);
+ 
+@@ -358,7 +360,7 @@ static int __find_snapshots_sharing_cow(struct dm_snapshot *snap,
+ 	list_for_each_entry(s, &o->snapshots, list) {
+ 		if (dm_target_is_snapshot_merge(s->ti) && snap_merge)
+ 			*snap_merge = s;
+-		if (!bdev_equal(s->cow->bdev, snap->cow->bdev))
++		if (!bdev_equal(s->store->cow->bdev, snap->store->cow->bdev))
+ 			continue;
+ 
+ 		down_read(&s->lock);
+@@ -727,7 +729,7 @@ static int init_hash_tables(struct dm_snapshot *s)
+ 	 * Calculate based on the size of the original volume or
+ 	 * the COW volume...
+ 	 */
+-	cow_dev_size = get_dev_size(s->cow->bdev);
++	cow_dev_size = get_dev_size(s->store->cow->bdev);
+ 	origin_dev_size = get_dev_size(s->origin->bdev);
+ 	max_buckets = calc_max_buckets();
+ 
+@@ -927,7 +929,7 @@ static void snapshot_merge_next_chunks(struct dm_snapshot *s)
+ 	dest.sector = chunk_to_sector(s->store, old_chunk);
+ 	dest.count = min(io_size, get_dev_size(dest.bdev) - dest.sector);
+ 
+-	src.bdev = s->cow->bdev;
++	src.bdev = s->store->cow->bdev;
+ 	src.sector = chunk_to_sector(s->store, new_chunk);
+ 	src.count = dest.count;
+ 
+@@ -1028,14 +1030,14 @@ static void stop_merge(struct dm_snapshot *s)
+ }
+ 
+ /*
+- * Construct a snapshot mapping: <origin_dev> <COW-dev> <p/n> <chunk-size>
++ * Construct a snapshot mapping: <origin_dev> <COW-dev> <p/n/f> <chunk-size>
+  */
+ static int snapshot_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+ {
+ 	struct dm_snapshot *s;
+ 	int i;
+ 	int r = -EINVAL;
+-	char *origin_path, *cow_path;
++	char *origin_path;
+ 	unsigned args_used, num_flush_requests = 1;
+ 	fmode_t origin_mode = FMODE_READ;
+ 
+@@ -1067,18 +1069,10 @@ static int snapshot_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+ 		goto bad_origin;
+ 	}
+ 
+-	cow_path = argv[0];
+-	argv++;
+-	argc--;
+-
+-	r = dm_get_device(ti, cow_path, dm_table_get_mode(ti->table), &s->cow);
+-	if (r) {
+-		ti->error = "Cannot get COW device";
+-		goto bad_cow;
+-	}
+-
+ 	r = dm_exception_store_create(ti, argc, argv, s, &args_used, &s->store);
+-	if (r) {
++	if (r)
++	{
++		DMERR("Failed to create exception store: %s\n", ti->error);
+ 		ti->error = "Couldn't create exception store";
+ 		r = -EINVAL;
+ 		goto bad_store;
+@@ -1193,12 +1187,9 @@ bad_kcopyd:
+ 	dm_exception_table_exit(&s->complete, exception_cache);
+ 
+ bad_hash_tables:
+-	dm_exception_store_destroy(s->store);
++	dm_exception_store_destroy(ti, s->store);
+ 
+ bad_store:
+-	dm_put_device(ti, s->cow);
+-
+-bad_cow:
+ 	dm_put_device(ti, s->origin);
+ 
+ bad_origin:
+@@ -1293,9 +1284,7 @@ static void snapshot_dtr(struct dm_target *ti)
+ 
+ 	mempool_destroy(s->pending_pool);
+ 
+-	dm_exception_store_destroy(s->store);
+-
+-	dm_put_device(ti, s->cow);
++	dm_exception_store_destroy(ti, s->store);
+ 
+ 	dm_put_device(ti, s->origin);
+ 
+@@ -1482,7 +1471,7 @@ static void start_copy(struct dm_snap_pending_exception *pe)
+ 	src.sector = chunk_to_sector(s->store, pe->e.old_chunk);
+ 	src.count = min((sector_t)s->store->chunk_size, dev_size - src.sector);
+ 
+-	dest.bdev = s->cow->bdev;
++	dest.bdev = s->store->cow->bdev;
+ 	dest.sector = chunk_to_sector(s->store, pe->e.new_chunk);
+ 	dest.count = src.count;
+ 
+@@ -1566,12 +1555,13 @@ __find_pending_exception(struct dm_snapshot *s,
+ static void remap_exception(struct dm_snapshot *s, struct dm_exception *e,
+ 			    struct bio *bio, chunk_t chunk)
+ {
+-	bio->bi_bdev = s->cow->bdev;
+-	bio->bi_sector = chunk_to_sector(s->store,
+-					 dm_chunk_number(e->new_chunk) +
+-					 (chunk - e->old_chunk)) +
+-					 (bio->bi_sector &
+-					  s->store->chunk_mask);
++	bio->bi_bdev = s->store->cow->bdev;
++	bio->bi_sector = chunk_to_sector(
++		s->store,
++		dm_chunk_number(e->new_chunk) +
++		(chunk - e->old_chunk)) +
++		(bio->bi_sector &
++		 s->store->chunk_mask);
+ }
+ 
+ static int snapshot_map(struct dm_target *ti, struct bio *bio,
+@@ -1584,7 +1574,7 @@ static int snapshot_map(struct dm_target *ti, struct bio *bio,
+ 	struct dm_snap_pending_exception *pe = NULL;
+ 
+ 	if (bio->bi_rw & REQ_FLUSH) {
+-		bio->bi_bdev = s->cow->bdev;
++		bio->bi_bdev = s->store->cow->bdev;
+ 		return DM_MAPIO_REMAPPED;
+ 	}
+ 
+@@ -1700,7 +1690,7 @@ static int snapshot_merge_map(struct dm_target *ti, struct bio *bio,
+ 		if (!map_context->target_request_nr)
+ 			bio->bi_bdev = s->origin->bdev;
+ 		else
+-			bio->bi_bdev = s->cow->bdev;
++			bio->bi_bdev = s->store->cow->bdev;
+ 		map_context->ptr = NULL;
+ 		return DM_MAPIO_REMAPPED;
+ 	}
+@@ -1887,7 +1877,7 @@ static int snapshot_status(struct dm_target *ti, status_type_t type,
+ 		 * to make private copies if the output is to
+ 		 * make sense.
+ 		 */
+-		DMEMIT("%s %s", snap->origin->name, snap->cow->name);
++		DMEMIT("%s %s", snap->origin->name, snap->store->cow->name);
+ 		snap->store->type->status(snap->store, type, result + sz,
+ 					  maxlen - sz);
+ 		break;
+@@ -1905,7 +1895,7 @@ static int snapshot_iterate_devices(struct dm_target *ti,
+ 	r = fn(ti, snap->origin, 0, ti->len, data);
+ 
+ 	if (!r)
+-		r = fn(ti, snap->cow, 0, get_dev_size(snap->cow->bdev), data);
++		r = fn(ti, snap->store->cow, 0, get_dev_size(snap->store->cow->bdev), data);
+ 
+ 	return r;
+ }
+diff --git a/drivers/md/dm-table.c b/drivers/md/dm-table.c
+index 63cc542..835e1fc 100644
+--- a/drivers/md/dm-table.c
++++ b/drivers/md/dm-table.c
+@@ -453,35 +453,18 @@ static int upgrade_mode(struct dm_dev_internal *dd, fmode_t new_mode,
+ }
+ 
+ /*
+- * Add a device to the list, or just increment the usage count if
++ * Add a dev_t to the list, or just increment the usage count if
+  * it's already present.
+  */
+-int dm_get_device(struct dm_target *ti, const char *path, fmode_t mode,
+-		  struct dm_dev **result)
++int dm_get_dev(struct dm_target *ti, dev_t dev, fmode_t mode,
++	       struct dm_dev **result)
+ {
+ 	int r;
+-	dev_t uninitialized_var(dev);
+ 	struct dm_dev_internal *dd;
+-	unsigned int major, minor;
+ 	struct dm_table *t = ti->table;
+ 
+ 	BUG_ON(!t);
+ 
+-	if (sscanf(path, "%u:%u", &major, &minor) == 2) {
+-		/* Extract the major/minor numbers */
+-		dev = MKDEV(major, minor);
+-		if (MAJOR(dev) != major || MINOR(dev) != minor)
+-			return -EOVERFLOW;
+-	} else {
+-		/* convert the path to a device */
+-		struct block_device *bdev = lookup_bdev(path);
+-
+-		if (IS_ERR(bdev))
+-			return PTR_ERR(bdev);
+-		dev = bdev->bd_dev;
+-		bdput(bdev);
+-	}
+-
+ 	dd = find_device(&t->devices, dev);
+ 	if (!dd) {
+ 		dd = kmalloc(sizeof(*dd), GFP_KERNEL);
+@@ -511,6 +494,36 @@ int dm_get_device(struct dm_target *ti, const char *path, fmode_t mode,
+ 	*result = &dd->dm_dev;
+ 	return 0;
+ }
++EXPORT_SYMBOL(dm_get_dev);
++
++/*
++ * Add a device to the list, or just increment the usage count if
++ * it's already present.
++ */
++int dm_get_device(struct dm_target *ti, const char *path, fmode_t mode,
++		  struct dm_dev **result)
++{
++	int r;
++	dev_t uninitialized_var(dev);
++	unsigned int major, minor;
++
++	if (sscanf(path, "%u:%u", &major, &minor) == 2) {
++		/* Extract the major/minor numbers */
++		dev = MKDEV(major, minor);
++		if (MAJOR(dev) != major || MINOR(dev) != minor)
++			return -EOVERFLOW;
++	} else {
++		/* convert the path to a device */
++		struct block_device *bdev = lookup_bdev(path);
++
++		if (IS_ERR(bdev))
++			return PTR_ERR(bdev);
++		dev = bdev->bd_dev;
++		bdput(bdev);
++	}
++
++	return dm_get_dev(ti, dev, mode, result);
++}
+ EXPORT_SYMBOL(dm_get_device);
+ 
+ int dm_set_device_limits(struct dm_target *ti, struct dm_dev *dev,
+diff --git a/include/linux/device-mapper.h b/include/linux/device-mapper.h
+index 98f34b8..7c99beb 100644
+--- a/include/linux/device-mapper.h
++++ b/include/linux/device-mapper.h
+@@ -122,6 +122,8 @@ struct dm_dev {
+  */
+ int dm_get_device(struct dm_target *ti, const char *path, fmode_t mode,
+ 						 struct dm_dev **result);
++int dm_get_dev(struct dm_target *ti, dev_t dev, fmode_t mode,
++	       struct dm_dev **result);
+ void dm_put_device(struct dm_target *ti, struct dm_dev *d);
+ 
+ /*
+-- 
+1.7.8.3
+

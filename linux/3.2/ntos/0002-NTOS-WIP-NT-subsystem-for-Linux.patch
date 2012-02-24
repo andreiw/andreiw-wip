@@ -1,0 +1,2782 @@
+From d7c85d3ba61372c0f926e47707691c57e5ab9d30 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andreiw@vmware.com>
+Date: Sat, 28 Jan 2012 00:03:56 -0500
+Subject: [PATCH 2/3] NTOS: WIP NT subsystem for Linux.
+
+Chief goal of this project is to be able to run the
+"native shell" from http://hex.pp.ua/nt-native-applications-shell-eng.php.
+
+This (eventually) implements NT Native API. No User32/GDI32 (Win32),
+although there will be a facility to forward those to user space. If
+I get really lucky I'll do the POSIX NT subsystem :-P.
+
+Latest:
+* Added .reloc/rebase support for loader.
+
+TODO:
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+* Load ntdll.dll
+* Exports.
+* Imports.
+* Create PEB.
+---
+ arch/x86/Kbuild                   |    1 +
+ arch/x86/Kconfig                  |    2 +
+ arch/x86/include/asm/ntos/pe32.h  |   16 +
+ arch/x86/include/asm/ntos/sysnr.h |   30 +
+ arch/x86/ntos/Kconfig             |    9 +
+ arch/x86/ntos/Makefile            |    1 +
+ arch/x86/ntos/dispatch.c          |   45 ++
+ arch/x86/ntos/loader.c            |   28 +
+ include/linux/personality.h       |    1 +
+ include/ntos/ntos.h               |   47 ++
+ include/ntos/ntstatus.h           | 1133 +++++++++++++++++++++++++++++++++++++
+ include/ntos/obtypes.h            |   41 ++
+ include/ntos/pe32.h               |  197 +++++++
+ include/ntos/setypes.h            |   53 ++
+ include/ntos/syscalls.h           |   25 +
+ include/ntos/umtypes.h            |   43 ++
+ ntos/Kconfig                      |   13 +
+ ntos/Makefile                     |    1 +
+ ntos/README                       |   32 +
+ ntos/loader.c                     |  605 ++++++++++++++++++++
+ ntos/ntos.c                       |  184 ++++++
+ ntos/syscall.c                    |   62 ++
+ 22 files changed, 2569 insertions(+), 0 deletions(-)
+ create mode 100644 arch/x86/include/asm/ntos/pe32.h
+ create mode 100644 arch/x86/include/asm/ntos/sysnr.h
+ create mode 100644 arch/x86/ntos/Kconfig
+ create mode 100644 arch/x86/ntos/Makefile
+ create mode 100644 arch/x86/ntos/dispatch.c
+ create mode 100644 arch/x86/ntos/loader.c
+ create mode 100644 include/ntos/ntos.h
+ create mode 100644 include/ntos/ntstatus.h
+ create mode 100644 include/ntos/obtypes.h
+ create mode 100644 include/ntos/pe32.h
+ create mode 100644 include/ntos/setypes.h
+ create mode 100644 include/ntos/syscalls.h
+ create mode 100644 include/ntos/umtypes.h
+ create mode 100644 ntos/Kconfig
+ create mode 100644 ntos/Makefile
+ create mode 100644 ntos/README
+ create mode 100644 ntos/loader.c
+ create mode 100644 ntos/ntos.c
+ create mode 100644 ntos/syscall.c
+
+diff --git a/arch/x86/Kbuild b/arch/x86/Kbuild
+index 0e9dec6..7fac00a 100644
+--- a/arch/x86/Kbuild
++++ b/arch/x86/Kbuild
+@@ -1,5 +1,6 @@
+ 
+ obj-$(CONFIG_KVM) += kvm/
++obj-$(CONFIG_NTOS) += ntos/
+ 
+ # Xen paravirtualization support
+ obj-$(CONFIG_XEN) += xen/
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 07c3f15..db0b90f 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -2256,3 +2256,5 @@ source "crypto/Kconfig"
+ source "arch/x86/kvm/Kconfig"
+ 
+ source "lib/Kconfig"
++
++source "arch/x86/ntos/Kconfig"
+diff --git a/arch/x86/include/asm/ntos/pe32.h b/arch/x86/include/asm/ntos/pe32.h
+new file mode 100644
+index 0000000..8d18f69
+--- /dev/null
++++ b/arch/x86/include/asm/ntos/pe32.h
+@@ -0,0 +1,16 @@
++#ifndef NTOS_ASM_X86_PE32_H
++#define NTOS_ASM_X86_PE32_H
++
++#ifdef CONFIG_X86_64
++#define PE32_MACHINE IMAGE_FILE_MACHINE_AMD64
++#define pe32_opt pe32_opt64
++#define PE32_OPT_MAGIC PE32_OPT64_MAGIC
++#else
++#define PE32_MACHINE IMAGE_FILE_MACHINE_IA32
++#define pe32_opt pe32_opt32
++#define PE32_OPT_MAGIC PE32_OPT32_MAGIC
++#endif
++
++int ntos_pe32_arch_reloc(unsigned type, unsigned long fixup_base, unsigned long diff);
++
++#endif /* NTOS_ASM_X86_PE32_H */
+diff --git a/arch/x86/include/asm/ntos/sysnr.h b/arch/x86/include/asm/ntos/sysnr.h
+new file mode 100644
+index 0000000..ea6fa62
+--- /dev/null
++++ b/arch/x86/include/asm/ntos/sysnr.h
+@@ -0,0 +1,30 @@
++/* Time-stamp: <2012-02-04 00:22:38 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef NTOS_ASM_SYSNR_H
++#define NTOS_ASM_SYSNR_H
++
++#ifdef CONFIG_NTOS_X64_WIN7_SYSCALLS
++#define NR_NT_TERMINATE_PROCESS 0x29
++#define NR_NT_DISPLAY_STRING    0xb8
++#define NR_NT_DRAW_TEXT         0xb9
++#else
++#error Unsupported NTOS syscalls
++#endif
++
++#endif /* NTOS_ASM_SYSNR_H */
+diff --git a/arch/x86/ntos/Kconfig b/arch/x86/ntos/Kconfig
+new file mode 100644
+index 0000000..0b7d621
+--- /dev/null
++++ b/arch/x86/ntos/Kconfig
+@@ -0,0 +1,9 @@
++config HAVE_NTOS
++	def_bool y
++	depends on X86_64
++
++config NTOS_X64_WIN7_SYSCALLS
++	def_bool y
++	depends on HAVE_NTOS
++
++source "ntos/Kconfig"
+diff --git a/arch/x86/ntos/Makefile b/arch/x86/ntos/Makefile
+new file mode 100644
+index 0000000..8b9c658
+--- /dev/null
++++ b/arch/x86/ntos/Makefile
+@@ -0,0 +1 @@
++obj-$(CONFIG_NTOS)	+= ../../../ntos/ dispatch.o loader.o
+\ No newline at end of file
+diff --git a/arch/x86/ntos/dispatch.c b/arch/x86/ntos/dispatch.c
+new file mode 100644
+index 0000000..59233a6
+--- /dev/null
++++ b/arch/x86/ntos/dispatch.c
+@@ -0,0 +1,45 @@
++/* Time-stamp: <2012-02-04 00:21:02 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#include <linux/kernel.h>
++#include <linux/uaccess.h>
++#include <asm/ptrace.h>
++#include <ntos/ntos.h>
++#include <ntos/syscalls.h>
++#include <asm/ntos/sysnr.h>
++
++void ntos_dispatch(int nr, struct pt_regs *regs)
++{
++	nt_status_t status = 0;
++
++	/* This should be a table. */
++	switch (nr) {
++	case NR_NT_DISPLAY_STRING:
++	case NR_NT_DRAW_TEXT:
++		status = nt_display_string((struct unicode_string __user *) regs->r10);
++		break;
++	case NR_NT_TERMINATE_PROCESS:
++		status = nt_terminate_process((nt_handle_t) regs->r10,
++					      (nt_status_t) regs->dx);
++	default:
++		printk(KERN_ERR "Unknown NT syscall 0x%04x\n", nr);
++		status = STATUS_NOT_IMPLEMENTED;
++	}
++
++	regs->ax = status;
++}
+diff --git a/arch/x86/ntos/loader.c b/arch/x86/ntos/loader.c
+new file mode 100644
+index 0000000..2212411
+--- /dev/null
++++ b/arch/x86/ntos/loader.c
+@@ -0,0 +1,28 @@
++/* Time-stamp: <2012-02-06 13:30:18 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#include <linux/kernel.h>
++#include <asm/uaccess.h>
++
++#include <ntos/ntos.h>
++#include <ntos/pe32.h>
++
++int ntos_pe32_arch_reloc(unsigned type, unsigned long fixup_base, unsigned long diff)
++{
++	return -EINVAL;
++}
+diff --git a/include/linux/personality.h b/include/linux/personality.h
+index 51d254f..9108d2f 100644
+--- a/include/linux/personality.h
++++ b/include/linux/personality.h
+@@ -78,6 +78,7 @@ enum {
+ 	PER_UW7 =		0x000e | STICKY_TIMEOUTS | MMAP_PAGE_ZERO,
+ 	PER_OSF4 =		0x000f,			 /* OSF/1 v4 */
+ 	PER_HPUX =		0x0010,
++	PER_NTOS =              0x0011 | NOT_BY_SYSCALL,
+ 	PER_MASK =		0x00ff,
+ };
+ 
+diff --git a/include/ntos/ntos.h b/include/ntos/ntos.h
+new file mode 100644
+index 0000000..5e711fd
+--- /dev/null
++++ b/include/ntos/ntos.h
+@@ -0,0 +1,47 @@
++/* Time-stamp: <2012-02-13 16:54:07 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef NTOS_H
++#define NTOS_H
++
++#include <linux/list.h>
++#include <linux/sched.h>
++#include <ntos/umtypes.h>
++#include <ntos/ntstatus.h>
++
++#ifdef CONFIG_NTOS_DEBUG
++#define dprintk(a, ...) printk(KERN_INFO "NTOS %s: " a, __func__, ##__VA_ARGS__)
++#else
++#define dprintk(a, ...)
++#endif /* CONFIG_NTOS_DEBUG */
++
++struct nt_thread {
++	struct nt_process *process;
++};
++
++struct nt_process {
++	struct list_head head;
++	atomic_t threads;
++};
++
++struct nt_process *ntos_process_prepare(void);
++void ntos_process_clean(struct nt_process *process);
++int ntos_thread_prepare(struct thread_info *ti);
++void ntos_thread_clean(struct thread_info *ti);
++
++#endif /* NTOS_H */
+diff --git a/include/ntos/ntstatus.h b/include/ntos/ntstatus.h
+new file mode 100644
+index 0000000..6ec358a
+--- /dev/null
++++ b/include/ntos/ntstatus.h
+@@ -0,0 +1,1133 @@
++/* Time-stamp: <2012-02-03 23:56:19 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef NTOS_STATUS_H
++#define NTOS_STATUS_H
++
++/*
++ * The following defines came from ReactOS.
++ */
++
++typedef int32_t nt_status_t;
++
++#define NT_SUCCESS(status)     (((nt_status_t)(status)) >= 0)
++#define NT_INFORMATION(status) ((((uint32_t)(status)) >> 30) == 1)
++#define NT_WARNING(status)     ((((uint32_t)(status)) >> 30) == 2)
++#define NT_ERROR(status)       ((((uint32_t)(status)) >> 30) == 3)
++
++#define STATUS_SUCCESS                             ((nt_status_t)0x00000000)
++#define STATUS_WAIT_1                              ((nt_status_t)0x00000001)
++#define STATUS_WAIT_2                              ((nt_status_t)0x00000002)
++#define STATUS_WAIT_3                              ((nt_status_t)0x00000003)
++#define STATUS_WAIT_63                             ((nt_status_t)0x0000003f)
++#define STATUS_ABANDONED                           ((nt_status_t)0x00000080)
++#define STATUS_ABANDONED_WAIT_63                   ((nt_status_t)0x000000BF)
++#define STATUS_USER_APC                            ((nt_status_t)0x000000C0)
++#define STATUS_KERNEL_APC                          ((nt_status_t)0x00000100)
++#define STATUS_ALERTED                             ((nt_status_t)0x00000101)
++#define STATUS_TIMEOUT                             ((nt_status_t)0x00000102)
++#define STATUS_PENDING                             ((nt_status_t)0x00000103)
++#define STATUS_REPARSE                             ((nt_status_t)0x00000104)
++#define STATUS_MORE_ENTRIES                        ((nt_status_t)0x00000105)
++#define STATUS_NOT_ALL_ASSIGNED                    ((nt_status_t)0x00000106)
++#define STATUS_SOME_NOT_MAPPED                     ((nt_status_t)0x00000107)
++#define STATUS_OPLOCK_BREAK_IN_PROGRESS            ((nt_status_t)0x00000108)
++#define STATUS_VOLUME_MOUNTED                      ((nt_status_t)0x00000109)
++#define STATUS_RXACT_COMMITTED                     ((nt_status_t)0x0000010A)
++#define STATUS_NOTIFY_CLEANUP                      ((nt_status_t)0x0000010B)
++#define STATUS_NOTIFY_ENUM_DIR                     ((nt_status_t)0x0000010C)
++#define STATUS_NO_QUOTAS_FOR_ACCOUNT               ((nt_status_t)0x0000010D)
++#define STATUS_PRIMARY_TRANSPORT_CONNECT_FAILED    ((nt_status_t)0x0000010E)
++#define STATUS_PAGE_FAULT_TRANSITION               ((nt_status_t)0x00000110)
++#define STATUS_PAGE_FAULT_DEMAND_ZERO              ((nt_status_t)0x00000111)
++#define STATUS_PAGE_FAULT_COPY_ON_WRITE            ((nt_status_t)0x00000112)
++#define STATUS_PAGE_FAULT_GUARD_PAGE               ((nt_status_t)0x00000113)
++#define STATUS_PAGE_FAULT_PAGING_FILE              ((nt_status_t)0x00000114)
++#define STATUS_CACHE_PAGE_LOCKED                   ((nt_status_t)0x00000115)
++#define STATUS_CRASH_DUMP                          ((nt_status_t)0x00000116)
++#define STATUS_BUFFER_ALL_ZEROS                    ((nt_status_t)0x00000117)
++#define STATUS_REPARSE_OBJECT                      ((nt_status_t)0x00000118)
++#define STATUS_RESOURCE_REQUIREMENTS_CHANGED       ((nt_status_t)0x00000119)
++#define STATUS_TRANSLATION_COMPLETE                ((nt_status_t)0x00000120)
++#define STATUS_DS_MEMBERSHIP_EVALUATED_LOCALLY     ((nt_status_t)0x00000121)
++#define STATUS_NOTHING_TO_TERMINATE                ((nt_status_t)0x00000122)
++#define STATUS_PROCESS_NOT_IN_JOB                  ((nt_status_t)0x00000123)
++#define STATUS_PROCESS_IN_JOB                      ((nt_status_t)0x00000124)
++#define STATUS_VOLSNAP_HIBERNATE_READY             ((nt_status_t)0x00000125)
++#define STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY  ((nt_status_t)0x00000126)
++
++#define STATUS_OBJECT_NAME_EXISTS                ((nt_status_t)0x40000000)
++#define STATUS_THREAD_WAS_SUSPENDED              ((nt_status_t)0x40000001)
++#define STATUS_WORKING_SET_LIMIT_RANGE           ((nt_status_t)0x40000002)
++#define STATUS_IMAGE_NOT_AT_BASE                 ((nt_status_t)0x40000003)
++#define STATUS_RXACT_STATE_CREATED               ((nt_status_t)0x40000004)
++#define STATUS_SEGMENT_NOTIFICATION              ((nt_status_t)0x40000005)
++#define STATUS_LOCAL_USER_SESSION_KEY            ((nt_status_t)0x40000006)
++#define STATUS_BAD_CURRENT_DIRECTORY             ((nt_status_t)0x40000007)
++#define STATUS_SERIAL_MORE_WRITES                ((nt_status_t)0x40000008)
++#define STATUS_REGISTRY_RECOVERED                ((nt_status_t)0x40000009)
++#define STATUS_FT_READ_RECOVERY_FROM_BACKUP      ((nt_status_t)0x4000000A)
++#define STATUS_FT_WRITE_RECOVERY                 ((nt_status_t)0x4000000B)
++#define STATUS_SERIAL_COUNTER_TIMEOUT            ((nt_status_t)0x4000000C)
++#define STATUS_NULL_LM_PASSWORD                  ((nt_status_t)0x4000000D)
++#define STATUS_IMAGE_MACHINE_TYPE_MISMATCH       ((nt_status_t)0x4000000E)
++#define STATUS_RECEIVE_PARTIAL                   ((nt_status_t)0x4000000F)
++#define STATUS_RECEIVE_EXPEDITED                 ((nt_status_t)0x40000010)
++#define STATUS_RECEIVE_PARTIAL_EXPEDITED         ((nt_status_t)0x40000011)
++#define STATUS_EVENT_DONE                        ((nt_status_t)0x40000012)
++#define STATUS_EVENT_PENDING                     ((nt_status_t)0x40000013)
++#define STATUS_CHECKING_FILE_SYSTEM              ((nt_status_t)0x40000014)
++#define STATUS_FATAL_APP_EXIT                    ((nt_status_t)0x40000015)
++#define STATUS_PREDEFINED_HANDLE                 ((nt_status_t)0x40000016)
++#define STATUS_WAS_UNLOCKED                      ((nt_status_t)0x40000017)
++#define STATUS_SERVICE_NOTIFICATION              ((nt_status_t)0x40000018)
++#define STATUS_WAS_LOCKED                        ((nt_status_t)0x40000019)
++#define STATUS_LOG_HARD_ERROR                    ((nt_status_t)0x4000001A)
++#define STATUS_ALREADY_WIN32                     ((nt_status_t)0x4000001B)
++#define STATUS_WX86_UNSIMULATE                   ((nt_status_t)0x4000001C)
++#define STATUS_WX86_CONTINUE                     ((nt_status_t)0x4000001D)
++#define STATUS_WX86_SINGLE_STEP                  ((nt_status_t)0x4000001E)
++#define STATUS_WX86_BREAKPOINT                   ((nt_status_t)0x4000001F)
++#define STATUS_WX86_EXCEPTION_CONTINUE           ((nt_status_t)0x40000020)
++#define STATUS_WX86_EXCEPTION_LASTCHANCE         ((nt_status_t)0x40000021)
++#define STATUS_WX86_EXCEPTION_CHAIN              ((nt_status_t)0x40000022)
++#define STATUS_IMAGE_MACHINE_TYPE_MISMATCH_EXE   ((nt_status_t)0x40000023)
++#define STATUS_NO_YIELD_PERFORMED                ((nt_status_t)0x40000024)
++#define STATUS_TIMER_RESUME_IGNORED              ((nt_status_t)0x40000025)
++#define STATUS_ARBITRATION_UNHANDLED             ((nt_status_t)0x40000026)
++#define STATUS_CARDBUS_NOT_SUPPORTED             ((nt_status_t)0x40000027)
++#define STATUS_WX86_CREATEWX86TIB                ((nt_status_t)0x40000028)
++#define STATUS_MP_PROCESSOR_MISMATCH             ((nt_status_t)0x40000029)
++#define STATUS_HIBERNATED                        ((nt_status_t)0x4000002A)
++#define STATUS_RESUME_HIBERNATION                ((nt_status_t)0x4000002B)
++#define STATUS_FIRMWARE_UPDATED                  ((nt_status_t)0x4000002C)
++#define STATUS_WAKE_SYSTEM                       ((nt_status_t)0x40000294)
++#define STATUS_DS_SHUTTING_DOWN                  ((nt_status_t)0x40000370)
++
++#define RPC_NT_UUID_LOCAL_ONLY                   ((nt_status_t)0x40020056)
++#define RPC_NT_SEND_INCOMPLETE                   ((nt_status_t)0x400200AF)
++
++#define STATUS_CTX_CDM_CONNECT                   ((nt_status_t)0x400A0004)
++#define STATUS_CTX_CDM_DISCONNECT                ((nt_status_t)0x400A0005)
++
++#define STATUS_SXS_RELEASE_ACTIVATION_CONTEXT    ((nt_status_t)0x4015000D)
++
++#define STATUS_GUARD_PAGE_VIOLATION              ((nt_status_t)0x80000001)
++#define STATUS_DATATYPE_MISALIGNMENT             ((nt_status_t)0x80000002)
++#define STATUS_BREAKPOINT                        ((nt_status_t)0x80000003)
++#define STATUS_SINGLE_STEP                       ((nt_status_t)0x80000004)
++#define STATUS_BUFFER_OVERFLOW                   ((nt_status_t)0x80000005)
++#define STATUS_NO_MORE_FILES                     ((nt_status_t)0x80000006)
++#define STATUS_WAKE_SYSTEM_DEBUGGER              ((nt_status_t)0x80000007)
++
++#define STATUS_HANDLES_CLOSED                    ((nt_status_t)0x8000000A)
++#define STATUS_NO_INHERITANCE                    ((nt_status_t)0x8000000B)
++#define STATUS_GUID_SUBSTITUTION_MADE            ((nt_status_t)0x8000000C)
++#define STATUS_PARTIAL_COPY                      ((nt_status_t)0x8000000D)
++#define STATUS_DEVICE_PAPER_EMPTY                ((nt_status_t)0x8000000E)
++#define STATUS_DEVICE_POWERED_OFF                ((nt_status_t)0x8000000F)
++#define STATUS_DEVICE_OFF_LINE                   ((nt_status_t)0x80000010)
++#define STATUS_DEVICE_BUSY                       ((nt_status_t)0x80000011)
++#define STATUS_NO_MORE_EAS                       ((nt_status_t)0x80000012)
++#define STATUS_INVALID_EA_NAME                   ((nt_status_t)0x80000013)
++#define STATUS_EA_LIST_INCONSISTENT              ((nt_status_t)0x80000014)
++#define STATUS_INVALID_EA_FLAG                   ((nt_status_t)0x80000015)
++#define STATUS_VERIFY_REQUIRED                   ((nt_status_t)0x80000016)
++#define STATUS_EXTRANEOUS_INFORMATION            ((nt_status_t)0x80000017)
++#define STATUS_RXACT_COMMIT_NECESSARY            ((nt_status_t)0x80000018)
++#define STATUS_NO_MORE_ENTRIES                   ((nt_status_t)0x8000001A)
++#define STATUS_FILEMARK_DETECTED                 ((nt_status_t)0x8000001B)
++#define STATUS_MEDIA_CHANGED                     ((nt_status_t)0x8000001C)
++#define STATUS_BUS_RESET                         ((nt_status_t)0x8000001D)
++#define STATUS_END_OF_MEDIA                      ((nt_status_t)0x8000001E)
++#define STATUS_BEGINNING_OF_MEDIA                ((nt_status_t)0x8000001F)
++#define STATUS_MEDIA_CHECK                       ((nt_status_t)0x80000020)
++#define STATUS_SETMARK_DETECTED                  ((nt_status_t)0x80000021)
++#define STATUS_NO_DATA_DETECTED                  ((nt_status_t)0x80000022)
++#define STATUS_REDIRECTOR_HAS_OPEN_HANDLES       ((nt_status_t)0x80000023)
++#define STATUS_SERVER_HAS_OPEN_HANDLES           ((nt_status_t)0x80000024)
++#define STATUS_ALREADY_DISCONNECTED              ((nt_status_t)0x80000025)
++#define STATUS_LONGJUMP                          ((nt_status_t)0x80000026)
++#define STATUS_CLEANER_CARTRIDGE_INSTALLED       ((nt_status_t)0x80000027)
++#define STATUS_PLUGPLAY_QUERY_VETOED             ((nt_status_t)0x80000028)
++#define STATUS_UNWIND_CONSOLIDATE                ((nt_status_t)0x80000029)
++#define STATUS_REGISTRY_HIVE_RECOVERED           ((nt_status_t)0x8000002A)
++#define STATUS_DLL_MIGHT_BE_INSECURE             ((nt_status_t)0x8000002B)
++#define STATUS_DLL_MIGHT_BE_INCOMPATIBLE         ((nt_status_t)0x8000002C)
++
++#define STATUS_DEVICE_REQUIRES_CLEANING          ((nt_status_t)0x80000288)
++#define STATUS_DEVICE_DOOR_OPEN                  ((nt_status_t)0x80000289)
++
++#define STATUS_CLUSTER_NODE_ALREADY_UP           ((nt_status_t)0x80130001)
++#define STATUS_CLUSTER_NODE_ALREADY_DOWN         ((nt_status_t)0x80130002)
++#define STATUS_CLUSTER_NETWORK_ALREADY_ONLINE    ((nt_status_t)0x80130003)
++#define STATUS_CLUSTER_NETWORK_ALREADY_OFFLINE   ((nt_status_t)0x80130004)
++#define STATUS_CLUSTER_NODE_ALREADY_MEMBER       ((nt_status_t)0x80130005)
++
++#define STATUS_WAIT_0                            ((nt_status_t)0x00000000)
++#define STATUS_UNSUCCESSFUL                      ((nt_status_t)0xC0000001)
++#define STATUS_NOT_IMPLEMENTED                   ((nt_status_t)0xC0000002)
++#define STATUS_INVALID_INFO_CLASS                ((nt_status_t)0xC0000003)
++#define STATUS_INFO_LENGTH_MISMATCH              ((nt_status_t)0xC0000004)
++#define STATUS_ACCESS_VIOLATION                  ((nt_status_t)0xC0000005)
++#define STATUS_IN_PAGE_ERROR                     ((nt_status_t)0xC0000006)
++#define STATUS_PAGEFILE_QUOTA                    ((nt_status_t)0xC0000007)
++#define STATUS_INVALID_HANDLE                    ((nt_status_t)0xC0000008)
++#define STATUS_BAD_INITIAL_STACK                 ((nt_status_t)0xC0000009)
++#define STATUS_BAD_INITIAL_PC                    ((nt_status_t)0xC000000A)
++#define STATUS_INVALID_CID                       ((nt_status_t)0xC000000B)
++#define STATUS_TIMER_NOT_CANCELED                ((nt_status_t)0xC000000C)
++#define STATUS_INVALID_PARAMETER                 ((nt_status_t)0xC000000D)
++#define STATUS_NO_SUCH_DEVICE                    ((nt_status_t)0xC000000E)
++#define STATUS_NO_SUCH_FILE                      ((nt_status_t)0xC000000F)
++#define STATUS_INVALID_DEVICE_REQUEST            ((nt_status_t)0xC0000010)
++#define STATUS_END_OF_FILE                       ((nt_status_t)0xC0000011)
++#define STATUS_WRONG_VOLUME                      ((nt_status_t)0xC0000012)
++#define STATUS_NO_MEDIA_IN_DEVICE                ((nt_status_t)0xC0000013)
++#define STATUS_UNRECOGNIZED_MEDIA                ((nt_status_t)0xC0000014)
++#define STATUS_NONEXISTENT_SECTOR                ((nt_status_t)0xC0000015)
++#define STATUS_MORE_PROCESSING_REQUIRED          ((nt_status_t)0xC0000016)
++#define STATUS_NO_MEMORY                         ((nt_status_t)0xC0000017)
++#define STATUS_CONFLICTING_ADDRESSES             ((nt_status_t)0xC0000018)
++#define STATUS_NOT_MAPPED_VIEW                   ((nt_status_t)0xC0000019)
++#define STATUS_UNABLE_TO_FREE_VM                 ((nt_status_t)0xC000001A)
++#define STATUS_UNABLE_TO_DELETE_SECTION          ((nt_status_t)0xC000001B)
++#define STATUS_INVALID_SYSTEM_SERVICE            ((nt_status_t)0xC000001C)
++#define STATUS_ILLEGAL_INSTRUCTION               ((nt_status_t)0xC000001D)
++#define STATUS_INVALID_LOCK_SEQUENCE             ((nt_status_t)0xC000001E)
++#define STATUS_INVALID_VIEW_SIZE                 ((nt_status_t)0xC000001F)
++#define STATUS_INVALID_FILE_FOR_SECTION          ((nt_status_t)0xC0000020)
++#define STATUS_ALREADY_COMMITTED                 ((nt_status_t)0xC0000021)
++#define STATUS_ACCESS_DENIED                     ((nt_status_t)0xC0000022)
++#define STATUS_BUFFER_TOO_SMALL                  ((nt_status_t)0xC0000023)
++#define STATUS_OBJECT_TYPE_MISMATCH              ((nt_status_t)0xC0000024)
++#define STATUS_NONCONTINUABLE_EXCEPTION          ((nt_status_t)0xC0000025)
++#define STATUS_INVALID_DISPOSITION               ((nt_status_t)0xC0000026)
++#define STATUS_UNWIND                            ((nt_status_t)0xC0000027)
++#define STATUS_BAD_STACK                         ((nt_status_t)0xC0000028)
++#define STATUS_INVALID_UNWIND_TARGET             ((nt_status_t)0xC0000029)
++#define STATUS_NOT_LOCKED                        ((nt_status_t)0xC000002A)
++#define STATUS_PARITY_ERROR                      ((nt_status_t)0xC000002B)
++#define STATUS_UNABLE_TO_DECOMMIT_VM             ((nt_status_t)0xC000002C)
++#define STATUS_NOT_COMMITTED                     ((nt_status_t)0xC000002D)
++#define STATUS_INVALID_PORT_ATTRIBUTES           ((nt_status_t)0xC000002E)
++#define STATUS_PORT_MESSAGE_TOO_LONG             ((nt_status_t)0xC000002F)
++#define STATUS_INVALID_PARAMETER_MIX             ((nt_status_t)0xC0000030)
++#define STATUS_INVALID_QUOTA_LOWER               ((nt_status_t)0xC0000031)
++#define STATUS_DISK_CORRUPT_ERROR                ((nt_status_t)0xC0000032)
++#define STATUS_OBJECT_NAME_INVALID               ((nt_status_t)0xC0000033)
++#define STATUS_OBJECT_NAME_NOT_FOUND             ((nt_status_t)0xC0000034)
++#define STATUS_OBJECT_NAME_COLLISION             ((nt_status_t)0xC0000035)
++#define STATUS_PORT_DISCONNECTED                 ((nt_status_t)0xC0000037)
++#define STATUS_DEVICE_ALREADY_ATTACHED           ((nt_status_t)0xC0000038)
++#define STATUS_OBJECT_PATH_INVALID               ((nt_status_t)0xC0000039)
++#define STATUS_OBJECT_PATH_NOT_FOUND             ((nt_status_t)0xC000003A)
++#define STATUS_OBJECT_PATH_SYNTAX_BAD            ((nt_status_t)0xC000003B)
++#define STATUS_DATA_OVERRUN                      ((nt_status_t)0xC000003C)
++#define STATUS_DATA_LATE_ERROR                   ((nt_status_t)0xC000003D)
++#define STATUS_DATA_ERROR                        ((nt_status_t)0xC000003E)
++#define STATUS_CRC_ERROR                         ((nt_status_t)0xC000003F)
++#define STATUS_SECTION_TOO_BIG                   ((nt_status_t)0xC0000040)
++#define STATUS_PORT_CONNECTION_REFUSED           ((nt_status_t)0xC0000041)
++#define STATUS_INVALID_PORT_HANDLE               ((nt_status_t)0xC0000042)
++#define STATUS_SHARING_VIOLATION                 ((nt_status_t)0xC0000043)
++#define STATUS_QUOTA_EXCEEDED                    ((nt_status_t)0xC0000044)
++#define STATUS_INVALID_PAGE_PROTECTION           ((nt_status_t)0xC0000045)
++#define STATUS_MUTANT_NOT_OWNED                  ((nt_status_t)0xC0000046)
++#define STATUS_SEMAPHORE_LIMIT_EXCEEDED          ((nt_status_t)0xC0000047)
++#define STATUS_PORT_ALREADY_SET                  ((nt_status_t)0xC0000048)
++#define STATUS_SECTION_NOT_IMAGE                 ((nt_status_t)0xC0000049)
++#define STATUS_SUSPEND_COUNT_EXCEEDED            ((nt_status_t)0xC000004A)
++#define STATUS_THREAD_IS_TERMINATING             ((nt_status_t)0xC000004B)
++#define STATUS_BAD_WORKING_SET_LIMIT             ((nt_status_t)0xC000004C)
++#define STATUS_INCOMPATIBLE_FILE_MAP             ((nt_status_t)0xC000004D)
++#define STATUS_SECTION_PROTECTION                ((nt_status_t)0xC000004E)
++#define STATUS_EAS_NOT_SUPPORTED                 ((nt_status_t)0xC000004F)
++#define STATUS_EA_TOO_LARGE                      ((nt_status_t)0xC0000050)
++#define STATUS_NONEXISTENT_EA_ENTRY              ((nt_status_t)0xC0000051)
++#define STATUS_NO_EAS_ON_FILE                    ((nt_status_t)0xC0000052)
++#define STATUS_EA_CORRUPT_ERROR                  ((nt_status_t)0xC0000053)
++#define STATUS_FILE_LOCK_CONFLICT                ((nt_status_t)0xC0000054)
++#define STATUS_LOCK_NOT_GRANTED                  ((nt_status_t)0xC0000055)
++#define STATUS_DELETE_PENDING                    ((nt_status_t)0xC0000056)
++#define STATUS_CTL_FILE_NOT_SUPPORTED            ((nt_status_t)0xC0000057)
++#define STATUS_UNKNOWN_REVISION                  ((nt_status_t)0xC0000058)
++#define STATUS_REVISION_MISMATCH                 ((nt_status_t)0xC0000059)
++#define STATUS_INVALID_OWNER                     ((nt_status_t)0xC000005A)
++#define STATUS_INVALID_PRIMARY_GROUP             ((nt_status_t)0xC000005B)
++#define STATUS_NO_IMPERSONATION_TOKEN            ((nt_status_t)0xC000005C)
++#define STATUS_CANT_DISABLE_MANDATORY            ((nt_status_t)0xC000005D)
++#define STATUS_NO_LOGON_SERVERS                  ((nt_status_t)0xC000005E)
++#define STATUS_NO_SUCH_LOGON_SESSION             ((nt_status_t)0xC000005F)
++#define STATUS_NO_SUCH_PRIVILEGE                 ((nt_status_t)0xC0000060)
++#define STATUS_PRIVILEGE_NOT_HELD                ((nt_status_t)0xC0000061)
++#define STATUS_INVALID_ACCOUNT_NAME              ((nt_status_t)0xC0000062)
++#define STATUS_USER_EXISTS                       ((nt_status_t)0xC0000063)
++#define STATUS_NO_SUCH_USER                      ((nt_status_t)0xC0000064)
++#define STATUS_GROUP_EXISTS                      ((nt_status_t)0xC0000065)
++#define STATUS_NO_SUCH_GROUP                     ((nt_status_t)0xC0000066)
++#define STATUS_MEMBER_IN_GROUP                   ((nt_status_t)0xC0000067)
++#define STATUS_MEMBER_NOT_IN_GROUP               ((nt_status_t)0xC0000068)
++#define STATUS_LAST_ADMIN                        ((nt_status_t)0xC0000069)
++#define STATUS_WRONG_PASSWORD                    ((nt_status_t)0xC000006A)
++#define STATUS_ILL_FORMED_PASSWORD               ((nt_status_t)0xC000006B)
++#define STATUS_PASSWORD_RESTRICTION              ((nt_status_t)0xC000006C)
++#define STATUS_LOGON_FAILURE                     ((nt_status_t)0xC000006D)
++#define STATUS_ACCOUNT_RESTRICTION               ((nt_status_t)0xC000006E)
++#define STATUS_INVALID_LOGON_HOURS               ((nt_status_t)0xC000006F)
++#define STATUS_INVALID_WORKSTATION               ((nt_status_t)0xC0000070)
++#define STATUS_PASSWORD_EXPIRED                  ((nt_status_t)0xC0000071)
++#define STATUS_ACCOUNT_DISABLED                  ((nt_status_t)0xC0000072)
++#define STATUS_NONE_MAPPED                       ((nt_status_t)0xC0000073)
++#define STATUS_TOO_MANY_LUIDS_REQUESTED          ((nt_status_t)0xC0000074)
++#define STATUS_LUIDS_EXHAUSTED                   ((nt_status_t)0xC0000075)
++#define STATUS_INVALID_SUB_AUTHORITY             ((nt_status_t)0xC0000076)
++#define STATUS_INVALID_ACL                       ((nt_status_t)0xC0000077)
++#define STATUS_INVALID_SID                       ((nt_status_t)0xC0000078)
++#define STATUS_INVALID_SECURITY_DESCR            ((nt_status_t)0xC0000079)
++#define STATUS_PROCEDURE_NOT_FOUND               ((nt_status_t)0xC000007A)
++#define STATUS_INVALID_IMAGE_FORMAT              ((nt_status_t)0xC000007B)
++#define STATUS_NO_TOKEN                          ((nt_status_t)0xC000007C)
++#define STATUS_BAD_INHERITANCE_ACL               ((nt_status_t)0xC000007D)
++#define STATUS_RANGE_NOT_LOCKED                  ((nt_status_t)0xC000007E)
++#define STATUS_DISK_FULL                         ((nt_status_t)0xC000007F)
++#define STATUS_SERVER_DISABLED                   ((nt_status_t)0xC0000080)
++#define STATUS_SERVER_NOT_DISABLED               ((nt_status_t)0xC0000081)
++#define STATUS_TOO_MANY_GUIDS_REQUESTED          ((nt_status_t)0xC0000082)
++#define STATUS_GUIDS_EXHAUSTED                   ((nt_status_t)0xC0000083)
++#define STATUS_INVALID_ID_AUTHORITY              ((nt_status_t)0xC0000084)
++#define STATUS_AGENTS_EXHAUSTED                  ((nt_status_t)0xC0000085)
++#define STATUS_INVALID_VOLUME_LABEL              ((nt_status_t)0xC0000086)
++#define STATUS_SECTION_NOT_EXTENDED              ((nt_status_t)0xC0000087)
++#define STATUS_NOT_MAPPED_DATA                   ((nt_status_t)0xC0000088)
++#define STATUS_RESOURCE_DATA_NOT_FOUND           ((nt_status_t)0xC0000089)
++#define STATUS_RESOURCE_TYPE_NOT_FOUND           ((nt_status_t)0xC000008A)
++#define STATUS_RESOURCE_NAME_NOT_FOUND           ((nt_status_t)0xC000008B)
++#define STATUS_ARRAY_BOUNDS_EXCEEDED             ((nt_status_t)0xC000008C)
++#define STATUS_FLOAT_DENORMAL_OPERAND            ((nt_status_t)0xC000008D)
++#define STATUS_FLOAT_DIVIDE_BY_ZERO              ((nt_status_t)0xC000008E)
++#define STATUS_FLOAT_INEXACT_RESULT              ((nt_status_t)0xC000008F)
++#define STATUS_FLOAT_INVALID_OPERATION           ((nt_status_t)0xC0000090)
++#define STATUS_FLOAT_OVERFLOW                    ((nt_status_t)0xC0000091)
++#define STATUS_FLOAT_STACK_CHECK                 ((nt_status_t)0xC0000092)
++#define STATUS_FLOAT_UNDERFLOW                   ((nt_status_t)0xC0000093)
++#define STATUS_INTEGER_DIVIDE_BY_ZERO            ((nt_status_t)0xC0000094)
++#define STATUS_INTEGER_OVERFLOW                  ((nt_status_t)0xC0000095)
++#define STATUS_PRIVILEGED_INSTRUCTION            ((nt_status_t)0xC0000096)
++#define STATUS_TOO_MANY_PAGING_FILES             ((nt_status_t)0xC0000097)
++#define STATUS_FILE_INVALID                      ((nt_status_t)0xC0000098)
++#define STATUS_ALLOTTED_SPACE_EXCEEDED           ((nt_status_t)0xC0000099)
++#define STATUS_INSUFFICIENT_RESOURCES            ((nt_status_t)0xC000009A)
++#define STATUS_DFS_EXIT_PATH_FOUND               ((nt_status_t)0xC000009B)
++#define STATUS_DEVICE_DATA_ERROR                 ((nt_status_t)0xC000009C)
++#define STATUS_DEVICE_NOT_CONNECTED              ((nt_status_t)0xC000009D)
++#define STATUS_DEVICE_POWER_FAILURE              ((nt_status_t)0xC000009E)
++#define STATUS_FREE_VM_NOT_AT_BASE               ((nt_status_t)0xC000009F)
++#define STATUS_MEMORY_NOT_ALLOCATED              ((nt_status_t)0xC00000A0)
++#define STATUS_WORKING_SET_QUOTA                 ((nt_status_t)0xC00000A1)
++#define STATUS_MEDIA_WRITE_PROTECTED             ((nt_status_t)0xC00000A2)
++#define STATUS_DEVICE_NOT_READY                  ((nt_status_t)0xC00000A3)
++#define STATUS_INVALID_GROUP_ATTRIBUTES          ((nt_status_t)0xC00000A4)
++#define STATUS_BAD_IMPERSONATION_LEVEL           ((nt_status_t)0xC00000A5)
++#define STATUS_CANT_OPEN_ANONYMOUS               ((nt_status_t)0xC00000A6)
++#define STATUS_BAD_VALIDATION_CLASS              ((nt_status_t)0xC00000A7)
++#define STATUS_BAD_TOKEN_TYPE                    ((nt_status_t)0xC00000A8)
++#define STATUS_BAD_MASTER_BOOT_RECORD            ((nt_status_t)0xC00000A9)
++#define STATUS_INSTRUCTION_MISALIGNMENT          ((nt_status_t)0xC00000AA)
++#define STATUS_INSTANCE_NOT_AVAILABLE            ((nt_status_t)0xC00000AB)
++#define STATUS_PIPE_NOT_AVAILABLE                ((nt_status_t)0xC00000AC)
++#define STATUS_INVALID_PIPE_STATE                ((nt_status_t)0xC00000AD)
++#define STATUS_PIPE_BUSY                         ((nt_status_t)0xC00000AE)
++#define STATUS_ILLEGAL_FUNCTION                  ((nt_status_t)0xC00000AF)
++#define STATUS_PIPE_DISCONNECTED                 ((nt_status_t)0xC00000B0)
++#define STATUS_PIPE_CLOSING                      ((nt_status_t)0xC00000B1)
++#define STATUS_PIPE_CONNECTED                    ((nt_status_t)0xC00000B2)
++#define STATUS_PIPE_LISTENING                    ((nt_status_t)0xC00000B3)
++#define STATUS_INVALID_READ_MODE                 ((nt_status_t)0xC00000B4)
++#define STATUS_IO_TIMEOUT                        ((nt_status_t)0xC00000B5)
++#define STATUS_FILE_FORCED_CLOSED                ((nt_status_t)0xC00000B6)
++#define STATUS_PROFILING_NOT_STARTED             ((nt_status_t)0xC00000B7)
++#define STATUS_PROFILING_NOT_STOPPED             ((nt_status_t)0xC00000B8)
++#define STATUS_COULD_NOT_INTERPRET               ((nt_status_t)0xC00000B9)
++#define STATUS_FILE_IS_A_DIRECTORY               ((nt_status_t)0xC00000BA)
++#define STATUS_NOT_SUPPORTED                     ((nt_status_t)0xC00000BB)
++#define STATUS_REMOTE_NOT_LISTENING              ((nt_status_t)0xC00000BC)
++#define STATUS_DUPLICATE_NAME                    ((nt_status_t)0xC00000BD)
++#define STATUS_BAD_NETWORK_PATH                  ((nt_status_t)0xC00000BE)
++#define STATUS_NETWORK_BUSY                      ((nt_status_t)0xC00000BF)
++#define STATUS_DEVICE_DOES_NOT_EXIST             ((nt_status_t)0xC00000C0)
++#define STATUS_TOO_MANY_COMMANDS                 ((nt_status_t)0xC00000C1)
++#define STATUS_ADAPTER_HARDWARE_ERROR            ((nt_status_t)0xC00000C2)
++#define STATUS_INVALID_NETWORK_RESPONSE          ((nt_status_t)0xC00000C3)
++#define STATUS_UNEXPECTED_NETWORK_ERROR          ((nt_status_t)0xC00000C4)
++#define STATUS_BAD_REMOTE_ADAPTER                ((nt_status_t)0xC00000C5)
++#define STATUS_PRINT_QUEUE_FULL                  ((nt_status_t)0xC00000C6)
++#define STATUS_NO_SPOOL_SPACE                    ((nt_status_t)0xC00000C7)
++#define STATUS_PRINT_CANCELLED                   ((nt_status_t)0xC00000C8)
++#define STATUS_NETWORK_NAME_DELETED              ((nt_status_t)0xC00000C9)
++#define STATUS_NETWORK_ACCESS_DENIED             ((nt_status_t)0xC00000CA)
++#define STATUS_BAD_DEVICE_TYPE                   ((nt_status_t)0xC00000CB)
++#define STATUS_BAD_NETWORK_NAME                  ((nt_status_t)0xC00000CC)
++#define STATUS_TOO_MANY_NAMES                    ((nt_status_t)0xC00000CD)
++#define STATUS_TOO_MANY_SESSIONS                 ((nt_status_t)0xC00000CE)
++#define STATUS_SHARING_PAUSED                    ((nt_status_t)0xC00000CF)
++#define STATUS_REQUEST_NOT_ACCEPTED              ((nt_status_t)0xC00000D0)
++#define STATUS_REDIRECTOR_PAUSED                 ((nt_status_t)0xC00000D1)
++#define STATUS_NET_WRITE_FAULT                   ((nt_status_t)0xC00000D2)
++#define STATUS_PROFILING_AT_LIMIT                ((nt_status_t)0xC00000D3)
++#define STATUS_NOT_SAME_DEVICE                   ((nt_status_t)0xC00000D4)
++#define STATUS_FILE_RENAMED                      ((nt_status_t)0xC00000D5)
++#define STATUS_VIRTUAL_CIRCUIT_CLOSED            ((nt_status_t)0xC00000D6)
++#define STATUS_NO_SECURITY_ON_OBJECT             ((nt_status_t)0xC00000D7)
++#define STATUS_CANT_WAIT                         ((nt_status_t)0xC00000D8)
++#define STATUS_PIPE_EMPTY                        ((nt_status_t)0xC00000D9)
++#define STATUS_CANT_ACCESS_DOMAIN_INFO           ((nt_status_t)0xC00000DA)
++#define STATUS_CANT_TERMINATE_SELF               ((nt_status_t)0xC00000DB)
++#define STATUS_INVALID_SERVER_STATE              ((nt_status_t)0xC00000DC)
++#define STATUS_INVALID_DOMAIN_STATE              ((nt_status_t)0xC00000DD)
++#define STATUS_INVALID_DOMAIN_ROLE               ((nt_status_t)0xC00000DE)
++#define STATUS_NO_SUCH_DOMAIN                    ((nt_status_t)0xC00000DF)
++#define STATUS_DOMAIN_EXISTS                     ((nt_status_t)0xC00000E0)
++#define STATUS_DOMAIN_LIMIT_EXCEEDED             ((nt_status_t)0xC00000E1)
++#define STATUS_OPLOCK_NOT_GRANTED                ((nt_status_t)0xC00000E2)
++#define STATUS_INVALID_OPLOCK_PROTOCOL           ((nt_status_t)0xC00000E3)
++#define STATUS_INTERNAL_DB_CORRUPTION            ((nt_status_t)0xC00000E4)
++#define STATUS_INTERNAL_ERROR                    ((nt_status_t)0xC00000E5)
++#define STATUS_GENERIC_NOT_MAPPED                ((nt_status_t)0xC00000E6)
++#define STATUS_BAD_DESCRIPTOR_FORMAT             ((nt_status_t)0xC00000E7)
++#define STATUS_INVALID_USER_BUFFER               ((nt_status_t)0xC00000E8)
++#define STATUS_UNEXPECTED_IO_ERROR               ((nt_status_t)0xC00000E9)
++#define STATUS_UNEXPECTED_MM_CREATE_ERR          ((nt_status_t)0xC00000EA)
++#define STATUS_UNEXPECTED_MM_MAP_ERROR           ((nt_status_t)0xC00000EB)
++#define STATUS_UNEXPECTED_MM_EXTEND_ERR          ((nt_status_t)0xC00000EC)
++#define STATUS_NOT_LOGON_PROCESS                 ((nt_status_t)0xC00000ED)
++#define STATUS_LOGON_SESSION_EXISTS              ((nt_status_t)0xC00000EE)
++#define STATUS_INVALID_PARAMETER_1               ((nt_status_t)0xC00000EF)
++#define STATUS_INVALID_PARAMETER_2               ((nt_status_t)0xC00000F0)
++#define STATUS_INVALID_PARAMETER_3               ((nt_status_t)0xC00000F1)
++#define STATUS_INVALID_PARAMETER_4               ((nt_status_t)0xC00000F2)
++#define STATUS_INVALID_PARAMETER_5               ((nt_status_t)0xC00000F3)
++#define STATUS_INVALID_PARAMETER_6               ((nt_status_t)0xC00000F4)
++#define STATUS_INVALID_PARAMETER_7               ((nt_status_t)0xC00000F5)
++#define STATUS_INVALID_PARAMETER_8               ((nt_status_t)0xC00000F6)
++#define STATUS_INVALID_PARAMETER_9               ((nt_status_t)0xC00000F7)
++#define STATUS_INVALID_PARAMETER_10              ((nt_status_t)0xC00000F8)
++#define STATUS_INVALID_PARAMETER_11              ((nt_status_t)0xC00000F9)
++#define STATUS_INVALID_PARAMETER_12              ((nt_status_t)0xC00000FA)
++#define STATUS_REDIRECTOR_NOT_STARTED            ((nt_status_t)0xC00000FB)
++#define STATUS_REDIRECTOR_STARTED                ((nt_status_t)0xC00000FC)
++#define STATUS_STACK_OVERFLOW                    ((nt_status_t)0xC00000FD)
++#define STATUS_NO_SUCH_PACKAGE                   ((nt_status_t)0xC00000FE)
++#define STATUS_BAD_FUNCTION_TABLE                ((nt_status_t)0xC00000FF)
++#define STATUS_VARIABLE_NOT_FOUND                ((nt_status_t)0xC0000100)
++#define STATUS_DIRECTORY_NOT_EMPTY               ((nt_status_t)0xC0000101)
++#define STATUS_FILE_CORRUPT_ERROR                ((nt_status_t)0xC0000102)
++#define STATUS_NOT_A_DIRECTORY                   ((nt_status_t)0xC0000103)
++#define STATUS_BAD_LOGON_SESSION_STATE           ((nt_status_t)0xC0000104)
++#define STATUS_LOGON_SESSION_COLLISION           ((nt_status_t)0xC0000105)
++#define STATUS_NAME_TOO_LONG                     ((nt_status_t)0xC0000106)
++#define STATUS_FILES_OPEN                        ((nt_status_t)0xC0000107)
++#define STATUS_CONNECTION_IN_USE                 ((nt_status_t)0xC0000108)
++#define STATUS_MESSAGE_NOT_FOUND                 ((nt_status_t)0xC0000109)
++#define STATUS_PROCESS_IS_TERMINATING            ((nt_status_t)0xC000010A)
++#define STATUS_INVALID_LOGON_TYPE                ((nt_status_t)0xC000010B)
++#define STATUS_NO_GUID_TRANSLATION               ((nt_status_t)0xC000010C)
++#define STATUS_CANNOT_IMPERSONATE                ((nt_status_t)0xC000010D)
++#define STATUS_IMAGE_ALREADY_LOADED              ((nt_status_t)0xC000010E)
++#define STATUS_ABIOS_NOT_PRESENT                 ((nt_status_t)0xC000010F)
++#define STATUS_ABIOS_LID_NOT_EXIST               ((nt_status_t)0xC0000110)
++#define STATUS_ABIOS_LID_ALREADY_OWNED           ((nt_status_t)0xC0000111)
++#define STATUS_ABIOS_NOT_LID_OWNER               ((nt_status_t)0xC0000112)
++#define STATUS_ABIOS_INVALID_COMMAND             ((nt_status_t)0xC0000113)
++#define STATUS_ABIOS_INVALID_LID                 ((nt_status_t)0xC0000114)
++#define STATUS_ABIOS_SELECTOR_NOT_AVAILABLE      ((nt_status_t)0xC0000115)
++#define STATUS_ABIOS_INVALID_SELECTOR            ((nt_status_t)0xC0000116)
++#define STATUS_NO_LDT                            ((nt_status_t)0xC0000117)
++#define STATUS_INVALID_LDT_SIZE                  ((nt_status_t)0xC0000118)
++#define STATUS_INVALID_LDT_OFFSET                ((nt_status_t)0xC0000119)
++#define STATUS_INVALID_LDT_DESCRIPTOR            ((nt_status_t)0xC000011A)
++#define STATUS_INVALID_IMAGE_NE_FORMAT           ((nt_status_t)0xC000011B)
++#define STATUS_RXACT_INVALID_STATE               ((nt_status_t)0xC000011C)
++#define STATUS_RXACT_COMMIT_FAILURE              ((nt_status_t)0xC000011D)
++#define STATUS_MAPPED_FILE_SIZE_ZERO             ((nt_status_t)0xC000011E)
++#define STATUS_TOO_MANY_OPENED_FILES             ((nt_status_t)0xC000011F)
++#define STATUS_CANCELLED                         ((nt_status_t)0xC0000120)
++#define STATUS_CANNOT_DELETE                     ((nt_status_t)0xC0000121)
++#define STATUS_INVALID_COMPUTER_NAME             ((nt_status_t)0xC0000122)
++#define STATUS_FILE_DELETED                      ((nt_status_t)0xC0000123)
++#define STATUS_SPECIAL_ACCOUNT                   ((nt_status_t)0xC0000124)
++#define STATUS_SPECIAL_GROUP                     ((nt_status_t)0xC0000125)
++#define STATUS_SPECIAL_USER                      ((nt_status_t)0xC0000126)
++#define STATUS_MEMBERS_PRIMARY_GROUP             ((nt_status_t)0xC0000127)
++#define STATUS_FILE_CLOSED                       ((nt_status_t)0xC0000128)
++#define STATUS_TOO_MANY_THREADS                  ((nt_status_t)0xC0000129)
++#define STATUS_THREAD_NOT_IN_PROCESS             ((nt_status_t)0xC000012A)
++#define STATUS_TOKEN_ALREADY_IN_USE              ((nt_status_t)0xC000012B)
++#define STATUS_PAGEFILE_QUOTA_EXCEEDED           ((nt_status_t)0xC000012C)
++#define STATUS_COMMITMENT_LIMIT                  ((nt_status_t)0xC000012D)
++#define STATUS_INVALID_IMAGE_LE_FORMAT           ((nt_status_t)0xC000012E)
++#define STATUS_INVALID_IMAGE_NOT_MZ              ((nt_status_t)0xC000012F)
++#define STATUS_INVALID_IMAGE_PROTECT             ((nt_status_t)0xC0000130)
++#define STATUS_INVALID_IMAGE_WIN_16              ((nt_status_t)0xC0000131)
++#define STATUS_LOGON_SERVER_CONFLICT             ((nt_status_t)0xC0000132)
++#define STATUS_TIME_DIFFERENCE_AT_DC             ((nt_status_t)0xC0000133)
++#define STATUS_SYNCHRONIZATION_REQUIRED          ((nt_status_t)0xC0000134)
++#define STATUS_DLL_NOT_FOUND                     ((nt_status_t)0xC0000135)
++#define STATUS_OPEN_FAILED                       ((nt_status_t)0xC0000136)
++#define STATUS_IO_PRIVILEGE_FAILED               ((nt_status_t)0xC0000137)
++#define STATUS_ORDINAL_NOT_FOUND                 ((nt_status_t)0xC0000138)
++#define STATUS_ENTRYPOINT_NOT_FOUND              ((nt_status_t)0xC0000139)
++#define STATUS_CONTROL_C_EXIT                    ((nt_status_t)0xC000013A)
++#define STATUS_LOCAL_DISCONNECT                  ((nt_status_t)0xC000013B)
++#define STATUS_REMOTE_DISCONNECT                 ((nt_status_t)0xC000013C)
++#define STATUS_REMOTE_RESOURCES                  ((nt_status_t)0xC000013D)
++#define STATUS_LINK_FAILED                       ((nt_status_t)0xC000013E)
++#define STATUS_LINK_TIMEOUT                      ((nt_status_t)0xC000013F)
++#define STATUS_INVALID_CONNECTION                ((nt_status_t)0xC0000140)
++#define STATUS_INVALID_ADDRESS                   ((nt_status_t)0xC0000141)
++#define STATUS_DLL_INIT_FAILED                   ((nt_status_t)0xC0000142)
++#define STATUS_MISSING_SYSTEMFILE                ((nt_status_t)0xC0000143)
++#define STATUS_UNHANDLED_EXCEPTION               ((nt_status_t)0xC0000144)
++#define STATUS_APP_INIT_FAILURE                  ((nt_status_t)0xC0000145)
++#define STATUS_PAGEFILE_CREATE_FAILED            ((nt_status_t)0xC0000146)
++#define STATUS_NO_PAGEFILE                       ((nt_status_t)0xC0000147)
++#define STATUS_INVALID_LEVEL                     ((nt_status_t)0xC0000148)
++#define STATUS_WRONG_PASSWORD_CORE               ((nt_status_t)0xC0000149)
++#define STATUS_ILLEGAL_FLOAT_CONTEXT             ((nt_status_t)0xC000014A)
++#define STATUS_PIPE_BROKEN                       ((nt_status_t)0xC000014B)
++#define STATUS_REGISTRY_CORRUPT                  ((nt_status_t)0xC000014C)
++#define STATUS_REGISTRY_IO_FAILED                ((nt_status_t)0xC000014D)
++#define STATUS_NO_EVENT_PAIR                     ((nt_status_t)0xC000014E)
++#define STATUS_UNRECOGNIZED_VOLUME               ((nt_status_t)0xC000014F)
++#define STATUS_SERIAL_NO_DEVICE_INITED           ((nt_status_t)0xC0000150)
++#define STATUS_NO_SUCH_ALIAS                     ((nt_status_t)0xC0000151)
++#define STATUS_MEMBER_NOT_IN_ALIAS               ((nt_status_t)0xC0000152)
++#define STATUS_MEMBER_IN_ALIAS                   ((nt_status_t)0xC0000153)
++#define STATUS_ALIAS_EXISTS                      ((nt_status_t)0xC0000154)
++#define STATUS_LOGON_NOT_GRANTED                 ((nt_status_t)0xC0000155)
++#define STATUS_TOO_MANY_SECRETS                  ((nt_status_t)0xC0000156)
++#define STATUS_SECRET_TOO_LONG                   ((nt_status_t)0xC0000157)
++#define STATUS_INTERNAL_DB_ERROR                 ((nt_status_t)0xC0000158)
++#define STATUS_FULLSCREEN_MODE                   ((nt_status_t)0xC0000159)
++#define STATUS_TOO_MANY_CONTEXT_IDS              ((nt_status_t)0xC000015A)
++#define STATUS_LOGON_TYPE_NOT_GRANTED            ((nt_status_t)0xC000015B)
++#define STATUS_NOT_REGISTRY_FILE                 ((nt_status_t)0xC000015C)
++#define STATUS_NT_CROSS_ENCRYPTION_REQUIRED      ((nt_status_t)0xC000015D)
++#define STATUS_DOMAIN_CTRLR_CONFIG_ERROR         ((nt_status_t)0xC000015E)
++#define STATUS_FT_MISSING_MEMBER                 ((nt_status_t)0xC000015F)
++#define STATUS_ILL_FORMED_SERVICE_ENTRY          ((nt_status_t)0xC0000160)
++#define STATUS_ILLEGAL_CHARACTER                 ((nt_status_t)0xC0000161)
++#define STATUS_UNMAPPABLE_CHARACTER              ((nt_status_t)0xC0000162)
++#define STATUS_UNDEFINED_CHARACTER               ((nt_status_t)0xC0000163)
++#define STATUS_FLOPPY_VOLUME                     ((nt_status_t)0xC0000164)
++#define STATUS_FLOPPY_ID_MARK_NOT_FOUND          ((nt_status_t)0xC0000165)
++#define STATUS_FLOPPY_WRONG_CYLINDER             ((nt_status_t)0xC0000166)
++#define STATUS_FLOPPY_UNKNOWN_ERROR              ((nt_status_t)0xC0000167)
++#define STATUS_FLOPPY_BAD_REGISTERS              ((nt_status_t)0xC0000168)
++#define STATUS_DISK_RECALIBRATE_FAILED           ((nt_status_t)0xC0000169)
++#define STATUS_DISK_OPERATION_FAILED             ((nt_status_t)0xC000016A)
++#define STATUS_DISK_RESET_FAILED                 ((nt_status_t)0xC000016B)
++#define STATUS_SHARED_IRQ_BUSY                   ((nt_status_t)0xC000016C)
++#define STATUS_FT_ORPHANING                      ((nt_status_t)0xC000016D)
++#define STATUS_BIOS_FAILED_TO_CONNECT_INTERRUPT  ((nt_status_t)0xC000016E)
++
++#define STATUS_PARTITION_FAILURE                 ((nt_status_t)0xC0000172)
++#define STATUS_INVALID_BLOCK_LENGTH              ((nt_status_t)0xC0000173)
++#define STATUS_DEVICE_NOT_PARTITIONED            ((nt_status_t)0xC0000174)
++#define STATUS_UNABLE_TO_LOCK_MEDIA              ((nt_status_t)0xC0000175)
++#define STATUS_UNABLE_TO_UNLOAD_MEDIA            ((nt_status_t)0xC0000176)
++#define STATUS_EOM_OVERFLOW                      ((nt_status_t)0xC0000177)
++#define STATUS_NO_MEDIA                          ((nt_status_t)0xC0000178)
++#define STATUS_NO_SUCH_MEMBER                    ((nt_status_t)0xC000017A)
++#define STATUS_INVALID_MEMBER                    ((nt_status_t)0xC000017B)
++#define STATUS_KEY_DELETED                       ((nt_status_t)0xC000017C)
++#define STATUS_NO_LOG_SPACE                      ((nt_status_t)0xC000017D)
++#define STATUS_TOO_MANY_SIDS                     ((nt_status_t)0xC000017E)
++#define STATUS_LM_CROSS_ENCRYPTION_REQUIRED      ((nt_status_t)0xC000017F)
++#define STATUS_KEY_HAS_CHILDREN                  ((nt_status_t)0xC0000180)
++#define STATUS_CHILD_MUST_BE_VOLATILE            ((nt_status_t)0xC0000181)
++#define STATUS_DEVICE_CONFIGURATION_ERROR        ((nt_status_t)0xC0000182)
++#define STATUS_DRIVER_INTERNAL_ERROR             ((nt_status_t)0xC0000183)
++#define STATUS_INVALID_DEVICE_STATE              ((nt_status_t)0xC0000184)
++#define STATUS_IO_DEVICE_ERROR                   ((nt_status_t)0xC0000185)
++#define STATUS_DEVICE_PROTOCOL_ERROR             ((nt_status_t)0xC0000186)
++#define STATUS_BACKUP_CONTROLLER                 ((nt_status_t)0xC0000187)
++#define STATUS_LOG_FILE_FULL                     ((nt_status_t)0xC0000188)
++#define STATUS_TOO_LATE                          ((nt_status_t)0xC0000189)
++#define STATUS_NO_TRUST_LSA_SECRET               ((nt_status_t)0xC000018A)
++#define STATUS_NO_TRUST_SAM_ACCOUNT              ((nt_status_t)0xC000018B)
++#define STATUS_TRUSTED_DOMAIN_FAILURE            ((nt_status_t)0xC000018C)
++#define STATUS_TRUSTED_RELATIONSHIP_FAILURE      ((nt_status_t)0xC000018D)
++#define STATUS_EVENTLOG_FILE_CORRUPT             ((nt_status_t)0xC000018E)
++#define STATUS_EVENTLOG_CANT_START               ((nt_status_t)0xC000018F)
++#define STATUS_TRUST_FAILURE                     ((nt_status_t)0xC0000190)
++#define STATUS_MUTANT_LIMIT_EXCEEDED             ((nt_status_t)0xC0000191)
++#define STATUS_NETLOGON_NOT_STARTED              ((nt_status_t)0xC0000192)
++#define STATUS_ACCOUNT_EXPIRED                   ((nt_status_t)0xC0000193)
++#define STATUS_POSSIBLE_DEADLOCK                 ((nt_status_t)0xC0000194)
++#define STATUS_NETWORK_CREDENTIAL_CONFLICT       ((nt_status_t)0xC0000195)
++#define STATUS_REMOTE_SESSION_LIMIT              ((nt_status_t)0xC0000196)
++#define STATUS_EVENTLOG_FILE_CHANGED             ((nt_status_t)0xC0000197)
++#define STATUS_NOLOGON_INTERDOMAIN_TRUST_ACCOUNT ((nt_status_t)0xC0000198)
++#define STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT ((nt_status_t)0xC0000199)
++#define STATUS_NOLOGON_SERVER_TRUST_ACCOUNT      ((nt_status_t)0xC000019A)
++#define STATUS_DOMAIN_TRUST_INCONSISTENT         ((nt_status_t)0xC000019B)
++#define STATUS_FS_DRIVER_REQUIRED                ((nt_status_t)0xC000019C)
++#define STATUS_NO_USER_SESSION_KEY               ((nt_status_t)0xC0000202)
++#define STATUS_USER_SESSION_DELETED              ((nt_status_t)0xC0000203)
++#define STATUS_RESOURCE_LANG_NOT_FOUND           ((nt_status_t)0xC0000204)
++#define STATUS_INSUFF_SERVER_RESOURCES           ((nt_status_t)0xC0000205)
++#define STATUS_INVALID_BUFFER_SIZE               ((nt_status_t)0xC0000206)
++#define STATUS_INVALID_ADDRESS_COMPONENT         ((nt_status_t)0xC0000207)
++#define STATUS_INVALID_ADDRESS_WILDCARD          ((nt_status_t)0xC0000208)
++#define STATUS_TOO_MANY_ADDRESSES                ((nt_status_t)0xC0000209)
++#define STATUS_ADDRESS_ALREADY_EXISTS            ((nt_status_t)0xC000020A)
++#define STATUS_ADDRESS_CLOSED                    ((nt_status_t)0xC000020B)
++#define STATUS_CONNECTION_DISCONNECTED           ((nt_status_t)0xC000020C)
++#define STATUS_CONNECTION_RESET                  ((nt_status_t)0xC000020D)
++#define STATUS_TOO_MANY_NODES                    ((nt_status_t)0xC000020E)
++#define STATUS_TRANSACTION_ABORTED               ((nt_status_t)0xC000020F)
++#define STATUS_TRANSACTION_TIMED_OUT             ((nt_status_t)0xC0000210)
++#define STATUS_TRANSACTION_NO_RELEASE            ((nt_status_t)0xC0000211)
++#define STATUS_TRANSACTION_NO_MATCH              ((nt_status_t)0xC0000212)
++#define STATUS_TRANSACTION_RESPONDED             ((nt_status_t)0xC0000213)
++#define STATUS_TRANSACTION_INVALID_ID            ((nt_status_t)0xC0000214)
++#define STATUS_TRANSACTION_INVALID_TYPE          ((nt_status_t)0xC0000215)
++#define STATUS_NOT_SERVER_SESSION                ((nt_status_t)0xC0000216)
++#define STATUS_NOT_CLIENT_SESSION                ((nt_status_t)0xC0000217)
++#define STATUS_CANNOT_LOAD_REGISTRY_FILE         ((nt_status_t)0xC0000218)
++#define STATUS_DEBUG_ATTACH_FAILED               ((nt_status_t)0xC0000219)
++#define STATUS_SYSTEM_PROCESS_TERMINATED         ((nt_status_t)0xC000021A)
++#define STATUS_DATA_NOT_ACCEPTED                 ((nt_status_t)0xC000021B)
++#define STATUS_NO_BROWSER_SERVERS_FOUND          ((nt_status_t)0xC000021C)
++#define STATUS_VDM_HARD_ERROR                    ((nt_status_t)0xC000021D)
++#define STATUS_DRIVER_CANCEL_TIMEOUT             ((nt_status_t)0xC000021E)
++#define STATUS_REPLY_MESSAGE_MISMATCH            ((nt_status_t)0xC000021F)
++#define STATUS_MAPPED_ALIGNMENT                  ((nt_status_t)0xC0000220)
++#define STATUS_IMAGE_CHECKSUM_MISMATCH           ((nt_status_t)0xC0000221)
++#define STATUS_LOST_WRITEBEHIND_DATA             ((nt_status_t)0xC0000222)
++#define STATUS_CLIENT_SERVER_PARAMETERS_INVALID  ((nt_status_t)0xC0000223)
++#define STATUS_PASSWORD_MUST_CHANGE              ((nt_status_t)0xC0000224)
++#define STATUS_NOT_FOUND                         ((nt_status_t)0xC0000225)
++#define STATUS_NOT_TINY_STREAM                   ((nt_status_t)0xC0000226)
++#define STATUS_RECOVERY_FAILURE                  ((nt_status_t)0xC0000227)
++#define STATUS_STACK_OVERFLOW_READ               ((nt_status_t)0xC0000228)
++#define STATUS_FAIL_CHECK                        ((nt_status_t)0xC0000229)
++#define STATUS_DUPLICATE_OBJECTID                ((nt_status_t)0xC000022A)
++#define STATUS_OBJECTID_EXISTS                   ((nt_status_t)0xC000022B)
++#define STATUS_CONVERT_TO_LARGE                  ((nt_status_t)0xC000022C)
++#define STATUS_RETRY                             ((nt_status_t)0xC000022D)
++#define STATUS_FOUND_OUT_OF_SCOPE                ((nt_status_t)0xC000022E)
++#define STATUS_ALLOCATE_BUCKET                   ((nt_status_t)0xC000022F)
++#define STATUS_PROPSET_NOT_FOUND                 ((nt_status_t)0xC0000230)
++#define STATUS_MARSHALL_OVERFLOW                 ((nt_status_t)0xC0000231)
++#define STATUS_INVALID_VARIANT                   ((nt_status_t)0xC0000232)
++#define STATUS_DOMAIN_CONTROLLER_NOT_FOUND       ((nt_status_t)0xC0000233)
++#define STATUS_ACCOUNT_LOCKED_OUT                ((nt_status_t)0xC0000234)
++#define STATUS_HANDLE_NOT_CLOSABLE               ((nt_status_t)0xC0000235)
++#define STATUS_CONNECTION_REFUSED                ((nt_status_t)0xC0000236)
++#define STATUS_GRACEFUL_DISCONNECT               ((nt_status_t)0xC0000237)
++#define STATUS_ADDRESS_ALREADY_ASSOCIATED        ((nt_status_t)0xC0000238)
++#define STATUS_ADDRESS_NOT_ASSOCIATED            ((nt_status_t)0xC0000239)
++#define STATUS_CONNECTION_INVALID                ((nt_status_t)0xC000023A)
++#define STATUS_CONNECTION_ACTIVE                 ((nt_status_t)0xC000023B)
++#define STATUS_NETWORK_UNREACHABLE               ((nt_status_t)0xC000023C)
++#define STATUS_HOST_UNREACHABLE                  ((nt_status_t)0xC000023D)
++#define STATUS_PROTOCOL_UNREACHABLE              ((nt_status_t)0xC000023E)
++#define STATUS_PORT_UNREACHABLE                  ((nt_status_t)0xC000023F)
++#define STATUS_REQUEST_ABORTED                   ((nt_status_t)0xC0000240)
++#define STATUS_CONNECTION_ABORTED                ((nt_status_t)0xC0000241)
++#define STATUS_BAD_COMPRESSION_BUFFER            ((nt_status_t)0xC0000242)
++#define STATUS_USER_MAPPED_FILE                  ((nt_status_t)0xC0000243)
++#define STATUS_AUDIT_FAILED                      ((nt_status_t)0xC0000244)
++#define STATUS_TIMER_RESOLUTION_NOT_SET          ((nt_status_t)0xC0000245)
++#define STATUS_CONNECTION_COUNT_LIMIT            ((nt_status_t)0xC0000246)
++#define STATUS_LOGIN_TIME_RESTRICTION            ((nt_status_t)0xC0000247)
++#define STATUS_LOGIN_WKSTA_RESTRICTION           ((nt_status_t)0xC0000248)
++#define STATUS_IMAGE_MP_UP_MISMATCH              ((nt_status_t)0xC0000249)
++#define STATUS_INSUFFICIENT_LOGON_INFO           ((nt_status_t)0xC0000250)
++#define STATUS_BAD_DLL_ENTRYPOINT                ((nt_status_t)0xC0000251)
++#define STATUS_BAD_SERVICE_ENTRYPOINT            ((nt_status_t)0xC0000252)
++#define STATUS_LPC_REPLY_LOST                    ((nt_status_t)0xC0000253)
++#define STATUS_IP_ADDRESS_CONFLICT1              ((nt_status_t)0xC0000254)
++#define STATUS_IP_ADDRESS_CONFLICT2              ((nt_status_t)0xC0000255)
++#define STATUS_REGISTRY_QUOTA_LIMIT              ((nt_status_t)0xC0000256)
++#define STATUS_PATH_NOT_COVERED                  ((nt_status_t)0xC0000257)
++#define STATUS_NO_CALLBACK_ACTIVE                ((nt_status_t)0xC0000258)
++#define STATUS_LICENSE_QUOTA_EXCEEDED            ((nt_status_t)0xC0000259)
++#define STATUS_PWD_TOO_SHORT                     ((nt_status_t)0xC000025A)
++#define STATUS_PWD_TOO_RECENT                    ((nt_status_t)0xC000025B)
++#define STATUS_PWD_HISTORY_CONFLICT              ((nt_status_t)0xC000025C)
++#define STATUS_PLUGPLAY_NO_DEVICE                ((nt_status_t)0xC000025E)
++#define STATUS_UNSUPPORTED_COMPRESSION           ((nt_status_t)0xC000025F)
++#define STATUS_INVALID_HW_PROFILE                ((nt_status_t)0xC0000260)
++#define STATUS_INVALID_PLUGPLAY_DEVICE_PATH      ((nt_status_t)0xC0000261)
++#define STATUS_DRIVER_ORDINAL_NOT_FOUND          ((nt_status_t)0xC0000262)
++#define STATUS_DRIVER_ENTRYPOINT_NOT_FOUND       ((nt_status_t)0xC0000263)
++#define STATUS_RESOURCE_NOT_OWNED                ((nt_status_t)0xC0000264)
++#define STATUS_TOO_MANY_LINKS                    ((nt_status_t)0xC0000265)
++#define STATUS_QUOTA_LIST_INCONSISTENT           ((nt_status_t)0xC0000266)
++#define STATUS_FILE_IS_OFFLINE                   ((nt_status_t)0xC0000267)
++#define STATUS_EVALUATION_EXPIRATION             ((nt_status_t)0xC0000268)
++#define STATUS_ILLEGAL_DLL_RELOCATION            ((nt_status_t)0xC0000269)
++#define STATUS_LICENSE_VIOLATION                 ((nt_status_t)0xC000026A)
++#define STATUS_DLL_INIT_FAILED_LOGOFF            ((nt_status_t)0xC000026B)
++#define STATUS_DRIVER_UNABLE_TO_LOAD             ((nt_status_t)0xC000026C)
++#define STATUS_DFS_UNAVAILABLE                   ((nt_status_t)0xC000026D)
++#define STATUS_VOLUME_DISMOUNTED                 ((nt_status_t)0xC000026E)
++#define STATUS_WX86_INTERNAL_ERROR               ((nt_status_t)0xC000026F)
++#define STATUS_WX86_FLOAT_STACK_CHECK            ((nt_status_t)0xC0000270)
++#define STATUS_VALIDATE_CONTINUE                 ((nt_status_t)0xC0000271)
++#define STATUS_NO_MATCH                          ((nt_status_t)0xC0000272)
++#define STATUS_NO_MORE_MATCHES                   ((nt_status_t)0xC0000273)
++#define STATUS_NOT_A_REPARSE_POINT               ((nt_status_t)0xC0000275)
++#define STATUS_IO_REPARSE_TAG_INVALID            ((nt_status_t)0xC0000276)
++#define STATUS_IO_REPARSE_TAG_MISMATCH           ((nt_status_t)0xC0000277)
++#define STATUS_IO_REPARSE_DATA_INVALID           ((nt_status_t)0xC0000278)
++#define STATUS_IO_REPARSE_TAG_NOT_HANDLED        ((nt_status_t)0xC0000279)
++#define STATUS_REPARSE_POINT_NOT_RESOLVED        ((nt_status_t)0xC0000280)
++#define STATUS_DIRECTORY_IS_A_REPARSE_POINT      ((nt_status_t)0xC0000281)
++#define STATUS_RANGE_LIST_CONFLICT               ((nt_status_t)0xC0000282)
++#define STATUS_SOURCE_ELEMENT_EMPTY              ((nt_status_t)0xC0000283)
++#define STATUS_DESTINATION_ELEMENT_FULL          ((nt_status_t)0xC0000284)
++#define STATUS_ILLEGAL_ELEMENT_ADDRESS           ((nt_status_t)0xC0000285)
++#define STATUS_MAGAZINE_NOT_PRESENT              ((nt_status_t)0xC0000286)
++#define STATUS_REINITIALIZATION_NEEDED           ((nt_status_t)0xC0000287)
++#define STATUS_ENCRYPTION_FAILED                 ((nt_status_t)0xC000028A)
++#define STATUS_DECRYPTION_FAILED                 ((nt_status_t)0xC000028B)
++#define STATUS_RANGE_NOT_FOUND                   ((nt_status_t)0xC000028C)
++#define STATUS_NO_RECOVERY_POLICY                ((nt_status_t)0xC000028D)
++#define STATUS_NO_EFS                            ((nt_status_t)0xC000028E)
++#define STATUS_WRONG_EFS                         ((nt_status_t)0xC000028F)
++#define STATUS_NO_USER_KEYS                      ((nt_status_t)0xC0000290)
++#define STATUS_FILE_NOT_ENCRYPTED                ((nt_status_t)0xC0000291)
++#define STATUS_NOT_EXPORT_FORMAT                 ((nt_status_t)0xC0000292)
++#define STATUS_FILE_ENCRYPTED                    ((nt_status_t)0xC0000293)
++#define STATUS_WMI_GUID_NOT_FOUND                ((nt_status_t)0xC0000295)
++#define STATUS_WMI_INSTANCE_NOT_FOUND            ((nt_status_t)0xC0000296)
++#define STATUS_WMI_ITEMID_NOT_FOUND              ((nt_status_t)0xC0000297)
++#define STATUS_WMI_TRY_AGAIN                     ((nt_status_t)0xC0000298)
++#define STATUS_SHARED_POLICY                     ((nt_status_t)0xC0000299)
++#define STATUS_POLICY_OBJECT_NOT_FOUND           ((nt_status_t)0xC000029A)
++#define STATUS_POLICY_ONLY_IN_DS                 ((nt_status_t)0xC000029B)
++#define STATUS_VOLUME_NOT_UPGRADED               ((nt_status_t)0xC000029C)
++#define STATUS_REMOTE_STORAGE_NOT_ACTIVE         ((nt_status_t)0xC000029D)
++#define STATUS_REMOTE_STORAGE_MEDIA_ERROR        ((nt_status_t)0xC000029E)
++#define STATUS_NO_TRACKING_SERVICE               ((nt_status_t)0xC000029F)
++#define STATUS_SERVER_SID_MISMATCH               ((nt_status_t)0xC00002A0)
++#define STATUS_DS_NO_ATTRIBUTE_OR_VALUE          ((nt_status_t)0xC00002A1)
++#define STATUS_DS_INVALID_ATTRIBUTE_SYNTAX       ((nt_status_t)0xC00002A2)
++#define STATUS_DS_ATTRIBUTE_TYPE_UNDEFINED       ((nt_status_t)0xC00002A3)
++#define STATUS_DS_ATTRIBUTE_OR_VALUE_EXISTS      ((nt_status_t)0xC00002A4)
++#define STATUS_DS_BUSY                           ((nt_status_t)0xC00002A5)
++#define STATUS_DS_UNAVAILABLE                    ((nt_status_t)0xC00002A6)
++#define STATUS_DS_NO_RIDS_ALLOCATED              ((nt_status_t)0xC00002A7)
++#define STATUS_DS_NO_MORE_RIDS                   ((nt_status_t)0xC00002A8)
++#define STATUS_DS_INCORRECT_ROLE_OWNER           ((nt_status_t)0xC00002A9)
++#define STATUS_DS_RIDMGR_INIT_ERROR              ((nt_status_t)0xC00002AA)
++#define STATUS_DS_OBJ_CLASS_VIOLATION            ((nt_status_t)0xC00002AB)
++#define STATUS_DS_CANT_ON_NON_LEAF               ((nt_status_t)0xC00002AC)
++#define STATUS_DS_CANT_ON_RDN                    ((nt_status_t)0xC00002AD)
++#define STATUS_DS_CANT_MOD_OBJ_CLASS             ((nt_status_t)0xC00002AE)
++#define STATUS_DS_CROSS_DOM_MOVE_FAILED          ((nt_status_t)0xC00002AF)
++#define STATUS_DS_GC_NOT_AVAILABLE               ((nt_status_t)0xC00002B0)
++#define STATUS_DIRECTORY_SERVICE_REQUIRED        ((nt_status_t)0xC00002B1)
++#define STATUS_REPARSE_ATTRIBUTE_CONFLICT        ((nt_status_t)0xC00002B2)
++#define STATUS_CANT_ENABLE_DENY_ONLY             ((nt_status_t)0xC00002B3)
++#define STATUS_FLOAT_MULTIPLE_FAULTS             ((nt_status_t)0xC00002B4)
++#define STATUS_FLOAT_MULTIPLE_TRAPS              ((nt_status_t)0xC00002B5)
++#define STATUS_DEVICE_REMOVED                    ((nt_status_t)0xC00002B6)
++#define STATUS_JOURNAL_DELETE_IN_PROGRESS        ((nt_status_t)0xC00002B7)
++#define STATUS_JOURNAL_NOT_ACTIVE                ((nt_status_t)0xC00002B8)
++#define STATUS_NOINTERFACE                       ((nt_status_t)0xC00002B9)
++#define STATUS_DS_ADMIN_LIMIT_EXCEEDED           ((nt_status_t)0xC00002C1)
++#define STATUS_DRIVER_FAILED_SLEEP               ((nt_status_t)0xC00002C2)
++#define STATUS_MUTUAL_AUTHENTICATION_FAILED      ((nt_status_t)0xC00002C3)
++#define STATUS_CORRUPT_SYSTEM_FILE               ((nt_status_t)0xC00002C4)
++#define STATUS_DATATYPE_MISALIGNMENT_ERROR       ((nt_status_t)0xC00002C5)
++#define STATUS_WMI_READ_ONLY                     ((nt_status_t)0xC00002C6)
++#define STATUS_WMI_SET_FAILURE                   ((nt_status_t)0xC00002C7)
++#define STATUS_COMMITMENT_MINIMUM                ((nt_status_t)0xC00002C8)
++#define STATUS_REG_NAT_CONSUMPTION               ((nt_status_t)0xC00002C9)
++#define STATUS_TRANSPORT_FULL                    ((nt_status_t)0xC00002CA)
++#define STATUS_DS_SAM_INIT_FAILURE               ((nt_status_t)0xC00002CB)
++#define STATUS_ONLY_IF_CONNECTED                 ((nt_status_t)0xC00002CC)
++#define STATUS_DS_SENSITIVE_GROUP_VIOLATION      ((nt_status_t)0xC00002CD)
++#define STATUS_PNP_RESTART_ENUMERATION           ((nt_status_t)0xC00002CE)
++#define STATUS_JOURNAL_ENTRY_DELETED             ((nt_status_t)0xC00002CF)
++#define STATUS_DS_CANT_MOD_PRIMARYGROUPID        ((nt_status_t)0xC00002D0)
++#define STATUS_SYSTEM_IMAGE_BAD_SIGNATURE        ((nt_status_t)0xC00002D1)
++#define STATUS_PNP_REBOOT_REQUIRED               ((nt_status_t)0xC00002D2)
++#define STATUS_POWER_STATE_INVALID               ((nt_status_t)0xC00002D3)
++#define STATUS_DS_INVALID_GROUP_TYPE                             ((nt_status_t)0xC00002D4)
++#define STATUS_DS_NO_NEST_GLOBALGROUP_IN_MIXEDDOMAIN             ((nt_status_t)0xC00002D5)
++#define STATUS_DS_NO_NEST_LOCALGROUP_IN_MIXEDDOMAIN              ((nt_status_t)0xC00002D6)
++#define STATUS_DS_GLOBAL_CANT_HAVE_LOCAL_MEMBER                  ((nt_status_t)0xC00002D7)
++#define STATUS_DS_GLOBAL_CANT_HAVE_UNIVERSAL_MEMBER              ((nt_status_t)0xC00002D8)
++#define STATUS_DS_UNIVERSAL_CANT_HAVE_LOCAL_MEMBER               ((nt_status_t)0xC00002D9)
++#define STATUS_DS_GLOBAL_CANT_HAVE_CROSSDOMAIN_MEMBER            ((nt_status_t)0xC00002DA)
++#define STATUS_DS_LOCAL_CANT_HAVE_CROSSDOMAIN_LOCAL_MEMBER       ((nt_status_t)0xC00002DB)
++#define STATUS_DS_HAVE_PRIMARY_MEMBERS                           ((nt_status_t)0xC00002DC)
++#define STATUS_WMI_NOT_SUPPORTED                         ((nt_status_t)0xC00002DD)
++#define STATUS_INSUFFICIENT_POWER                        ((nt_status_t)0xC00002DE)
++#define STATUS_SAM_NEED_BOOTKEY_PASSWORD                 ((nt_status_t)0xC00002DF)
++#define STATUS_SAM_NEED_BOOTKEY_FLOPPY                   ((nt_status_t)0xC00002E0)
++#define STATUS_DS_CANT_START                             ((nt_status_t)0xC00002E1)
++#define STATUS_DS_INIT_FAILURE                           ((nt_status_t)0xC00002E2)
++#define STATUS_SAM_INIT_FAILURE                          ((nt_status_t)0xC00002E3)
++#define STATUS_DS_GC_REQUIRED                            ((nt_status_t)0xC00002E4)
++#define STATUS_DS_LOCAL_MEMBER_OF_LOCAL_ONLY             ((nt_status_t)0xC00002E5)
++#define STATUS_DS_NO_FPO_IN_UNIVERSAL_GROUPS             ((nt_status_t)0xC00002E6)
++#define STATUS_DS_MACHINE_ACCOUNT_QUOTA_EXCEEDED         ((nt_status_t)0xC00002E7)
++#define STATUS_MULTIPLE_FAULT_VIOLATION          ((nt_status_t)0xC00002E8)
++#define STATUS_CURRENT_DOMAIN_NOT_ALLOWED        ((nt_status_t)0xC00002E9)
++#define STATUS_CANNOT_MAKE                       ((nt_status_t)0xC00002EA)
++#define STATUS_SYSTEM_SHUTDOWN                   ((nt_status_t)0xC00002EB)
++#define STATUS_DS_INIT_FAILURE_CONSOLE           ((nt_status_t)0xC00002EC)
++#define STATUS_DS_SAM_INIT_FAILURE_CONSOLE       ((nt_status_t)0xC00002ED)
++#define STATUS_UNFINISHED_CONTEXT_DELETED        ((nt_status_t)0xC00002EE)
++#define STATUS_NO_TGT_REPLY                      ((nt_status_t)0xC00002EF)
++#define STATUS_OBJECTID_NOT_FOUND                ((nt_status_t)0xC00002F0)
++#define STATUS_NO_IP_ADDRESSES                   ((nt_status_t)0xC00002F1)
++#define STATUS_WRONG_CREDENTIAL_HANDLE           ((nt_status_t)0xC00002F2)
++#define STATUS_CRYPTO_SYSTEM_INVALID             ((nt_status_t)0xC00002F3)
++#define STATUS_MAX_REFERRALS_EXCEEDED            ((nt_status_t)0xC00002F4)
++#define STATUS_MUST_BE_KDC                       ((nt_status_t)0xC00002F5)
++#define STATUS_STRONG_CRYPTO_NOT_SUPPORTED       ((nt_status_t)0xC00002F6)
++#define STATUS_TOO_MANY_PRINCIPALS               ((nt_status_t)0xC00002F7)
++#define STATUS_NO_PA_DATA                        ((nt_status_t)0xC00002F8)
++#define STATUS_PKINIT_NAME_MISMATCH              ((nt_status_t)0xC00002F9)
++#define STATUS_SMARTCARD_LOGON_REQUIRED          ((nt_status_t)0xC00002FA)
++#define STATUS_KDC_INVALID_REQUEST               ((nt_status_t)0xC00002FB)
++#define STATUS_KDC_UNABLE_TO_REFER               ((nt_status_t)0xC00002FC)
++#define STATUS_KDC_UNKNOWN_ETYPE                 ((nt_status_t)0xC00002FD)
++#define STATUS_SHUTDOWN_IN_PROGRESS              ((nt_status_t)0xC00002FE)
++#define STATUS_SERVER_SHUTDOWN_IN_PROGRESS       ((nt_status_t)0xC00002FF)
++#define STATUS_NOT_SUPPORTED_ON_SBS              ((nt_status_t)0xC0000300)
++#define STATUS_WMI_GUID_DISCONNECTED             ((nt_status_t)0xC0000301)
++#define STATUS_WMI_ALREADY_DISABLED              ((nt_status_t)0xC0000302)
++#define STATUS_WMI_ALREADY_ENABLED               ((nt_status_t)0xC0000303)
++#define STATUS_MFT_TOO_FRAGMENTED                ((nt_status_t)0xC0000304)
++#define STATUS_COPY_PROTECTION_FAILURE           ((nt_status_t)0xC0000305)
++#define STATUS_CSS_AUTHENTICATION_FAILURE        ((nt_status_t)0xC0000306)
++#define STATUS_CSS_KEY_NOT_PRESENT               ((nt_status_t)0xC0000307)
++#define STATUS_CSS_KEY_NOT_ESTABLISHED           ((nt_status_t)0xC0000308)
++#define STATUS_CSS_SCRAMBLED_SECTOR              ((nt_status_t)0xC0000309)
++#define STATUS_CSS_REGION_MISMATCH               ((nt_status_t)0xC000030A)
++#define STATUS_CSS_RESETS_EXHAUSTED              ((nt_status_t)0xC000030B)
++#define STATUS_PKINIT_FAILURE                    ((nt_status_t)0xC0000320)
++#define STATUS_SMARTCARD_SUBSYSTEM_FAILURE       ((nt_status_t)0xC0000321)
++#define STATUS_NO_KERB_KEY                       ((nt_status_t)0xC0000322)
++#define STATUS_HOST_DOWN                         ((nt_status_t)0xC0000350)
++#define STATUS_UNSUPPORTED_PREAUTH               ((nt_status_t)0xC0000351)
++#define STATUS_EFS_ALG_BLOB_TOO_BIG              ((nt_status_t)0xC0000352)
++#define STATUS_PORT_NOT_SET                      ((nt_status_t)0xC0000353)
++#define STATUS_DEBUGGER_INACTIVE                 ((nt_status_t)0xC0000354)
++#define STATUS_DS_VERSION_CHECK_FAILURE          ((nt_status_t)0xC0000355)
++#define STATUS_AUDITING_DISABLED                 ((nt_status_t)0xC0000356)
++#define STATUS_PRENT4_MACHINE_ACCOUNT            ((nt_status_t)0xC0000357)
++#define STATUS_DS_AG_CANT_HAVE_UNIVERSAL_MEMBER  ((nt_status_t)0xC0000358)
++#define STATUS_INVALID_IMAGE_WIN_32              ((nt_status_t)0xC0000359)
++#define STATUS_INVALID_IMAGE_WIN_64              ((nt_status_t)0xC000035A)
++#define STATUS_BAD_BINDINGS                      ((nt_status_t)0xC000035B)
++#define STATUS_NETWORK_SESSION_EXPIRED           ((nt_status_t)0xC000035C)
++#define STATUS_APPHELP_BLOCK                     ((nt_status_t)0xC000035D)
++#define STATUS_ALL_SIDS_FILTERED                 ((nt_status_t)0xC000035E)
++#define STATUS_NOT_SAFE_MODE_DRIVER              ((nt_status_t)0xC000035F)
++#define STATUS_ACCESS_DISABLED_BY_POLICY_DEFAULT         ((nt_status_t)0xC0000361)
++#define STATUS_ACCESS_DISABLED_BY_POLICY_PATH            ((nt_status_t)0xC0000362)
++#define STATUS_ACCESS_DISABLED_BY_POLICY_PUBLISHER       ((nt_status_t)0xC0000363)
++#define STATUS_ACCESS_DISABLED_BY_POLICY_OTHER           ((nt_status_t)0xC0000364)
++#define STATUS_FAILED_DRIVER_ENTRY               ((nt_status_t)0xC0000365)
++#define STATUS_DEVICE_ENUMERATION_ERROR          ((nt_status_t)0xC0000366)
++#define STATUS_WAIT_FOR_OPLOCK                   ((nt_status_t)0x00000367)
++#define STATUS_MOUNT_POINT_NOT_RESOLVED          ((nt_status_t)0xC0000368)
++#define STATUS_INVALID_DEVICE_OBJECT_PARAMETER   ((nt_status_t)0xC0000369)
++#define STATUS_MCA_OCCURED                       ((nt_status_t)0xC000036A)
++#define STATUS_DRIVER_BLOCKED_CRITICAL           ((nt_status_t)0xC000036B)
++#define STATUS_DRIVER_BLOCKED                    ((nt_status_t)0xC000036C)
++#define STATUS_DRIVER_DATABASE_ERROR             ((nt_status_t)0xC000036D)
++#define STATUS_SYSTEM_HIVE_TOO_LARGE             ((nt_status_t)0xC000036E)
++#define STATUS_INVALID_IMPORT_OF_NON_DLL         ((nt_status_t)0xC000036F)
++#define STATUS_SMARTCARD_WRONG_PIN               ((nt_status_t)0xC0000380)
++#define STATUS_SMARTCARD_CARD_BLOCKED            ((nt_status_t)0xC0000381)
++#define STATUS_SMARTCARD_CARD_NOT_AUTHENTICATED  ((nt_status_t)0xC0000382)
++#define STATUS_SMARTCARD_NO_CARD                 ((nt_status_t)0xC0000383)
++#define STATUS_SMARTCARD_NO_KEY_CONTAINER        ((nt_status_t)0xC0000384)
++#define STATUS_SMARTCARD_NO_CERTIFICATE          ((nt_status_t)0xC0000385)
++#define STATUS_SMARTCARD_NO_KEYSET               ((nt_status_t)0xC0000386)
++#define STATUS_SMARTCARD_IO_ERROR                ((nt_status_t)0xC0000387)
++#define STATUS_DOWNGRADE_DETECTED                ((nt_status_t)0xC0000388)
++#define STATUS_SMARTCARD_CERT_REVOKED            ((nt_status_t)0xC0000389)
++#define STATUS_ISSUING_CA_UNTRUSTED              ((nt_status_t)0xC000038A)
++#define STATUS_REVOCATION_OFFLINE_C              ((nt_status_t)0xC000038B)
++#define STATUS_PKINIT_CLIENT_FAILURE             ((nt_status_t)0xC000038C)
++#define STATUS_SMARTCARD_CERT_EXPIRED            ((nt_status_t)0xC000038D)
++#define STATUS_DRIVER_FAILED_PRIOR_UNLOAD        ((nt_status_t)0xC000038E)
++#define STATUS_SMARTCARD_SILENT_CONTEXT          ((nt_status_t)0xC000038F)
++#define STATUS_PER_USER_TRUST_QUOTA_EXCEEDED     ((nt_status_t)0xC0000401)
++#define STATUS_ALL_USER_TRUST_QUOTA_EXCEEDED     ((nt_status_t)0xC0000402)
++#define STATUS_USER_DELETE_TRUST_QUOTA_EXCEEDED  ((nt_status_t)0xC0000403)
++#define STATUS_DS_NAME_NOT_UNIQUE                ((nt_status_t)0xC0000404)
++#define STATUS_DS_DUPLICATE_ID_FOUND             ((nt_status_t)0xC0000405)
++#define STATUS_DS_GROUP_CONVERSION_ERROR         ((nt_status_t)0xC0000406)
++#define STATUS_VOLSNAP_PREPARE_HIBERNATE         ((nt_status_t)0xC0000407)
++#define STATUS_USER2USER_REQUIRED                ((nt_status_t)0xC0000408)
++#define STATUS_STACK_BUFFER_OVERRUN              ((nt_status_t)0xC0000409)
++#define STATUS_NO_S4U_PROT_SUPPORT               ((nt_status_t)0xC000040A)
++#define STATUS_CROSSREALM_DELEGATION_FAILURE     ((nt_status_t)0xC000040B)
++#define STATUS_REVOCATION_OFFLINE_KDC            ((nt_status_t)0xC000040C)
++#define STATUS_ISSUING_CA_UNTRUSTED_KDC          ((nt_status_t)0xC000040D)
++#define STATUS_KDC_CERT_EXPIRED                  ((nt_status_t)0xC000040E)
++#define STATUS_KDC_CERT_REVOKED                  ((nt_status_t)0xC000040F)
++#define STATUS_PARAMETER_QUOTA_EXCEEDED          ((nt_status_t)0xC0000410)
++#define STATUS_HIBERNATION_FAILURE               ((nt_status_t)0xC0000411)
++#define STATUS_DELAY_LOAD_FAILED                 ((nt_status_t)0xC0000412)
++#define STATUS_AUTHENTICATION_FIREWALL_FAILED    ((nt_status_t)0xC0000413)
++#define STATUS_VDM_DISALLOWED                    ((nt_status_t)0xC0000414)
++#define STATUS_HUNG_DISPLAY_DRIVER_THREAD        ((nt_status_t)0xC0000415)
++#define STATUS_INVALID_CRUNTIME_PARAMETER        ((nt_status_t)0xC0000417)
++#define STATUS_ASSERTION_FAILURE                 ((nt_status_t)0xC0000420L)
++#define STATUS_CALLBACK_POP_STACK                ((nt_status_t)0xC0000423)
++#define STATUS_WOW_ASSERTION                     ((nt_status_t)0xC0009898)
++
++#define RPC_NT_INVALID_STRING_BINDING     ((nt_status_t)0xC0020001)
++#define RPC_NT_WRONG_KIND_OF_BINDING      ((nt_status_t)0xC0020002)
++#define RPC_NT_INVALID_BINDING            ((nt_status_t)0xC0020003)
++#define RPC_NT_PROTSEQ_NOT_SUPPORTED      ((nt_status_t)0xC0020004)
++#define RPC_NT_INVALID_RPC_PROTSEQ        ((nt_status_t)0xC0020005)
++#define RPC_NT_INVALID_STRING_UUID        ((nt_status_t)0xC0020006)
++#define RPC_NT_INVALID_ENDPOINT_FORMAT    ((nt_status_t)0xC0020007)
++#define RPC_NT_INVALID_NET_ADDR           ((nt_status_t)0xC0020008)
++#define RPC_NT_NO_ENDPOINT_FOUND          ((nt_status_t)0xC0020009)
++#define RPC_NT_INVALID_TIMEOUT            ((nt_status_t)0xC002000A)
++#define RPC_NT_OBJECT_NOT_FOUND           ((nt_status_t)0xC002000B)
++#define RPC_NT_ALREADY_REGISTERED         ((nt_status_t)0xC002000C)
++#define RPC_NT_TYPE_ALREADY_REGISTERED    ((nt_status_t)0xC002000D)
++#define RPC_NT_ALREADY_LISTENING          ((nt_status_t)0xC002000E)
++#define RPC_NT_NO_PROTSEQS_REGISTERED     ((nt_status_t)0xC002000F)
++#define RPC_NT_NOT_LISTENING              ((nt_status_t)0xC0020010)
++#define RPC_NT_UNKNOWN_MGR_TYPE           ((nt_status_t)0xC0020011)
++#define RPC_NT_UNKNOWN_IF                 ((nt_status_t)0xC0020012)
++#define RPC_NT_NO_BINDINGS                ((nt_status_t)0xC0020013)
++#define RPC_NT_NO_PROTSEQS                ((nt_status_t)0xC0020014)
++#define RPC_NT_CANT_CREATE_ENDPOINT       ((nt_status_t)0xC0020015)
++#define RPC_NT_OUT_OF_RESOURCES           ((nt_status_t)0xC0020016)
++#define RPC_NT_SERVER_UNAVAILABLE         ((nt_status_t)0xC0020017)
++#define RPC_NT_SERVER_TOO_BUSY            ((nt_status_t)0xC0020018)
++#define RPC_NT_INVALID_NETWORK_OPTIONS    ((nt_status_t)0xC0020019)
++#define RPC_NT_NO_CALL_ACTIVE             ((nt_status_t)0xC002001A)
++#define RPC_NT_CALL_FAILED                ((nt_status_t)0xC002001B)
++#define RPC_NT_CALL_FAILED_DNE            ((nt_status_t)0xC002001C)
++#define RPC_NT_PROTOCOL_ERROR             ((nt_status_t)0xC002001D)
++#define RPC_NT_UNSUPPORTED_TRANS_SYN      ((nt_status_t)0xC002001F)
++#define RPC_NT_UNSUPPORTED_TYPE           ((nt_status_t)0xC0020021)
++#define RPC_NT_INVALID_TAG                ((nt_status_t)0xC0020022)
++#define RPC_NT_INVALID_BOUND              ((nt_status_t)0xC0020023)
++#define RPC_NT_NO_ENTRY_NAME              ((nt_status_t)0xC0020024)
++#define RPC_NT_INVALID_NAME_SYNTAX        ((nt_status_t)0xC0020025)
++#define RPC_NT_UNSUPPORTED_NAME_SYNTAX    ((nt_status_t)0xC0020026)
++#define RPC_NT_UUID_NO_ADDRESS            ((nt_status_t)0xC0020028)
++#define RPC_NT_DUPLICATE_ENDPOINT         ((nt_status_t)0xC0020029)
++#define RPC_NT_UNKNOWN_AUTHN_TYPE         ((nt_status_t)0xC002002A)
++#define RPC_NT_MAX_CALLS_TOO_SMALL        ((nt_status_t)0xC002002B)
++#define RPC_NT_STRING_TOO_LONG            ((nt_status_t)0xC002002C)
++#define RPC_NT_PROTSEQ_NOT_FOUND          ((nt_status_t)0xC002002D)
++#define RPC_NT_PROCNUM_OUT_OF_RANGE       ((nt_status_t)0xC002002E)
++#define RPC_NT_BINDING_HAS_NO_AUTH        ((nt_status_t)0xC002002F)
++#define RPC_NT_UNKNOWN_AUTHN_SERVICE      ((nt_status_t)0xC0020030)
++#define RPC_NT_UNKNOWN_AUTHN_LEVEL        ((nt_status_t)0xC0020031)
++#define RPC_NT_INVALID_AUTH_IDENTITY      ((nt_status_t)0xC0020032)
++#define RPC_NT_UNKNOWN_AUTHZ_SERVICE      ((nt_status_t)0xC0020033)
++#define EPT_NT_INVALID_ENTRY              ((nt_status_t)0xC0020034)
++#define EPT_NT_CANT_PERFORM_OP            ((nt_status_t)0xC0020035)
++#define EPT_NT_NOT_REGISTERED             ((nt_status_t)0xC0020036)
++#define RPC_NT_NOTHING_TO_EXPORT          ((nt_status_t)0xC0020037)
++#define RPC_NT_INCOMPLETE_NAME            ((nt_status_t)0xC0020038)
++#define RPC_NT_INVALID_VERS_OPTION        ((nt_status_t)0xC0020039)
++#define RPC_NT_NO_MORE_MEMBERS            ((nt_status_t)0xC002003A)
++#define RPC_NT_NOT_ALL_OBJS_UNEXPORTED    ((nt_status_t)0xC002003B)
++#define RPC_NT_INTERFACE_NOT_FOUND        ((nt_status_t)0xC002003C)
++#define RPC_NT_ENTRY_ALREADY_EXISTS       ((nt_status_t)0xC002003D)
++#define RPC_NT_ENTRY_NOT_FOUND            ((nt_status_t)0xC002003E)
++#define RPC_NT_NAME_SERVICE_UNAVAILABLE   ((nt_status_t)0xC002003F)
++#define RPC_NT_INVALID_NAF_ID             ((nt_status_t)0xC0020040)
++#define RPC_NT_CANNOT_SUPPORT             ((nt_status_t)0xC0020041)
++#define RPC_NT_NO_CONTEXT_AVAILABLE       ((nt_status_t)0xC0020042)
++#define RPC_NT_INTERNAL_ERROR             ((nt_status_t)0xC0020043)
++#define RPC_NT_ZERO_DIVIDE                ((nt_status_t)0xC0020044)
++#define RPC_NT_ADDRESS_ERROR              ((nt_status_t)0xC0020045)
++#define RPC_NT_FP_DIV_ZERO                ((nt_status_t)0xC0020046)
++#define RPC_NT_FP_UNDERFLOW               ((nt_status_t)0xC0020047)
++#define RPC_NT_FP_OVERFLOW                ((nt_status_t)0xC0020048)
++#define RPC_NT_CALL_IN_PROGRESS           ((nt_status_t)0xC0020049)
++#define RPC_NT_NO_MORE_BINDINGS           ((nt_status_t)0xC002004A)
++#define RPC_NT_GROUP_MEMBER_NOT_FOUND     ((nt_status_t)0xC002004B)
++#define EPT_NT_CANT_CREATE                ((nt_status_t)0xC002004C)
++#define RPC_NT_INVALID_OBJECT             ((nt_status_t)0xC002004D)
++#define RPC_NT_NO_INTERFACES                     ((nt_status_t)0xC002004F)
++#define RPC_NT_CALL_CANCELLED                    ((nt_status_t)0xC0020050)
++#define RPC_NT_BINDING_INCOMPLETE                ((nt_status_t)0xC0020051)
++#define RPC_NT_COMM_FAILURE                      ((nt_status_t)0xC0020052)
++#define RPC_NT_UNSUPPORTED_AUTHN_LEVEL           ((nt_status_t)0xC0020053)
++#define RPC_NT_NO_PRINC_NAME                     ((nt_status_t)0xC0020054)
++#define RPC_NT_NOT_RPC_ERROR                     ((nt_status_t)0xC0020055)
++#define RPC_NT_SEC_PKG_ERROR                     ((nt_status_t)0xC0020057)
++#define RPC_NT_NOT_CANCELLED                     ((nt_status_t)0xC0020058)
++#define RPC_NT_INVALID_ASYNC_HANDLE              ((nt_status_t)0xC0020062)
++#define RPC_NT_INVALID_ASYNC_CALL                ((nt_status_t)0xC0020063)
++
++#define RPC_NT_NO_MORE_ENTRIES                   ((nt_status_t)0xC0030001)
++#define RPC_NT_SS_CHAR_TRANS_OPEN_FAIL           ((nt_status_t)0xC0030002)
++#define RPC_NT_SS_CHAR_TRANS_SHORT_FILE          ((nt_status_t)0xC0030003)
++#define RPC_NT_SS_IN_NULL_CONTEXT                ((nt_status_t)0xC0030004)
++#define RPC_NT_SS_CONTEXT_MISMATCH               ((nt_status_t)0xC0030005)
++#define RPC_NT_SS_CONTEXT_DAMAGED                ((nt_status_t)0xC0030006)
++#define RPC_NT_SS_HANDLES_MISMATCH               ((nt_status_t)0xC0030007)
++#define RPC_NT_SS_CANNOT_GET_CALL_HANDLE         ((nt_status_t)0xC0030008)
++#define RPC_NT_NULL_REF_POINTER                  ((nt_status_t)0xC0030009)
++#define RPC_NT_ENUM_VALUE_OUT_OF_RANGE           ((nt_status_t)0xC003000A)
++#define RPC_NT_BYTE_COUNT_TOO_SMALL              ((nt_status_t)0xC003000B)
++#define RPC_NT_BAD_STUB_DATA                     ((nt_status_t)0xC003000C)
++#define RPC_NT_INVALID_ES_ACTION                 ((nt_status_t)0xC0030059)
++#define RPC_NT_WRONG_ES_VERSION                  ((nt_status_t)0xC003005A)
++#define RPC_NT_WRONG_STUB_VERSION                ((nt_status_t)0xC003005B)
++#define RPC_NT_INVALID_PIPE_OBJECT               ((nt_status_t)0xC003005C)
++#define RPC_NT_INVALID_PIPE_OPERATION            ((nt_status_t)0xC003005D)
++#define RPC_NT_WRONG_PIPE_VERSION                ((nt_status_t)0xC003005E)
++#define RPC_NT_PIPE_CLOSED                       ((nt_status_t)0xC003005F)
++#define RPC_NT_PIPE_DISCIPLINE_ERROR             ((nt_status_t)0xC0030060)
++#define RPC_NT_PIPE_EMPTY                        ((nt_status_t)0xC0030061)
++
++#define STATUS_PNP_BAD_MPS_TABLE                 ((nt_status_t)0xC0040035)
++#define STATUS_PNP_TRANSLATION_FAILED            ((nt_status_t)0xC0040036)
++#define STATUS_PNP_IRQ_TRANSLATION_FAILED        ((nt_status_t)0xC0040037)
++#define STATUS_PNP_INVALID_ID                    ((nt_status_t)0xC0040038)
++
++#define STATUS_ACPI_INVALID_OPCODE               ((nt_status_t)0xC0140001L)
++#define STATUS_ACPI_STACK_OVERFLOW               ((nt_status_t)0xC0140002L)
++#define STATUS_ACPI_ASSERT_FAILED                ((nt_status_t)0xC0140003L)
++#define STATUS_ACPI_INVALID_INDEX                ((nt_status_t)0xC0140004L)
++#define STATUS_ACPI_INVALID_ARGUMENT             ((nt_status_t)0xC0140005L)
++#define STATUS_ACPI_FATAL                        ((nt_status_t)0xC0140006L)
++#define STATUS_ACPI_INVALID_SUPERNAME            ((nt_status_t)0xC0140007L)
++#define STATUS_ACPI_INVALID_ARGTYPE              ((nt_status_t)0xC0140008L)
++#define STATUS_ACPI_INVALID_OBJTYPE              ((nt_status_t)0xC0140009L)
++#define STATUS_ACPI_INVALID_TARGETTYPE           ((nt_status_t)0xC014000AL)
++#define STATUS_ACPI_INCORRECT_ARGUMENT_COUNT     ((nt_status_t)0xC014000BL)
++#define STATUS_ACPI_ADDRESS_NOT_MAPPED           ((nt_status_t)0xC014000CL)
++#define STATUS_ACPI_INVALID_EVENTTYPE            ((nt_status_t)0xC014000DL)
++#define STATUS_ACPI_HANDLER_COLLISION            ((nt_status_t)0xC014000EL)
++#define STATUS_ACPI_INVALID_DATA                 ((nt_status_t)0xC014000FL)
++#define STATUS_ACPI_INVALID_REGION               ((nt_status_t)0xC0140010L)
++#define STATUS_ACPI_INVALID_ACCESS_SIZE          ((nt_status_t)0xC0140011L)
++#define STATUS_ACPI_ACQUIRE_GLOBAL_LOCK          ((nt_status_t)0xC0140012L)
++#define STATUS_ACPI_ALREADY_INITIALIZED          ((nt_status_t)0xC0140013L)
++#define STATUS_ACPI_NOT_INITIALIZED              ((nt_status_t)0xC0140014L)
++#define STATUS_ACPI_INVALID_MUTEX_LEVEL          ((nt_status_t)0xC0140015L)
++#define STATUS_ACPI_MUTEX_NOT_OWNED              ((nt_status_t)0xC0140016L)
++#define STATUS_ACPI_MUTEX_NOT_OWNER              ((nt_status_t)0xC0140017L)
++#define STATUS_ACPI_RS_ACCESS                    ((nt_status_t)0xC0140018L)
++#define STATUS_ACPI_INVALID_TABLE                ((nt_status_t)0xC0140019L)
++#define STATUS_ACPI_REG_HANDLER_FAILED           ((nt_status_t)0xC0140020L)
++#define STATUS_ACPI_POWER_REQUEST_FAILED         ((nt_status_t)0xC0140021L)
++
++#define STATUS_CTX_WINSTATION_NAME_INVALID       ((nt_status_t)0xC00A0001)
++#define STATUS_CTX_INVALID_PD                    ((nt_status_t)0xC00A0002)
++#define STATUS_CTX_PD_NOT_FOUND                  ((nt_status_t)0xC00A0003)
++#define STATUS_CTX_CLOSE_PENDING                 ((nt_status_t)0xC00A0006)
++#define STATUS_CTX_NO_OUTBUF                     ((nt_status_t)0xC00A0007)
++#define STATUS_CTX_MODEM_INF_NOT_FOUND           ((nt_status_t)0xC00A0008)
++#define STATUS_CTX_INVALID_MODEMNAME             ((nt_status_t)0xC00A0009)
++#define STATUS_CTX_RESPONSE_ERROR                ((nt_status_t)0xC00A000A)
++#define STATUS_CTX_MODEM_RESPONSE_TIMEOUT        ((nt_status_t)0xC00A000B)
++#define STATUS_CTX_MODEM_RESPONSE_NO_CARRIER     ((nt_status_t)0xC00A000C)
++#define STATUS_CTX_MODEM_RESPONSE_NO_DIALTONE    ((nt_status_t)0xC00A000D)
++#define STATUS_CTX_MODEM_RESPONSE_BUSY           ((nt_status_t)0xC00A000E)
++#define STATUS_CTX_MODEM_RESPONSE_VOICE          ((nt_status_t)0xC00A000F)
++#define STATUS_CTX_TD_ERROR                      ((nt_status_t)0xC00A0010)
++#define STATUS_CTX_LICENSE_CLIENT_INVALID        ((nt_status_t)0xC00A0012)
++#define STATUS_CTX_LICENSE_NOT_AVAILABLE         ((nt_status_t)0xC00A0013)
++#define STATUS_CTX_LICENSE_EXPIRED               ((nt_status_t)0xC00A0014)
++#define STATUS_CTX_WINSTATION_NOT_FOUND          ((nt_status_t)0xC00A0015)
++#define STATUS_CTX_WINSTATION_NAME_COLLISION     ((nt_status_t)0xC00A0016)
++#define STATUS_CTX_WINSTATION_BUSY               ((nt_status_t)0xC00A0017)
++#define STATUS_CTX_BAD_VIDEO_MODE                ((nt_status_t)0xC00A0018)
++#define STATUS_CTX_GRAPHICS_INVALID              ((nt_status_t)0xC00A0022)
++#define STATUS_CTX_NOT_CONSOLE                   ((nt_status_t)0xC00A0024)
++#define STATUS_CTX_CLIENT_QUERY_TIMEOUT          ((nt_status_t)0xC00A0026)
++#define STATUS_CTX_CONSOLE_DISCONNECT            ((nt_status_t)0xC00A0027)
++#define STATUS_CTX_CONSOLE_CONNECT               ((nt_status_t)0xC00A0028)
++#define STATUS_CTX_SHADOW_DENIED                 ((nt_status_t)0xC00A002A)
++#define STATUS_CTX_WINSTATION_ACCESS_DENIED      ((nt_status_t)0xC00A002B)
++#define STATUS_CTX_INVALID_WD                    ((nt_status_t)0xC00A002E)
++#define STATUS_CTX_WD_NOT_FOUND                  ((nt_status_t)0xC00A002F)
++#define STATUS_CTX_SHADOW_INVALID                ((nt_status_t)0xC00A0030)
++#define STATUS_CTX_SHADOW_DISABLED               ((nt_status_t)0xC00A0031)
++#define STATUS_RDP_PROTOCOL_ERROR                ((nt_status_t)0xC00A0032)
++#define STATUS_CTX_CLIENT_LICENSE_NOT_SET        ((nt_status_t)0xC00A0033)
++#define STATUS_CTX_CLIENT_LICENSE_IN_USE         ((nt_status_t)0xC00A0034)
++#define STATUS_CTX_SHADOW_ENDED_BY_MODE_CHANGE   ((nt_status_t)0xC00A0035)
++#define STATUS_CTX_SHADOW_NOT_RUNNING            ((nt_status_t)0xC00A0036)
++
++#define STATUS_CLUSTER_INVALID_NODE              ((nt_status_t)0xC0130001)
++#define STATUS_CLUSTER_NODE_EXISTS               ((nt_status_t)0xC0130002)
++#define STATUS_CLUSTER_JOIN_IN_PROGRESS          ((nt_status_t)0xC0130003)
++#define STATUS_CLUSTER_NODE_NOT_FOUND            ((nt_status_t)0xC0130004)
++#define STATUS_CLUSTER_LOCAL_NODE_NOT_FOUND      ((nt_status_t)0xC0130005)
++#define STATUS_CLUSTER_NETWORK_EXISTS            ((nt_status_t)0xC0130006)
++#define STATUS_CLUSTER_NETWORK_NOT_FOUND         ((nt_status_t)0xC0130007)
++#define STATUS_CLUSTER_NETINTERFACE_EXISTS       ((nt_status_t)0xC0130008)
++#define STATUS_CLUSTER_NETINTERFACE_NOT_FOUND    ((nt_status_t)0xC0130009)
++#define STATUS_CLUSTER_INVALID_REQUEST           ((nt_status_t)0xC013000A)
++#define STATUS_CLUSTER_INVALID_NETWORK_PROVIDER  ((nt_status_t)0xC013000B)
++#define STATUS_CLUSTER_NODE_DOWN                 ((nt_status_t)0xC013000C)
++#define STATUS_CLUSTER_NODE_UNREACHABLE          ((nt_status_t)0xC013000D)
++#define STATUS_CLUSTER_NODE_NOT_MEMBER           ((nt_status_t)0xC013000E)
++#define STATUS_CLUSTER_JOIN_NOT_IN_PROGRESS      ((nt_status_t)0xC013000F)
++#define STATUS_CLUSTER_INVALID_NETWORK           ((nt_status_t)0xC0130010)
++#define STATUS_CLUSTER_NO_NET_ADAPTERS           ((nt_status_t)0xC0130011)
++#define STATUS_CLUSTER_NODE_UP                   ((nt_status_t)0xC0130012)
++#define STATUS_CLUSTER_NODE_PAUSED               ((nt_status_t)0xC0130013)
++#define STATUS_CLUSTER_NODE_NOT_PAUSED           ((nt_status_t)0xC0130014)
++#define STATUS_CLUSTER_NO_SECURITY_CONTEXT       ((nt_status_t)0xC0130015)
++#define STATUS_CLUSTER_NETWORK_NOT_INTERNAL      ((nt_status_t)0xC0130016)
++#define STATUS_CLUSTER_POISONED                  ((nt_status_t)0xC0130017)
++
++#define STATUS_SXS_SECTION_NOT_FOUND             ((nt_status_t)0xC0150001)
++#define STATUS_SXS_CANT_GEN_ACTCTX               ((nt_status_t)0xC0150002)
++#define STATUS_SXS_INVALID_ACTCTXDATA_FORMAT     ((nt_status_t)0xC0150003)
++#define STATUS_SXS_ASSEMBLY_NOT_FOUND            ((nt_status_t)0xC0150004)
++#define STATUS_SXS_MANIFEST_FORMAT_ERROR         ((nt_status_t)0xC0150005)
++#define STATUS_SXS_MANIFEST_PARSE_ERROR          ((nt_status_t)0xC0150006)
++#define STATUS_SXS_ACTIVATION_CONTEXT_DISABLED   ((nt_status_t)0xC0150007)
++#define STATUS_SXS_KEY_NOT_FOUND                 ((nt_status_t)0xC0150008)
++#define STATUS_SXS_VERSION_CONFLICT              ((nt_status_t)0xC0150009)
++#define STATUS_SXS_WRONG_SECTION_TYPE            ((nt_status_t)0xC015000A)
++#define STATUS_SXS_THREAD_QUERIES_DISABLED       ((nt_status_t)0xC015000B)
++#define STATUS_SXS_ASSEMBLY_MISSING              ((nt_status_t)0xC015000C)
++#define STATUS_SXS_PROCESS_DEFAULT_ALREADY_SET   ((nt_status_t)0xC015000E)
++#define STATUS_SXS_EARLY_DEACTIVATION            ((nt_status_t)0xC015000F)
++#define STATUS_SXS_INVALID_DEACTIVATION          ((nt_status_t)0xC0150010)
++#define STATUS_SXS_MULTIPLE_DEACTIVATION         ((nt_status_t)0xC0150011)
++#define STATUS_SXS_SYSTEM_DEFAULT_ACTIVATION_CONTEXT_EMPTY ((nt_status_t)0xC0150012)
++#define STATUS_SXS_PROCESS_TERMINATION_REQUESTED ((nt_status_t)0xC0150013
++#define STATUS_SXS_CORRUPT_ACTIVATION_STACK      ((nt_status_t)0xC0150014)
++#define STATUS_SXS_CORRUPTION                    ((nt_status_t)0xC0150015)
++
++#endif /* NTOS_STATUS_H */
+diff --git a/include/ntos/obtypes.h b/include/ntos/obtypes.h
+new file mode 100644
+index 0000000..fb1200e
+--- /dev/null
++++ b/include/ntos/obtypes.h
+@@ -0,0 +1,41 @@
++/* Time-stamp: <2012-02-13 17:11:47 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef NTOS_OBTYPES_H
++#define NTOS_OBTYPES_H
++
++/*
++ * The following defines came from ReactOS.
++ */
++
++#define MAXIMUM_FILENAME_LENGTH       256
++#define OBJ_NAME_PATH_SEPARATOR       ((wchar_t)L'\\')
++#define OBJECT_TYPE_CREATE            0x0001
++#define OBJECT_TYPE_ALL_ACCESS        (STANDARD_RIGHTS_REQUIRED | 0x1)
++#define DIRECTORY_QUERY               0x0001
++#define DIRECTORY_TRAVERSE            0x0002
++#define DIRECTORY_CREATE_OBJECT       0x0004
++#define DIRECTORY_CREATE_SUBDIRECTORY 0x0008
++#define DIRECTORY_ALL_ACCESS          (STANDARD_RIGHTS_REQUIRED | 0xF)
++#define SYMBOLIC_LINK_QUERY           0x0001
++#define SYMBOLIC_LINK_ALL_ACCESS      (STANDARD_RIGHTS_REQUIRED | 0x1)
++#define DUPLICATE_CLOSE_SOURCE        0x00000001
++#define DUPLICATE_SAME_ACCESS         0x00000002
++#define DUPLICATE_SAME_ATTRIBUTES     0x00000004
++
++#endif
+diff --git a/include/ntos/pe32.h b/include/ntos/pe32.h
+new file mode 100644
+index 0000000..720380c
+--- /dev/null
++++ b/include/ntos/pe32.h
+@@ -0,0 +1,197 @@
++/* Time-stamp: <2012-02-06 13:34:37 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef NTOS_PE32_H
++#define NTOS_PE32_H
++
++#include <asm/ntos/pe32.h>
++
++#define PE32_DOS_MAGIC 0x5A4D
++#define PE32_HDR_OFFSET 0x3c
++#define PE32_MAGIC 0x00004550
++
++struct pe32_hdr {
++	uint32_t magic;
++	uint16_t machine;
++#define IMAGE_FILE_MACHINE_AMD64 0x8664
++#define IMAGE_FILE_MACHINE_IA32  0x14c
++	uint16_t sections;
++	uint32_t time_date_stamp;
++	uint32_t pointer_to_symtab;
++	uint32_t number_of_syms;
++	uint16_t sizeof_opt;
++	uint16_t chars;
++/* COFF characteristics. */
++#define IMAGE_FILE_RELOCS_STRIPPED 0x1
++#define IMAGE_FILE_EXECUTABLE_IMAGE 0x2
++};
++
++struct pe32_dir {
++	uint32_t va;
++	uint32_t size;
++#define PE32_EXPORT_DIR 0x0
++#define PE32_IMPORT_DIR 0x1
++#define PE32_RELOC_DIR  0x5
++};
++
++struct pe32_opt32 {
++
++	/* Standard fields. */
++	uint16_t magic;
++#define PE32_OPT32_MAGIC 0x10b
++	uint8_t  major_linker_ver;
++	uint8_t  minor_linker_ver;
++	uint32_t sizeof_code;
++	uint32_t sizeof_idata;
++	uint32_t sizeof_udata;
++	uint32_t entry;
++	uint32_t base_of_code;
++	uint32_t base_of_data;
++
++	/* NT fields. */
++	uint32_t image_base;
++	uint32_t section_alignment;
++	uint32_t file_alignment;
++	uint16_t major_os;
++	uint16_t minor_os;
++	uint16_t major_image;
++	uint16_t minor_image;
++	uint16_t major_sub;
++	uint16_t minor_sub;
++	uint32_t win32_ver;
++	uint32_t sizeof_image;
++	uint32_t sizeof_headers;
++	uint32_t checksum;
++	uint16_t subsystem;
++	uint16_t dll_chars;
++	uint32_t sizeof_stack_res;
++	uint32_t sizeof_stack_commit;
++	uint32_t sizeof_heap_res;
++	uint32_t sizeof_heap_commit;
++	uint32_t loader_flags;
++	uint32_t rvas_and_sizes;
++	struct pe32_dir dirs[0];
++};
++
++struct pe32_opt64 {
++
++	/* Standard fields. */
++	uint16_t magic;
++#define PE32_OPT64_MAGIC 0x20b
++	uint8_t  major_linker_ver;
++	uint8_t  minor_linker_ver;
++	uint32_t sizeof_code;
++	uint32_t sizeof_idata;
++	uint32_t sizeof_udata;
++	uint32_t entry;
++	uint32_t base_of_code;
++
++	/* NT fields. */
++	uint64_t image_base;
++	uint32_t section_alignment;
++	uint32_t file_alignment;
++	uint16_t major_os;
++	uint16_t minor_os;
++	uint16_t major_image;
++	uint16_t minor_image;
++	uint16_t major_sub;
++	uint16_t minor_sub;
++	uint32_t win32_ver;
++	uint32_t sizeof_image;
++	uint32_t sizeof_headers;
++	uint32_t checksum;
++	uint16_t subsystem;
++	uint16_t dll_chars;
++	uint64_t sizeof_stack_res;
++	uint64_t sizeof_stack_commit;
++	uint64_t sizeof_heap_res;
++	uint64_t sizeof_heap_commit;
++	uint32_t loader_flags;
++	uint32_t rvas_and_sizes;
++	struct pe32_dir dirs[0];
++};
++
++#define IMAGE_SUBSYSTEM_UNKNOWN 0
++#define IMAGE_SUBSYSTEM_NATIVE  1
++#define IMAGE_SUBSYSTEM_WIN_GUI 2
++#define IMAGE_SUBSYSTEM_WIN_CUI 3
++
++struct pe32_sec {
++	uint8_t name[8];
++	uint32_t mem_size;
++	uint32_t va;
++	uint32_t file_size;
++	uint32_t off_data;
++	uint32_t off_rel;
++	uint32_t off_lines;
++	uint16_t relocs;
++	uint16_t lines;
++	uint32_t chars;
++#define IMAGE_SCN_CNT_CODE  0x00000020
++#define IMAGE_SCN_CNT_IDATA 0x00000040
++#define IMAGE_SCN_CNT_UDATA 0x00000080
++#define IMAGE_SCN_MEM_EXEC  0x20000000
++#define IMAGE_SCN_MEM_READ  0x40000000
++#define IMAGE_SCN_MEM_WRITE 0x80000000
++};
++
++struct pe32_brel {
++	uint32_t va;
++	uint32_t size;
++	uint16_t entries[0];
++#define PE32_BREL_OFF_BITS             12
++#define PE32_BREL_OFF_MASK             0xFFF
++#define IMAGE_REL_BASED_ABSOLUTE       0x0
++#define IMAGE_REL_BASED_HIGH           0x1
++#define IMAGE_REL_BASED_LOW            0x2
++#define IMAGE_REL_BASED_HIGHLOW        0x3
++#define IMAGE_REL_BASED_HIGHADJ        0x4
++#define IMAGE_REL_BASED_MIPS_JMPAD     0x5
++#define IMAGE_REL_BASED_ARM_MOV32      0x6
++#define IMAGE_REL_BASED_ARM_MOV32T     0x7
++#define IMAGE_REL_BASED_MIPS_JMPADDR16 0x9
++#define IMAGE_REL_BASED_DIR64          0xA
++};
++
++struct pe32_context {
++	struct file *file;
++	loff_t file_size;
++
++	struct pe32_hdr hdr;
++	struct pe32_opt *opt;
++	struct pe32_sec *secs;
++	
++	unsigned long image_base;
++	unsigned long original_base;
++	unsigned long sections;
++	unsigned long image_size;
++
++	unsigned flags;
++	struct pe32_dir *relocs;
++	struct pe32_dir *imports;
++	struct pe32_dir *exports;
++
++	unsigned long start_code;
++	unsigned long end_code;
++	unsigned long start_data;
++	unsigned long end_data;
++	unsigned long start_bss;
++	unsigned long end_bss;
++};
++
++#endif /* NTOS_PE32_H */
+diff --git a/include/ntos/setypes.h b/include/ntos/setypes.h
+new file mode 100644
+index 0000000..7d6fc65
+--- /dev/null
++++ b/include/ntos/setypes.h
+@@ -0,0 +1,53 @@
++/* Time-stamp: <2012-02-13 17:06:17 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef NTOS_SETYPES_H
++#define NTOS_SETYPES_H
++
++/*
++ * The following defines came from ReactOS.
++ */
++
++typedef uint32_t nt_access_mask_t;
++
++#define DELETE                   0x00010000
++#define READ_CONTROL             0x00020000
++#define WRITE_DAC                0x00040000
++#define WRITE_OWNER              0x00080000
++#define SYNCHRONIZE              0x00100000
++#define STANDARD_RIGHTS_REQUIRED 0x000F0000
++#define STANDARD_RIGHTS_READ     READ_CONTROL
++#define STANDARD_RIGHTS_WRITE    READ_CONTROL
++#define STANDARD_RIGHTS_EXECUTE  READ_CONTROL
++#define STANDARD_RIGHTS_ALL      0x001F0000
++#define SPECIFIC_RIGHTS_ALL      0x0000FFFF
++#define ACCESS_SYSTEM_SECURITY   0x01000000
++#define MAXIMUM_ALLOWED          0x02000000
++#define GENERIC_READ             0x80000000
++#define GENERIC_WRITE            0x40000000
++#define GENERIC_EXECUTE          0x20000000
++#define GENERIC_ALL              0x10000000
++
++struct nt_generic_mapping {
++	nt_access_mask_t generic_read;
++	nt_access_mask_t generic_write;
++	nt_access_mask_t generic_execute
++	nt_access_mask_t generic_all;
++};
++
++#endif
+diff --git a/include/ntos/syscalls.h b/include/ntos/syscalls.h
+new file mode 100644
+index 0000000..fc8b50c
+--- /dev/null
++++ b/include/ntos/syscalls.h
+@@ -0,0 +1,25 @@
++/* Time-stamp: <2012-02-04 00:13:49 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef NTOS_SYSCALLS_H
++#define NTOS_SYSCALLS_H
++
++nt_status_t nt_terminate_process(nt_handle_t handle, nt_status_t status);
++nt_status_t nt_display_string(struct unicode_string __user *arg);
++
++#endif
+diff --git a/include/ntos/umtypes.h b/include/ntos/umtypes.h
+new file mode 100644
+index 0000000..649b589
+--- /dev/null
++++ b/include/ntos/umtypes.h
+@@ -0,0 +1,43 @@
++/* Time-stamp: <2012-02-04 00:09:22 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef NTOS_UMTYPES_H
++#define NTOS_UMTYPES_H
++
++/*
++ * The following defines came from ReactOS,
++ * and MSDN.
++ */
++
++typedef void *nt_handle_t;
++
++#define nt_current_process_handle ((nt_handle_t)(uintptr_t)(-1))
++
++struct unicode_string {
++	uint16_t length;
++	uint16_t max_length;
++	uint16_t *buffer;
++};
++
++struct ansi_string {
++	uint16_t length;
++	uint16_t max_length;
++	uint8_t *buffer;
++};
++
++#endif
+diff --git a/ntos/Kconfig b/ntos/Kconfig
+new file mode 100644
+index 0000000..dfe1e98
+--- /dev/null
++++ b/ntos/Kconfig
+@@ -0,0 +1,13 @@
++config NTOS
++	depends on HAVE_NTOS
++	bool "NT/ReactOS personality"
++	help
++	  Say Y here to include the kernel code necessary if you want to run
++	  NT/ReactOS binaries under Linux. This code is still very
++	  experimental; if this sounds frightening, say N and sleep in peace.
++
++config NTOS_DEBUG
++	depends on NTOS
++	bool "NTOS personality debugging"
++	help
++	  Say Y here to make NTOS code more verbose in its logging.
+diff --git a/ntos/Makefile b/ntos/Makefile
+new file mode 100644
+index 0000000..e50e076
+--- /dev/null
++++ b/ntos/Makefile
+@@ -0,0 +1 @@
++obj-y += ntos.o loader.o syscall.o
+diff --git a/ntos/README b/ntos/README
+new file mode 100644
+index 0000000..8ffed22
+--- /dev/null
++++ b/ntos/README
+@@ -0,0 +1,32 @@
++NT/ReactOS personality for Linux
++================================
++
++This the ongoing hackish investigation in implementing the NT kernel system call interface.
++
++What this is not:
++*) This is not a way to run Windows application.
++*) This is not a way to use NT drivers in Linux.
++
++What this is:
++*) An investigation into creating a separate subsystem within Linux.
++*) An investigation into the isolation and security details of implementing
++   a separate subsystem within Linux.
++*) An investigation in implementing a non-POSIX-like system within Linux, dealing
++   with mapping of different semantics w.r.t. access control, file systems, etc.
++
++What this might be:
++*) A way to validate and develop the ReactOS X64 ntdll.dll before the ROS X64 kernel
++   is viable.
++
++The goal is to implement external NT kernel functionality fully through Linux kernel
++primitives. As such, the internals are unrelated to NT or ReactOS design, and thus
++there is no kernel-level compatibility - no NT driver support. This is purely Linux
++code, and as such I also stick to the kernel code style.
++
++The NT/ReactOS personality is a validation of the Linux changes necessary to pull
++of such an endeavour, enabling future work such as adding an XNU (Mach+BSD) personality.
++The Linux changes build on the existing exec_domain interface, fleshing it out further.
++
++Contact Info
++============
++Andrei Warkentin (andrey.warkentin@gmail.com, andreiw@vmware.com)
+diff --git a/ntos/loader.c b/ntos/loader.c
+new file mode 100644
+index 0000000..9247736
+--- /dev/null
++++ b/ntos/loader.c
+@@ -0,0 +1,605 @@
++/*
++ *  linux/ntos/loader.c:
++ *  Copyright (C) 2012 Andrei Warkentin
++ *
++ *  Based on linux/fs/binfmt_aout.c:
++ *  Copyright (C) 1991, 1992, 1996  Linus Torvalds
++ */
++
++#include <linux/module.h>
++
++#include <linux/time.h>
++#include <linux/kernel.h>
++#include <linux/mm.h>
++#include <linux/mman.h>
++#include <linux/errno.h>
++#include <linux/signal.h>
++#include <linux/string.h>
++#include <linux/fs.h>
++#include <linux/file.h>
++#include <linux/stat.h>
++#include <linux/fcntl.h>
++#include <linux/ptrace.h>
++#include <linux/user.h>
++#include <linux/binfmts.h>
++#include <linux/personality.h>
++#include <linux/init.h>
++#include <linux/coredump.h>
++#include <linux/slab.h>
++
++#include <asm/system.h>
++#include <asm/uaccess.h>
++#include <asm/cacheflush.h>
++
++#include <ntos/ntos.h>
++#include <ntos/pe32.h>
++
++static int ntos_load_binary(struct linux_binprm *bprm,
++			    struct pt_regs *regs);
++
++static struct linux_binfmt ntos_binfmt = {
++	.module		= THIS_MODULE,
++	.load_binary	= ntos_load_binary,
++};
++
++static void ntos_pe32_free(struct pe32_context *c)
++{
++	if (c->file)
++		fput(c->file);
++	if (c->secs)
++		kfree(c->secs);
++	if (c->opt)
++		kfree(c->opt);
++	if (c)
++		kfree(c);
++}
++
++static int ntos_pe32_relocs(struct pe32_context *c)
++{
++	unsigned long start;
++	unsigned long end;
++	unsigned long diff;
++
++	if (c->image_base == c->original_base)
++		return 0;
++
++	if (!c->relocs)
++		return -ENOEXEC;
++
++	diff = c->image_base - c->original_base;
++	start = c->image_base + c->relocs->va;
++	end = start + c->relocs->size;
++	
++	while (start < end) {
++		struct pe32_brel brel;
++		unsigned long end_block;
++		unsigned long base;
++		uint16_t rel_entry;
++
++		if (copy_from_user(&brel, (void __user *) start, sizeof(brel)) != 0)
++			return -EFAULT;
++
++		brel.size = le32_to_cpu(brel.size);
++		brel.va = le32_to_cpu(brel.va);
++
++		end_block = start + brel.size;
++		base = c->image_base + brel.va;
++		start += sizeof(brel);
++		while (start < end_block) {
++			unsigned long fixup_base;
++			if (copy_from_user(&rel_entry, (void __user *) start,
++					   sizeof(rel_entry)) != 0)
++				return -EFAULT;
++			
++
++			rel_entry = le16_to_cpu(rel_entry);
++			fixup_base = base + (rel_entry & PE32_BREL_OFF_MASK);
++			rel_entry >>= PE32_BREL_OFF_BITS;
++
++			/*
++			 * I am going to assume that while the PE-COFF format
++			 * is LE, the actual relocations applied are target-endian.
++			 *
++			 * I couldn't find any info on this, but the opposite doesn't
++			 * make a lot of sense to me.
++			 */
++			switch (rel_entry) {
++			case IMAGE_REL_BASED_ABSOLUTE:
++				dprintk("IMAGE_REL_BASED_ABSOLUTE for 0x%lx\n", fixup_base);
++				break;
++			case IMAGE_REL_BASED_HIGH:
++			{
++				uint16_t value;
++
++				dprintk("IMAGE_REL_BASED_HIGH for 0x%lx\n", fixup_base);
++				if (copy_from_user(&value, (void __user *) fixup_base,
++						   sizeof(value)) != 0)
++					return -EFAULT;
++
++				value += (uint16_t) (diff >> 16);
++				if (copy_to_user((void __user *) fixup_base, &value,
++						 sizeof(value)) != 0)
++					return -EFAULT;
++				break;
++			}
++			case IMAGE_REL_BASED_LOW:
++			{
++				uint16_t value;
++
++				dprintk("IMAGE_REL_BASED_LOW for 0x%lx\n", fixup_base);
++				if (copy_from_user(&value, (void __user *) fixup_base,
++						   sizeof(value)) != 0)
++					return -EFAULT;
++				value += (uint16_t) (diff);
++				if (copy_to_user((void __user *) fixup_base, &value,
++						 sizeof(value)) != 0)
++					return -EFAULT;
++				break;
++			}
++			case IMAGE_REL_BASED_HIGHLOW:
++			{
++				uint32_t value;
++
++				dprintk("IMAGE_REL_BASED_HIGHLOW for 0x%lx\n", fixup_base);
++				if (copy_from_user(&value, (void __user *) fixup_base,
++						   sizeof(value)) != 0)
++					return -EFAULT;
++				value += (uint32_t) (diff);
++				if (copy_to_user((void __user *) fixup_base, &value,
++						 sizeof(value)) != 0)
++					return -EFAULT;
++				break;
++			}
++			case IMAGE_REL_BASED_HIGHADJ:
++			{
++				uint32_t value;
++
++				dprintk("IMAGE_REL_BASED_HIGHADJ for 0x%lx\n", fixup_base);
++				if (copy_from_user(&value, (void __user *) fixup_base,
++						   sizeof(uint16_t)) != 0)
++					return -EFAULT;
++
++				value += (uint16_t) (diff >> 16);
++				value <<= 16;
++
++				if (copy_from_user(&value, (void __user *) (fixup_base + sizeof(uint16_t)),
++						   sizeof(uint16_t)) != 0)
++					return -EFAULT;
++
++				value += 0x8000;
++				value >>= 16;
++
++				if (copy_to_user((void __user *) fixup_base, &value,
++						 sizeof(uint16_t)) != 0)
++					return -EFAULT;
++
++				break;
++			}
++			case IMAGE_REL_BASED_DIR64:
++			{
++				uint64_t value;
++
++				dprintk("IMAGE_REL_BASED_DIR64 for 0x%lx\n", fixup_base);
++				if (copy_from_user(&value, (void __user *) fixup_base,
++						   sizeof(value)) != 0)
++					return -EFAULT;
++				value += diff;
++				if (copy_to_user((void __user *) fixup_base, &value,
++						 sizeof(value)) != 0)
++					return -EFAULT;
++				break;
++			}
++			default:
++				if (ntos_pe32_arch_reloc(rel_entry, fixup_base, diff)) {
++					dprintk("unknown relocation type %d for 0x%lx\n",
++						rel_entry, fixup_base);
++					return -ENOEXEC;
++				}
++				break;
++			};
++			start += sizeof(rel_entry);
++		}
++	}
++
++	return 0;
++}
++
++static int ntos_pe32_rebase(struct pe32_context *c)
++{
++	unsigned long base;
++	struct vm_area_struct *vma;
++
++	vma = find_vma_intersection(current->mm, c->image_base,
++				    c->image_base + c->image_size);
++
++	/* Image fits. */
++	if (!vma)
++		return 0;
++
++	/* If we don't have base relocations, we cannot rebase. */
++	if (!c->relocs)
++		return -ENOMEM;
++
++	base = get_unmapped_area(NULL, c->image_base & PAGE_MASK,
++				 c->image_size +
++				 (c->image_base & ~PAGE_MASK), 0, 0);
++	if (IS_ERR_VALUE(base))
++		return base;
++
++	c->image_base = base;
++	return 0;
++}
++
++static struct pe32_context *ntos_pe32_context(struct file *file, loff_t pos)
++{
++	int ret;
++	loff_t size;
++	struct pe32_context *c;
++	unsigned rvas;
++
++	ret = -ENOMEM;
++	c = kzalloc(sizeof(*c), GFP_KERNEL);
++	if (!c)
++		goto out;
++
++	c->file = file;
++	c->file_size = i_size_read(file->f_path.dentry->d_inode);
++
++	if (pos > c->file_size ||
++	    pos + sizeof(c->hdr) > c->file_size) {
++		dprintk("doesn't look like a PE file\n");
++		ret = -ENOEXEC;
++		goto out;
++	}
++
++	ret = kernel_read(file, pos,
++			  (uint8_t *) &c->hdr,
++			  sizeof(c->hdr));
++	if (ret != sizeof(c->hdr)) {
++		if (ret >= 0)
++			ret = -ENOEXEC;
++		dprintk("couldn't read PE header\n");
++		goto out;
++	}
++
++	if (le32_to_cpu(c->hdr.magic) != PE32_MAGIC) {
++		dprintk("bad PE32_MAGIC 0x%x != 0x%x\n", le16_to_cpu(c->hdr.magic),
++			PE32_MAGIC);
++		ret = -ENOEXEC;
++		goto out;
++	}
++
++	if (le16_to_cpu(c->hdr.machine) != PE32_MACHINE) {
++		ret = -ENOEXEC;
++		dprintk("bad machine 0x%x != 0x%x\n", le16_to_cpu(c->hdr.machine),
++			PE32_MACHINE);
++		goto out;
++	}
++
++	size = le16_to_cpu(c->hdr.sizeof_opt);
++	if (size < sizeof(*c->opt)) {
++		ret = -ENOEXEC;
++		dprintk("bad optional header size\n");
++		goto out;
++	}
++
++	pos += sizeof(c->hdr);
++	c->opt = kmalloc(size, GFP_KERNEL);
++	if (!c->opt) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	ret = kernel_read(file, pos,
++			  (uint8_t *) c->opt,
++			  size);
++	if (ret != size) {
++		if (ret >= 0)
++			ret = -ENOEXEC;
++		dprintk("couldn't read optional header\n");
++		goto out;
++	}
++
++	if (le16_to_cpu(c->opt->magic) !=
++	    PE32_OPT_MAGIC) {
++		dprintk("bad optional header magic\n");
++		ret = -ENOEXEC;
++		goto out;
++	}
++	if (sizeof(*c->opt) == sizeof(struct pe32_opt64))
++		c->original_base = le64_to_cpu(c->opt->image_base);
++	else
++		c->original_base = le32_to_cpu(c->opt->image_base);
++	c->image_size = le32_to_cpu(c->opt->sizeof_image);
++	c->image_base = c->original_base;
++
++	rvas = le32_to_cpu(c->opt->rvas_and_sizes);
++	if (rvas > PE32_RELOC_DIR) {
++		if (c->opt->dirs[PE32_RELOC_DIR].size)
++			c->relocs = &c->opt->dirs[PE32_RELOC_DIR];
++	}
++
++	if (rvas > PE32_IMPORT_DIR) {
++		if (c->opt->dirs[PE32_IMPORT_DIR].size)
++			c->imports = &c->opt->dirs[PE32_IMPORT_DIR];
++	}
++
++	if (rvas > PE32_EXPORT_DIR) {
++		if (c->opt->dirs[PE32_EXPORT_DIR].size)
++			c->exports = &c->opt->dirs[PE32_EXPORT_DIR];
++	}
++
++	pos += size;
++	c->sections = le32_to_cpu(c->hdr.sections);
++	size = c->sections * sizeof(*c->secs);
++	if (pos + size > c->file_size) {
++		dprintk("section count doesn't match file size\n");
++		ret = -ENOEXEC;
++		goto out;
++	}
++	c->secs = kcalloc(c->sections,
++		       sizeof(*c->secs),
++		       GFP_KERNEL);
++	if (!c->secs) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	ret = kernel_read(file, pos,
++			  (uint8_t *) c->secs,
++			  size);
++	if (ret != size) {
++		if (ret >= 0)
++			ret = -ENOEXEC;
++		dprintk("couldn't read sections\n");
++		goto out;
++	}
++
++	c->start_code = ~0UL;
++	c->end_code = 0;
++	c->start_data = ~0UL;
++	c->end_data = 0;
++	c->start_bss = ~0UL;
++	c->end_bss = 0;
++	return c;
++out:
++	ntos_pe32_free(c);
++	return ERR_PTR(ret);
++}
++
++static int ntos_pe32_load_headers(struct pe32_context *c)
++{
++	unsigned long start;
++	unsigned long end;
++	unsigned long size;
++	loff_t pos;
++	int ret;
++
++	/* Map the headers. */
++	start = c->image_base;
++	size = le32_to_cpu(c->opt->sizeof_headers);
++	end = start + size;
++	down_write(&current->mm->mmap_sem);
++
++	/* FIXME: Should take away the write after the read. */
++	ret = do_mmap(NULL, start & PAGE_MASK, end - (start & PAGE_MASK),
++		      PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE, 0);
++
++	up_write(&current->mm->mmap_sem);
++	if (ret != (start & PAGE_MASK))
++		return -ENOMEM;
++
++	pos = 0;
++	ret = c->file->f_op->read(c->file,
++				  (char __user *) (uintptr_t) start,
++				  size, &pos);
++	if (ret != size) {
++		if (ret >= 0)
++			ret = -ENOEXEC;
++		dprintk("couldn't read headers\n");
++		return ret;
++	}
++
++	return 0;
++}
++
++static int ntos_pe32_load_section(
++	struct pe32_context *c,
++	struct pe32_sec *sec)
++{
++	int ret;
++	loff_t pos;
++	unsigned long start;
++	unsigned long fsize;
++	unsigned long end;
++	uint32_t chars;
++	int sec_prot = 0;
++
++	if (!sec->mem_size)
++		return 0;
++
++	start = c->image_base + le32_to_cpu(sec->va);
++	end = start + le32_to_cpu(sec->mem_size);
++
++	chars = le32_to_cpu(sec->chars);
++	if (chars & IMAGE_SCN_MEM_EXEC)
++		sec_prot |= PROT_EXEC;
++	if (chars & IMAGE_SCN_MEM_READ)
++		sec_prot |= PROT_READ;
++	if (chars & IMAGE_SCN_MEM_WRITE)
++		sec_prot |= PROT_WRITE;
++
++	down_write(&current->mm->mmap_sem);
++
++	/* FIXME: Should take away the write after the read. */
++	ret = do_mmap(NULL, start & PAGE_MASK, end - (start & PAGE_MASK),
++		      sec_prot | PROT_WRITE, MAP_FIXED | MAP_PRIVATE |
++		      (sec_prot & PROT_EXEC ? MAP_EXECUTABLE : 0), 0);
++	up_write(&current->mm->mmap_sem);
++	if (ret != (start & PAGE_MASK)) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	pos = le32_to_cpu(sec->off_data);
++	fsize = le32_to_cpu(sec->file_size);
++	if (fsize > (start - end))
++		fsize = start - end;
++	ret = c->file->f_op->read(c->file,
++				  (char __user *) (uintptr_t) start,
++				  fsize, &pos);
++	if (ret != fsize) {
++		if (ret >= 0)
++			ret = -ENOEXEC;
++		dprintk("couldn't read section %s\n", sec->name);
++		goto out;
++	}
++
++	if (chars & IMAGE_SCN_CNT_CODE) {
++		if (start < c->start_code)
++			c->start_code = start;
++		if (end > c->end_code)
++			c->end_code = end;
++	}
++
++	if (chars & IMAGE_SCN_CNT_IDATA) {
++		if (start < c->start_data)
++			c->start_data = start;
++		if (end > c->end_data)
++			c->end_data = end;
++	}
++
++	if (chars & IMAGE_SCN_CNT_UDATA) {
++		if (start < c->start_bss)
++			c->start_bss = start;
++		if (end > c->end_bss)
++			c->end_bss = end;
++	}
++
++	flush_icache_range(start, end);
++	return 0;
++out:
++	return ret;
++}
++
++static int ntos_load_binary(struct linux_binprm *bprm,
++			    struct pt_regs *regs)
++{
++	int ret;
++	struct pe32_sec *sec;
++	unsigned long rlim, i;
++	struct pe32_context *c;
++
++	if (le16_to_cpu(*(uint32_t *)(bprm->buf)) != PE32_DOS_MAGIC)
++		return -ENOEXEC;
++
++	/*
++	 * Requires a mmap handler. This prevents people from using a.out
++	 * as part of an exploit attack against /proc-related vulnerabilities.
++	 */
++	if (!bprm->file->f_op || !bprm->file->f_op->mmap)
++		return -ENOEXEC;
++
++	c = ntos_pe32_context(bprm->file,
++			      le32_to_cpu(*(uint32_t *)(bprm->buf + PE32_HDR_OFFSET)));
++	if (IS_ERR(c))
++		return PTR_ERR(c);
++
++	/*
++	 * Check initial limits. This avoids letting people circumvent
++	 * size limits imposed on them by creating programs with large
++	 * arrays in the data or bss.
++	 */
++	rlim = rlimit(RLIMIT_DATA);
++	if (rlim >= RLIM_INFINITY)
++		rlim = ~0;
++
++	if (c->image_size > rlim) {
++		ret = -ENOMEM;
++		dprintk("limits exceeded\n");
++		goto out;
++	}
++
++	/* OK, This is the point of no return */
++	ret = flush_old_exec(bprm);
++	if (ret)
++		goto out;
++	setup_new_exec(bprm);
++
++	ret = ntos_pe32_rebase(c);
++	if (ret) {
++		dprintk("image does not fit in memory\n");
++		send_sig(SIGKILL, current, 0);
++		goto out;
++	}
++	dprintk("Original base = 0x%lx\n", c->original_base);
++	dprintk("Image base = 0x%lx\n", c->image_base);
++
++	current->mm->start_stack = bprm->p;
++	current->mm->free_area_cache = current->mm->mmap_base;
++	current->mm->cached_hole_size = 0;
++
++	/*
++	 * Now we do a little grungy work by mmapping
++	 * the PE image into the correct location in memory.
++	 */
++	ret = ntos_pe32_load_headers(c);
++	if (ret) {
++		send_sig(SIGKILL, current, 0);
++		goto out;
++	}
++	for (i = 0, sec = c->secs; i < c->sections; i++, sec++) {
++		ret = ntos_pe32_load_section(c, sec);
++		if (ret) {
++			send_sig(SIGKILL, current, 0);
++			goto out;
++		}
++	}
++	
++	current->mm->start_code = c->start_code;
++	current->mm->end_code = c->end_code;
++	current->mm->start_data = c->start_data;
++	current->mm->end_data = c->end_data;
++
++	if (c->end_bss == 0) {
++		c->start_bss = c->end_data > c->end_code ?
++			c->end_data : c->end_code;
++		c->end_bss = c->start_bss;
++	}
++	current->mm->start_brk = c->start_bss;
++	current->mm->brk = c->end_bss;
++
++	install_exec_creds(bprm);
++	current->flags &= ~PF_FORKNOEXEC;
++
++	set_binfmt(&ntos_binfmt);
++
++	ret = ntos_pe32_relocs(c);
++	if (ret) {
++		dprintk("failed to run relocs\n");
++		send_sig(SIGKILL, current, 0);
++		goto out;
++	}
++
++	ret = set_personality(PER_NTOS);
++	if (ret) {
++		send_sig(SIGKILL, current, 0);
++		goto out;
++	}
++
++	start_thread(regs, c->image_base + c->opt->entry, current->mm->start_stack);
++out:
++	if (c)
++		ntos_pe32_free(c);
++	return ret;
++}
++
++int ntos_loader_init(void)
++{
++	return register_binfmt(&ntos_binfmt);
++}
++
++void ntos_loader_fini(void)
++{
++	unregister_binfmt(&ntos_binfmt);
++}
+diff --git a/ntos/ntos.c b/ntos/ntos.c
+new file mode 100644
+index 0000000..4acf2b8
+--- /dev/null
++++ b/ntos/ntos.c
+@@ -0,0 +1,184 @@
++/* Time-stamp: <2012-02-13 16:54:56 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++/*
++ *  NT/ReactOS personality.
++ */
++
++#include <linux/module.h>
++#include <linux/personality.h>
++#include <linux/stddef.h>
++#include <linux/signal.h>
++#include <linux/init.h>
++#include <linux/mutex.h>
++#include <linux/atomic.h>
++#include <linux/slab.h>
++#include <linux/sched.h>
++#include <asm/ptrace.h>
++#include <ntos/ntos.h>
++
++int ntos_loader_init(void);
++void ntos_loader_fini(void);
++void ntos_dispatch(int nr, struct pt_regs *regs);
++
++int ntos_thread_prepare(struct thread_info *ti);
++void ntos_thread_clean(struct thread_info *ti);
++
++int ntos_linux_signal(int signr)
++{
++	/*
++	 * Note: Taken under &sighand->siglock, so
++	 * we don't do anything crazy here, especially
++	 * with signals.
++	 */
++	if (signr != SIGKILL) {
++		dprintk("ignoring linux signal %d\n", signr);
++		return 0;
++	} else {
++		dprintk("\"He's dead, Jim.\"\n");
++	}
++
++	/* Non-zero. */
++	return -EINVAL;
++}
++
++static struct exec_domain ntos_exec_domain = {
++	.name		= "NT/ReactOS",
++	.handler	= ntos_dispatch,
++	.clean		= ntos_thread_clean,
++	.signal		= ntos_linux_signal,
++	.prepare	= ntos_thread_prepare,
++	.pers_low	= personality(PER_NTOS),
++	.pers_high	= personality(PER_NTOS),
++	.module		= THIS_MODULE,
++};
++
++static DEFINE_MUTEX(ntos_processes_mutex);
++static LIST_HEAD(ntos_processes);
++
++void ntos_process_clean(struct nt_process *process)
++{
++	dprintk("cleaning %p\n", process);
++	if (atomic_dec_and_test(&process->threads)) {
++		mutex_lock(&ntos_processes_mutex);
++		list_del(&process->head);
++		mutex_unlock(&ntos_processes_mutex);
++		kfree(process);
++	}
++}
++
++struct nt_process *ntos_process_prepare(void)
++{
++	struct nt_process *p;
++
++	dprintk("preparing\n");
++	p = kzalloc(sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return ERR_PTR(-ENOMEM);
++
++	INIT_LIST_HEAD(&p->head);
++	atomic_inc(&p->threads);
++	mutex_lock(&ntos_processes_mutex);
++	list_add(&p->head, &ntos_processes);
++	mutex_unlock(&ntos_processes_mutex);
++	return p;
++}
++
++int ntos_thread_prepare(struct thread_info *ti)
++{
++	int sig;
++	struct nt_thread *t, *cp;
++
++	/*
++	 * Prevent "fatal" behavior for unhandled signals.
++	 * This lets us handle termination requests, etc.
++	 *
++	 * Due to the way allow_signal works, don't set
++	 * the bogus handler for SIGKILL, otherwise
++	 * we'll miss on that as well. (get 11 on 9,
++	 * and so on...).
++	 */
++	for (sig = 1; sig < SIGRTMAX; sig++)
++		if (sig != SIGKILL)
++			BUG_ON(allow_signal(sig));
++
++	dprintk("preparing\n");
++	t = kzalloc(sizeof(*t), GFP_KERNEL);
++	if (!t)
++		return -ENOMEM;
++
++	/* Need to create nt_process as well. */
++	if (ti == current_thread_info() ||
++	    ti->task->tgid != current_thread_info()->task->tgid) {
++		t->process = ntos_process_prepare();
++		if (IS_ERR(t->process)) {
++			kfree(t);
++			return PTR_ERR(t->process);
++		}
++	} else {
++		cp = current_thread_info()->exec_private;
++		BUG_ON(!cp);
++		t->process = cp->process;
++		atomic_inc(&t->process->threads);
++	}
++	ti->exec_private = t;
++	return 0;
++}
++
++void ntos_thread_clean(struct thread_info *ti)
++{
++	struct nt_thread *t = ti->exec_private;
++	ti->exec_private = NULL;
++	dprintk("cleaning\n");
++	ntos_process_clean(t->process);
++	kfree(t);
++}
++
++/*
++ * We could do with some locking to stop NTOS being removed while
++ * processes are using it.
++ */
++
++static int __init ntos_init(void)
++{
++	int ret;
++
++	ret = register_exec_domain(&ntos_exec_domain);
++	if (ret)
++		goto bad_exec_domain;
++
++	ret = ntos_loader_init();
++	if (ret)
++		goto bad_loader_init;
++	return 0;
++bad_loader_init:
++	unregister_exec_domain(&ntos_exec_domain);
++bad_exec_domain:
++	return ret;
++}
++
++static void __exit ntos_exit(void)
++{
++	ntos_loader_fini();
++	unregister_exec_domain(&ntos_exec_domain);
++}
++
++module_init(ntos_init);
++module_exit(ntos_exit);
++
++MODULE_LICENSE("GPL");
+diff --git a/ntos/syscall.c b/ntos/syscall.c
+new file mode 100644
+index 0000000..62c87ab
+--- /dev/null
++++ b/ntos/syscall.c
+@@ -0,0 +1,62 @@
++/* Time-stamp: <2012-02-05 00:32:17 andreiw>
++ * Copyright (C) 2012 Andrei Warkentin <andrey.warkentin@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#include <linux/kernel.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
++#include <ntos/ntos.h>
++
++nt_status_t nt_terminate_process(nt_handle_t handle, nt_status_t status)
++{
++	if (handle == nt_current_process_handle)
++		do_exit(NT_SUCCESS(status) ? 0 : 1);
++
++	return STATUS_INVALID_HANDLE;
++}
++
++nt_status_t nt_display_string(struct unicode_string __user *arg)
++{
++	int ret;
++	struct unicode_string s;
++	uint16_t *buf = NULL;
++	unsigned i = 0;
++
++	ret = STATUS_ACCESS_VIOLATION;
++	if (copy_from_user(&s, arg, sizeof(s)))
++		goto out;
++
++	ret = STATUS_NO_MEMORY;
++	buf = kmalloc(s.length, GFP_KERNEL);
++	if (!buf)
++		goto out;
++
++	ret = STATUS_ACCESS_VIOLATION;
++	if (copy_from_user(buf, s.buffer, s.length))
++		goto out;
++
++	ret = STATUS_SUCCESS;
++	buf[s.length / sizeof(uint16_t) - 1] = L'\0';
++	printk("[NTOS CON] ");
++	while (buf[i])
++		printk("%c", buf[i++]);
++
++out:
++	if (buf)
++		kfree(buf);
++	return ret;
++}
+-- 
+1.7.8.3
+
