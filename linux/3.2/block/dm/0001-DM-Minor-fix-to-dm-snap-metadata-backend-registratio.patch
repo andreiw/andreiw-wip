@@ -1,0 +1,28 @@
+From 05e283e519e597134f9d978b745fa93703facb42 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Fri, 24 Feb 2012 21:25:19 -0500
+Subject: [PATCH 1/6] DM: Minor fix to dm-snap metadata backend registration.
+
+Cleanup in dm_exception_store_init was messed up.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ drivers/md/dm-exception-store.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/md/dm-exception-store.c b/drivers/md/dm-exception-store.c
+index 042e719..aa70f7d 100644
+--- a/drivers/md/dm-exception-store.c
++++ b/drivers/md/dm-exception-store.c
+@@ -283,7 +283,7 @@ int dm_exception_store_init(void)
+ 	return 0;
+ 
+ persistent_fail:
+-	dm_persistent_snapshot_exit();
++	dm_transient_snapshot_exit();
+ transient_fail:
+ 	return r;
+ }
+-- 
+1.7.8.3
+
