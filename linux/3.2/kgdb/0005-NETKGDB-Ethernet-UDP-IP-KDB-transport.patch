@@ -1,7 +1,7 @@
-From 5d046244d52a8bef27113c9b66a646cf5d23ac60 Mon Sep 17 00:00:00 2001
+From 17e1736cba48141641c97104d091a21a4dac3dfb Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Wed, 22 Feb 2012 15:10:45 -0500
-Subject: [PATCH 2/2] NETKGDB: Ethernet/UDP/IP KDB transport.
+Subject: [PATCH 5/6] NETKGDB: Ethernet/UDP/IP KDB transport.
 
 Allows debugging a crashed kernel, and breaking into a
 live kernel via a network interface.
@@ -19,8 +19,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
  Documentation/networking/netkgdb.txt |  104 +++++
  drivers/net/Kconfig                  |    8 +-
  drivers/net/Makefile                 |    1 +
- drivers/net/netkgdb.c                |  728 ++++++++++++++++++++++++++++++++++
- 4 files changed, 840 insertions(+), 1 deletions(-)
+ drivers/net/netkgdb.c                |  729 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 841 insertions(+), 1 deletions(-)
  create mode 100644 Documentation/networking/netkgdb.txt
  create mode 100644 drivers/net/netkgdb.c
 
@@ -174,10 +174,10 @@ index a6b8ce1..6eaa21f 100644
  obj-$(CONFIG_NET_TEAM) += team/
 diff --git a/drivers/net/netkgdb.c b/drivers/net/netkgdb.c
 new file mode 100644
-index 0000000..6a7bd90
+index 0000000..bd03cd7
 --- /dev/null
 +++ b/drivers/net/netkgdb.c
-@@ -0,0 +1,728 @@
+@@ -0,0 +1,729 @@
 +/*
 + *  linux/drivers/net/netkgdb.c
 + *
@@ -428,6 +428,7 @@ index 0000000..6a7bd90
 +
 +static struct kgdb_io netkgdb_io_ops = {
 +	.name = "netkgdb",
++	.flush = netkgdb_tx_flush,
 +	.read_char = netkgdb_char_get,
 +	.write_char = netkgdb_char_put,
 +	.pre_exception = netkgdb_exp_pre,

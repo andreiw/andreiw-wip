@@ -1,7 +1,7 @@
-From 4ac2bf6f479aeb219730b4256e4bdbb930af3482 Mon Sep 17 00:00:00 2001
+From 476634d0c1c3c57c709aeed3f718b400da99d04f Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Fri, 17 Feb 2012 20:59:04 -0500
-Subject: [PATCH 5/5] KDB: Overide LINES for custom commands.
+Subject: [PATCH 3/6] KDB: Overide LINES for custom commands.
 
 Commands like dumpall define some maximum
 LINES, which as a default might make sense,

@@ -1,7 +1,7 @@
-From 2903600f32a12c0f8731c8a6049f589ca96eb5cd Mon Sep 17 00:00:00 2001
+From deeaef2785cadf767efb39f75bfa368dc94b4a84 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Fri, 17 Feb 2012 19:51:07 -0500
-Subject: [PATCH 4/5] KDB: Make LINES an internal variable.
+Subject: [PATCH 2/6] KDB: Make LINES an internal variable.
 
 1) If you run 'dumpall', LINES will remain set to
    10000, and you might wonder why dmesg now doesn't

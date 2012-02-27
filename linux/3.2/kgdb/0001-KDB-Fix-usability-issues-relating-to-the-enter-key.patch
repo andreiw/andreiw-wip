@@ -1,7 +1,7 @@
-From fe916da76e9f00273d52103c791311323e53ed03 Mon Sep 17 00:00:00 2001
+From af365d9bf41b258e5b0c2a563cf7a0c9f44624cc Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Fri, 17 Feb 2012 18:09:54 -0500
-Subject: [PATCH 3/5] KDB: Fix usability issues relating to the 'enter' key.
+Subject: [PATCH 1/6] KDB: Fix usability issues relating to the 'enter' key.
 
 This fixes the following problems:
 1) Typematic-repeat of 'enter' gives warning message.
