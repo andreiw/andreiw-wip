@@ -1,11 +1,15 @@
-From 754edef8ed37330cea51709f556aa61c3e990962 Mon Sep 17 00:00:00 2001
+From 2a710725b2f513c4804bb832f6f1f22a6c1031bf Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Wed, 22 Feb 2012 15:10:04 -0500
-Subject: [PATCH 1/5] NETPOLL: Extend rx_hook support.
+Subject: [PATCH 1/2] NETPOLL: Extend rx_hook support.
 
 Pass down source information to rx_hook, useful
 for accepting connections from unspecified clients.
 
+Cc: kgdb-bugreport@lists.sourceforge.net
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Matt Mackall <mpm@selenic.com>
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
 ---
  include/linux/netpoll.h |   10 +++++++++-

@@ -1,7 +1,7 @@
-From 729accb4862a19bf07f15a094c6446fbcb0c4a31 Mon Sep 17 00:00:00 2001
+From 5d046244d52a8bef27113c9b66a646cf5d23ac60 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Wed, 22 Feb 2012 15:10:45 -0500
-Subject: [PATCH 2/5] NETKGDB: Ethernet/UDP/IP KDB transport.
+Subject: [PATCH 2/2] NETKGDB: Ethernet/UDP/IP KDB transport.
 
 Allows debugging a crashed kernel, and breaking into a
 live kernel via a network interface.
@@ -10,23 +10,26 @@ Useful in testing/QA farms where physical access is not
 necessarily easy/desired, and iLO-like solutions end up
 using USB HID and not i8042-based keyboard.
 
+Cc: kgdb-bugreport@lists.sourceforge.net
+Cc: Jason Wessel <jason.wessel@windriver.com>
+Cc: Matt Mackall <mpm@selenic.com>
 Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
- Documentation/networking/netkgdb.txt |   87 +++++
+ Documentation/networking/netkgdb.txt |  104 +++++
  drivers/net/Kconfig                  |    8 +-
  drivers/net/Makefile                 |    1 +
- drivers/net/netkgdb.c                |  639 ++++++++++++++++++++++++++++++++++
- 4 files changed, 734 insertions(+), 1 deletions(-)
+ drivers/net/netkgdb.c                |  728 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 840 insertions(+), 1 deletions(-)
  create mode 100644 Documentation/networking/netkgdb.txt
  create mode 100644 drivers/net/netkgdb.c
 
 diff --git a/Documentation/networking/netkgdb.txt b/Documentation/networking/netkgdb.txt
 new file mode 100644
-index 0000000..8bfa1a3
+index 0000000..b2c70c1
 --- /dev/null
 +++ b/Documentation/networking/netkgdb.txt
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,104 @@
 +(based off netconsole.txt)
 +
 +Started by Andrei Warkentin <andrey.warkentin@gmail.com>, 2012.02.24
@@ -67,14 +70,31 @@ index 0000000..8bfa1a3
 +
 +  or
 +
-+ insmod netkgdb netkgdb=@/,@10.0.0.2/
++ insmod netkgdb netkgdb=@10.0.0.5/,@10.0.0.2/
 +
-+Note that the parameter is optional and largely unneeded unless you
++Note: the parameter is optional and largely unneeded unless you
 +are running a listen server - netkgdb will accept connection from any
 +IP on all interfaces and will reconfigure itself appropriately if
 +the assigned interface IP address changes. This makes it useful
 +in an environment where it's not known ahead of time what computer
 +will connect to perform the crash analysis.
++
++Note: The format for the string is not netkgdb specific, and its
++parsing is part of Linux netpoll support. The netpoll code does
++need at least a local IP assigned, so the following will result
++in an error and netkgdb will not load if you don't already have
++an IP address assigned.
++
++Note: If you specify a local/remote netkgdb string as a kernel
++parameter, with the idea of having a remote server listen on
++a socket and wait for the kdb crash connection, don't expect
++to be able to connect from the remote host. This is peculiar
++behavior of the netpoll code - the interface is not *really*
++configured and your packets will never reach netkgdb. You
++will need to "ifconfig eth0 x.y.z.w' first. Or just wait
++for the crash :-).
++
++insmod netkgdb netkgdb=@/,@10.0.0.2/
 +
 +The remote host can run either 'netcat -u -l -p <port>' or 'nc -l -u <port>'.
 +
@@ -154,10 +174,10 @@ index a6b8ce1..6eaa21f 100644
  obj-$(CONFIG_NET_TEAM) += team/
 diff --git a/drivers/net/netkgdb.c b/drivers/net/netkgdb.c
 new file mode 100644
-index 0000000..408dfbd
+index 0000000..6a7bd90
 --- /dev/null
 +++ b/drivers/net/netkgdb.c
-@@ -0,0 +1,639 @@
+@@ -0,0 +1,728 @@
 +/*
 + *  linux/drivers/net/netkgdb.c
 + *
@@ -195,7 +215,12 @@ index 0000000..408dfbd
 +MODULE_PARM_DESC(netkgdb, " netkgdb=[src-port]@[src-ip]/[dev],[tgt-port]@<tgt-ip>/[tgt-macaddr]");
 +
 +static LIST_HEAD(netkgdb_nts);
-+static DEFINE_SPINLOCK(netkgdb_nts_lock);
++
++/*
++ * Protects netkgdb_nts list and access to stored netkgdb targets
++ * between the net notifiers.
++ */
++static DEFINE_MUTEX(netkgdb_nts_lock);
 +
 +/**
 + * struct netkgdb_target - Represents a configured netkgdb target.
@@ -222,11 +247,18 @@ index 0000000..408dfbd
 +} netkgdb_rx_ring, netkgdb_tx_ring;
 +static int netkgdb_trapped = 0;
 +
++/*
++ * Returns the offset of the first unconsumed character.
++ */
 +static inline u8 *netkgdb_ring_off(struct netkgdb_ring *ring)
 +{
 +	return &ring->buf[ring->tail];
 +}
 +
++/*
++ * Returns the length of a contiguous buffer of unconsumed
++ * characters, to deal with ring buffer wraparound.
++ */
 +static inline int netkgdb_ring_cont(struct netkgdb_ring *ring)
 +{
 +	if (ring->head < ring->tail)
@@ -235,6 +267,9 @@ index 0000000..408dfbd
 +		return ring->head - ring->tail;
 +}
 +
++/*
++ * Returns the number of characters present in the ring.
++ */
 +static inline int netkgdb_ring_level(struct netkgdb_ring *ring)
 +{
 +	int level = ring->head - ring->tail;
@@ -245,16 +280,26 @@ index 0000000..408dfbd
 +	return level;
 +}
 +
++/*
++ * Returns the number of characters that could be added to the ring.
++ */
 +static inline int netkgdb_ring_room(struct netkgdb_ring *ring)
 +{
 +	return MAX_RING_SIZE - netkgdb_ring_level(ring) - 1;
 +}
 +
++/*
++ * Returns the character at a specific position in the ring,
++ * without consuming it.
++ */
 +static inline u8 netkgdb_ring_peek(struct netkgdb_ring *ring, int i)
 +{
 +	return ring->buf[(ring->tail + i) % MAX_RING_SIZE];
 +}
 +
++/*
++ * Consumes a number of characters (up to count) in the ring.
++ */
 +static inline int ring_consume(struct netkgdb_ring *ring, int count)
 +{
 +	count = min(count, netkgdb_ring_level(ring));
@@ -264,6 +309,10 @@ index 0000000..408dfbd
 +	return count;
 +}
 +
++/*
++ * Adds a character to the ring, updating the number of unconsumed
++ * characters.
++ */
 +static inline int ring_push(struct netkgdb_ring *ring, u8 data)
 +{
 +	if (netkgdb_ring_room(ring) == 0)
@@ -277,6 +326,11 @@ index 0000000..408dfbd
 +	return 1;
 +}
 +
++/*
++ * Flushes the contents of the outgoing (TX) ring
++ * to all netkgdb targets that are up and have a remote
++ * host configured.
++ */
 +static inline void netkgdb_tx_flush(void)
 +{
 +	int frag;
@@ -300,6 +354,12 @@ index 0000000..408dfbd
 +	}
 +}
 +
++/*
++ * Called from KGDB/KDB, returns the the next character read
++ * from the network interface(s), while processing any
++ * connect() requests from remote hosts and flushing
++ * the TX ring.
++ */
 +static int netkgdb_char_get(void)
 +{
 +	u8 c;
@@ -329,6 +389,16 @@ index 0000000..408dfbd
 +	return c;
 +}
 +
++/*
++ * Sends a character to remote hosts, taking care to
++ * avoid singe-character packets. Only flush the ring
++ * on a full ring or at the end of the line. Whatever
++ * didn't get flushed will get flushed in netkgdb_char_get.
++ * There is, of course, some potential for missed data,
++ * like if KDB/KGDB crashed while sending data, but it's
++ * probably insignificant given the likelyhood and the
++ * amount of lost data (less than a line).
++ */
 +static void netkgdb_char_put(u8 c)
 +{
 +	while (!ring_push(&netkgdb_tx_ring, c))
@@ -338,12 +408,18 @@ index 0000000..408dfbd
 +		netkgdb_tx_flush();
 +}
 +
++/*
++ * Invoked before KDB/KGDB takes control.
++ */
 +static void netkgdb_exp_pre(void)
 +{
 +	netpoll_set_trap(1);
 +	netkgdb_trapped = 1;
 +}
 +
++/*
++ * Invoked on KDB/KGDB exit.
++ */
 +static void netkgdb_exp_post(void)
 +{
 +	netkgdb_trapped = 0;
@@ -358,6 +434,12 @@ index 0000000..408dfbd
 +	.post_exception = netkgdb_exp_post,
 +};
 +
++/*
++ * Handles receiving the '!!!BREAK!!!' string from
++ * a remote host. We cannot do this from the rx_hook
++ * itself, otherwise we'll deadlock due to reentering
++ * netpoll.
++ */
 +void netkgdb_work_bp(struct work_struct *work)
 +{
 +	struct netkgdb_target *nt = container_of(work,
@@ -370,6 +452,13 @@ index 0000000..408dfbd
 +	kgdb_breakpoint();
 +}
 +
++/*
++ * Handles sending an alive message to a remote host,
++ * as a response to network messages while the local
++ * host is not crashed. Once again, cannot be done
++ * from rx_hook context, due to netpoll reentrance
++ * issue.
++ */
 +void netkgdb_work_ping(struct work_struct *work)
 +{
 +	char break_string[] = "Alive - '!!!BREAK!!!' to break in.\n";
@@ -384,6 +473,15 @@ index 0000000..408dfbd
 +				 sizeof(break_string) - 1);
 +}
 +
++/*
++ * Invoked on every received UDP/IP message received from
++ * a known host, setup in netkgdb_nt_initial, or by
++ * netkgdb_in_rx_hook. If the host is not crashed, it will
++ * return an alive message and allow breaking in, otherwise
++ * it fills the RX ring with received data. Note that there
++ * is no locking on the RX ring - when we crash we are guaranteed
++ * to run on one CP.
++ */
 +void netkgdb_io_rx_hook(struct netpoll *np,
 +			u8 *h_source,
 +			__be32 saddr,
@@ -411,6 +509,13 @@ index 0000000..408dfbd
 +		ring_push(&netkgdb_rx_ring, data[count++]);
 +}
 +
++/*
++ * Invoked on every UDP/IP message received from a remote
++ * host. For a known host, which we configured for, does nothing.
++ * For an unknown host, modifies the KGDB I/O netpoll struct
++ * with the new remote address, so that netkgdb_io_rx_hook can
++ * receive messages and KDB can send data to the new adddress.
++ */
 +void netkgdb_in_rx_hook(struct netpoll *np,
 +		   u8 *h_source,
 +		   __be32 saddr,
@@ -431,7 +536,9 @@ index 0000000..408dfbd
 +
 +		/*
 +		 * This is safe because npinfo->rx_lock is taken
-+		 * and is shared with tx_np.
++		 * and is shared with tx_np. The npinfo->rx_lock
++		 * also means this is safe with any up() or down()
++		 * work going on.
 +		 */
 +		nt->tx_np.remote_ip = saddr;
 +		nt->tx_np.remote_port = ntohs(uh->source);
@@ -445,6 +552,9 @@ index 0000000..408dfbd
 +	}
 +}
 +
++/*
++ * Cleans up a netkgdb_target structure.
++ */
 +static void netkgdb_nt_free(struct netkgdb_target *nt)
 +{
 +	nt->tx_ready = false;
@@ -457,11 +567,16 @@ index 0000000..408dfbd
 +	kfree(nt);
 +}
 +
++/*
++ * Creates a new netkgdb_target structure, filling in
++ * defaults. Does not add it to target list or register
++ * with netpoll.
++ */
 +static struct netkgdb_target *netkgdb_nt_alloc(char *dev_name)
 +{
 +	struct netkgdb_target *nt;
 +
-+	nt = kzalloc(sizeof(*nt), GFP_ATOMIC);
++	nt = kzalloc(sizeof(*nt), GFP_KERNEL);
 +	if (!nt) {
 +		pr_err("failed to allocate memory\n");
 +		return ERR_PTR(-ENOMEM);
@@ -485,103 +600,86 @@ index 0000000..408dfbd
 +}
 +
 +/*
-+ * Taken under netkgdb_nts_lock. Nasty, but I
-+ * don't see a better way at the moment.
-+ * rtnl_lock must be held as well.
++ * Called in response to network interface going down.
++ * __netpoll_cleanup must be used over netpoll_cleanup, due
++ * rtnl_lock being taken by network dev notifiers.
 + */
-+static void netkgdb_nt_disable(struct netkgdb_target *nt, unsigned long *lock_flags)
++static void netkgdb_nt_down(struct netkgdb_target *nt)
 +{
-+	unsigned long flags = *lock_flags;
-+
-+	ASSERT_RTNL();
 +
 +	if (nt->tx_np.dev ||
 +	    nt->rx_np.dev)
 +		pr_info("down %s\n", nt->tx_np.dev->name);
 +
++	nt->tx_ready = false;
 +	if (nt->tx_np.dev) {
-+		nt->tx_ready = false;
-+		spin_unlock_irqrestore(
-+			&netkgdb_nts_lock,
-+			flags);
-+
 +		__netpoll_cleanup(&nt->tx_np);
-+		spin_lock_irqsave(&netkgdb_nts_lock,
-+				  flags);
 +		dev_put(nt->tx_np.dev);
 +		nt->tx_np.dev = NULL;
 +	}
 +	if (nt->rx_np.dev) {
-+		spin_unlock_irqrestore(
-+			&netkgdb_nts_lock,
-+			flags);
 +		__netpoll_cleanup(&nt->rx_np);
-+		spin_lock_irqsave(&netkgdb_nts_lock,
-+				  flags);
 +		dev_put(nt->rx_np.dev);
 +		nt->rx_np.dev = NULL;
 +	}
-+
-+	*lock_flags = flags;
 +}
 +
 +/*
-+ * Taken under netkgdb_nts_lock. Nasty, but I
-+ * don't see a better way at the moment.
-+ * rtnl_lock must be held as well.
++ * Called in response to network interface going up.
++ * __netpoll_setup must be used over netpoll_setup, due
++ * rtnl_lock being taken by network dev notifiers.
 + */
-+static int netkgdb_nt_smodify(struct netkgdb_target *nt,
-+			      struct in_ifaddr *ifa,
-+			      unsigned long *lock_flags)
++static int netkgdb_nt_up(struct netkgdb_target *nt,
++			      struct in_ifaddr *ifa)
 +{
 +	int err;
-+	unsigned long flags = *lock_flags;
-+
-+	ASSERT_RTNL();
-+
-+	spin_unlock_irqrestore(
-+		&netkgdb_nts_lock,
-+		flags);
 +
 +	nt->tx_np.local_ip = ifa->ifa_local;
 +	nt->tx_np.dev = ifa->ifa_dev->dev;
 +	dev_hold(nt->tx_np.dev);
 +	err = __netpoll_setup(&nt->tx_np);
-+	if (!err) {
-+		nt->rx_np.local_ip = ifa->ifa_local;
-+		nt->rx_np.dev = ifa->ifa_dev->dev;
-+		dev_hold(nt->rx_np.dev);
-+		if ((err = __netpoll_setup(&nt->rx_np))) {
-+			__netpoll_cleanup(&nt->tx_np);
-+			dev_put(nt->tx_np.dev);
-+			nt->tx_np.dev = NULL;
-+			dev_put(nt->rx_np.dev);
-+			nt->rx_np.dev = NULL;
-+		}
-+	} else {
-+		dev_put(nt->tx_np.dev);
-+		nt->tx_np.dev = NULL;
++	if (err)
++		goto done;
++
++	nt->rx_np.local_ip = ifa->ifa_local;
++	nt->rx_np.dev = ifa->ifa_dev->dev;
++	dev_hold(nt->rx_np.dev);
++	err = __netpoll_setup(&nt->rx_np);
++	if (err) {
++		netpoll_cleanup(&nt->tx_np);
++		goto done;
 +	}
 +
-+	spin_lock_irqsave(
-+		&netkgdb_nts_lock,
-+		flags);
++	if (nt->tx_np.remote_ip && nt->tx_np.remote_port)
++		nt->tx_ready = true;
 +
++done:
 +	if (!err)
 +		pr_info("up %s (%pI4:%d)\n",
 +		       ifa->ifa_dev->dev->name,
 +		       &ifa->ifa_local,
 +		       nt->tx_np.local_port);
-+	else
++	else {
 +		pr_err("couldn't configure %s (%pI4)\n",
 +		       ifa->ifa_dev->dev->name,
 +		       &ifa->ifa_local);
-+	*lock_flags = flags;
++		if (nt->tx_np.dev) {
++			dev_put(nt->tx_np.dev);
++			nt->tx_np.dev = NULL;
++		}
++		if (nt->rx_np.dev) {
++			dev_put(nt->rx_np.dev);
++			nt->rx_np.dev = NULL;
++		}
++	}
 +	return err;
 +}
 +
-+static void netkgdb_nt_late(struct in_ifaddr *ifa,
-+			    unsigned long *lock_flags)
++/*
++ * Allocates a netkgdb_target and sets it up
++ * for a new network interface coming up.
++ */
++static void netkgdb_nt_late(struct in_ifaddr *ifa)
 +{
 +	int err;
 +	struct netkgdb_target *nt;
@@ -590,8 +688,7 @@ index 0000000..408dfbd
 +	if (IS_ERR(nt))
 +		return;
 +
-+	err = netkgdb_nt_smodify(nt, ifa,
-+				 lock_flags);
++	err = netkgdb_nt_up(nt, ifa);
 +
 +	if (!err)
 +		list_add(&nt->list, &netkgdb_nts);
@@ -600,11 +697,13 @@ index 0000000..408dfbd
 +		netkgdb_nt_free(nt);
 +}
 +
-+/* Allocate new target (from boot/module param) and setup netpoll for it */
++/*
++ * Allocate a target (from boot/module param) and
++ * setup netpoll for it
++ */
 +static int netkgdb_nt_initial(char *target_config)
 +{
 +	int err;
-+	unsigned long flags;
 +	struct netkgdb_target *nt;
 +
 +	nt = netkgdb_nt_alloc("eth0");
@@ -632,9 +731,9 @@ index 0000000..408dfbd
 +	if (err)
 +		goto done;
 +
-+	spin_lock_irqsave(&netkgdb_nts_lock, flags);
++	mutex_lock(&netkgdb_nts_lock);
 +	list_add(&nt->list, &netkgdb_nts);
-+	spin_unlock_irqrestore(&netkgdb_nts_lock, flags);
++	mutex_unlock(&netkgdb_nts_lock);
 +
 +done:
 +	if (err)
@@ -642,56 +741,60 @@ index 0000000..408dfbd
 +	return err;
 +}
 +
-+/* Handle network address notifications. */
++/*
++ * Handle network address notifications.
++ */
 +static int netkgdb_inetaddr_event(struct notifier_block *this,
 +				  unsigned long event, void *ptr)
 +{
-+	unsigned long flags;
 +	struct netkgdb_target *nt;
 +	struct in_ifaddr *ifa = (struct in_ifaddr *)ptr;
 +	struct net_device *dev = ifa->ifa_dev->dev;
 +	bool found = false;
 +
-+	spin_lock_irqsave(&netkgdb_nts_lock, flags);
++	mutex_lock(&netkgdb_nts_lock);
 +	switch (event) {
 +	case NETDEV_UP:
 +		list_for_each_entry(nt, &netkgdb_nts, list) {
 +			if (!strcmp(nt->tx_np.dev_name, dev->name)) {
 +				found = true;
-+				netkgdb_nt_disable(nt, &flags);
-+				netkgdb_nt_smodify(nt, ifa, &flags);
++				netkgdb_nt_down(nt);
++				netkgdb_nt_up(nt, ifa);
 +				break;
 +			}
 +		}
 +		if (!found)
-+			netkgdb_nt_late(ifa, &flags);
++			netkgdb_nt_late(ifa);
 +		break;
 +	case NETDEV_DOWN:
 +		list_for_each_entry(nt, &netkgdb_nts, list) {
 +			if (nt->tx_np.dev == dev)
-+				netkgdb_nt_disable(nt, &flags);
++				netkgdb_nt_down(nt);
 +		}
 +		break;
 +	}
-+	spin_unlock_irqrestore(&netkgdb_nts_lock, flags);
++	mutex_unlock(&netkgdb_nts_lock);
 +
 +	return NOTIFY_DONE;
 +}
 +
-+/* Handle network interface device notifications/ */
++/*
++ * Handle network interface device notifications.
++ */
 +static int netkgdb_netdev_event(struct notifier_block *this,
 +				unsigned long event,
 +				void *ptr)
 +{
-+	unsigned long flags;
 +	struct netkgdb_target *nt;
 +	struct net_device *dev = ptr;
 +
-+	if (!(event == NETDEV_CHANGENAME || event == NETDEV_UNREGISTER ||
-+	      event == NETDEV_RELEASE || event == NETDEV_JOIN))
++	if (!(event == NETDEV_CHANGENAME ||
++	      event == NETDEV_UNREGISTER ||
++	      event == NETDEV_RELEASE ||
++	      event == NETDEV_JOIN))
 +		return NOTIFY_DONE;
 +
-+	spin_lock_irqsave(&netkgdb_nts_lock, flags);
++	mutex_lock(&netkgdb_nts_lock);
 +	list_for_each_entry(nt, &netkgdb_nts, list) {
 +		if (nt->tx_np.dev == dev) {
 +			switch (event) {
@@ -705,12 +808,12 @@ index 0000000..408dfbd
 +				/*
 +				 * rtnl_lock already held
 +				 */
-+				netkgdb_nt_disable(nt, &flags);
++				netkgdb_nt_down(nt);
 +				break;
 +			}
 +		}
 +	}
-+	spin_unlock_irqrestore(&netkgdb_nts_lock, flags);
++	mutex_unlock(&netkgdb_nts_lock);
 +	return NOTIFY_DONE;
 +}
 +
@@ -728,6 +831,12 @@ index 0000000..408dfbd
 +	struct netkgdb_target *nt, *tmp;
 +	char *input = config;
 +
++	/*
++	 * Not having a netkgdb= parameter itself is not
++	 * a mistake, asn netkgdb_nt_late will take care
++	 * of things. However, passing a bad parameter
++	 * is a mistake (like not having a local IP address).
++	 */
 +	if (strnlen(input, MAX_PARAM_LENGTH)) {
 +		err = netkgdb_nt_initial(input);
 +		if (err)
