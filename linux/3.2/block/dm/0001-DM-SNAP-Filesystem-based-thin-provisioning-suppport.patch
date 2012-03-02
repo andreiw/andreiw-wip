@@ -1,20 +1,20 @@
-From c45cfd630f689a064e32f7d9b5ee57a5148d6cda Mon Sep 17 00:00:00 2001
+From f5677a3fb65c145ab27e3066f00ee7253e1636df Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Fri, 24 Feb 2012 18:44:07 -0500
-Subject: [PATCH 3/3] DM-SNAP: Filesystem-based thin provisioning suppport.
+Subject: [PATCH] DM-SNAP: Filesystem-based thin provisioning suppport.
 
 WIP.
 
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/md/Makefile             |    2 +-
- drivers/md/dm-exception-store.c |  122 +++++-
+ drivers/md/dm-exception-store.c |  122 +++-
  drivers/md/dm-exception-store.h |   18 +-
- drivers/md/dm-snap-file.c       | 1022 +++++++++++++++++++++++++++++++++++++++
- drivers/md/dm-snap.c            |   64 +--
- drivers/md/dm-table.c           |   53 ++-
+ drivers/md/dm-snap-file.c       | 1428 +++++++++++++++++++++++++++++++++++++++
+ drivers/md/dm-snap.c            |   64 +-
+ drivers/md/dm-table.c           |   53 +-
  include/linux/device-mapper.h   |    2 +
- 7 files changed, 1216 insertions(+), 67 deletions(-)
+ 7 files changed, 1622 insertions(+), 67 deletions(-)
  create mode 100644 drivers/md/dm-snap-file.c
 
 diff --git a/drivers/md/Makefile b/drivers/md/Makefile
@@ -289,10 +289,10 @@ index 0b25362..1eb60c8 100644
  
 diff --git a/drivers/md/dm-snap-file.c b/drivers/md/dm-snap-file.c
 new file mode 100644
-index 0000000..4791955
+index 0000000..8d11289
 --- /dev/null
 +++ b/drivers/md/dm-snap-file.c
-@@ -0,0 +1,1022 @@
+@@ -0,0 +1,1428 @@
 +/*
 + * Copyright (C) 2001-2002 Sistina Software (UK) Limited.
 + * Copyright (C) 2006-2008 Red Hat GmbH
@@ -309,8 +309,12 @@ index 0000000..4791955
 +#include <linux/export.h>
 +#include <linux/slab.h>
 +#include <linux/dm-io.h>
++#include <linux/rbtree.h>
 +
 +#define DM_MSG_PREFIX "file snapshot"
++#define DM_FALLOCATE_SECS 40960
++#define DM_EXTRA_EXTENTS  (PAGE_SIZE / sizeof(struct extent))
++
 +
 +/*-----------------------------------------------------------------
 + * File snapshots, by file we mean that the snapshot
@@ -388,6 +392,128 @@ index 0000000..4791955
 +};
 +
 +/*
++ * block map extent
++ */
++struct extent {
++	blkcnt_t l;
++	blkcnt_t p;
++	blkcnt_t count;
++};
++
++/*
++ * temporary extent list
++ */
++struct extent_list {
++	struct extent *extent;
++	struct list_head list;
++};
++
++struct kmem_cache *extent_cache;
++
++/*
++ * block map private context
++ */
++struct block_map_c {
++	int nr_extents;			/* number of extents in map */
++	int nr_possible;		/* how many more extents we can store. */
++	struct extent **map;		/* linear map of extent pointers */
++	struct extent **mru;		/* pointer to mru entry */
++	spinlock_t mru_lock;		/* protects mru */
++	struct mutex lock;
++};
++
++static int contains_block(struct extent *e, blkcnt_t l)
++{
++	if (likely(e))
++		return l < (e->l + (e->count)) &&
++			l >= e->l;
++	return 0;
++}
++
++/*
++ * Walk over a linked list of extent_list structures, freeing them as
++ * we go. Does not free el->extent.
++ */
++static void destroy_extent_list(struct list_head *head)
++{
++	struct list_head *curr, *n;
++
++	if (list_empty(head))
++		return;
++
++	list_for_each_safe(curr, n, head) {
++		struct extent_list *el;
++		el = list_entry(curr, struct extent_list, list);
++		list_del(curr);
++		kfree(el);
++	}
++}
++
++/*
++ * Add a new extent to the tail of the list at *head with
++ * start/to/len parameters. Allocates from the extent cache.
++ */
++static int list_add_extent(struct list_head *head,
++			   blkcnt_t l, blkcnt_t p, blkcnt_t count)
++{
++	struct extent *extent;
++	struct extent_list *list;
++
++	extent = kmem_cache_alloc(extent_cache, GFP_KERNEL);
++	if(!extent)
++		goto out;
++
++	list = kmalloc(sizeof(*list), GFP_KERNEL);
++	if(!list)
++		goto out;
++
++	extent->l = l;
++	extent->p = p;
++	extent->count = count;
++
++	list->extent = extent;
++	list_add_tail(&list->list, head);
++
++	return 0;
++out:
++	if (extent)
++		kmem_cache_free(extent_cache, extent);
++	return -ENOMEM;
++}
++
++/*
++ * Return an extent range (i.e. beginning and ending physical block numbers).
++ * Tested range is [logical_blk, last_blk).
++ */
++static int extent_range(struct inode *inode,
++			blkcnt_t logical_blk, blkcnt_t last_blk,
++			blkcnt_t *begin_blk, blkcnt_t *end_blk)
++{
++	sector_t dist = 0, phys_blk, probe_blk = logical_blk;
++
++	/* Find beginning physical block of extent starting at logical_blk. */
++	*begin_blk = phys_blk = bmap(inode, probe_blk);
++	if (!phys_blk) {
++		printk("first block nono\n");
++		return -ENXIO;
++	}
++
++	for (; phys_blk == *begin_blk + dist; dist++) {
++		*end_blk = phys_blk;
++		if (++probe_blk >= last_blk)
++			break;
++
++		phys_blk = bmap(inode, probe_blk);
++		if (unlikely(!phys_blk)) {
++			printk("some block nono - %u\n", probe_blk);
++			return -ENXIO;
++		}
++	}
++
++	return 0;
++}
++
++/*
 + * The top level structure for a file exception store.
 + */
 +struct pstore {
@@ -455,7 +581,268 @@ index 0000000..4791955
 +	struct work_struct fallocate_work;
 +	struct workqueue_struct *metadata_wq;
 +	struct workqueue_struct *fallocate_wq;
++
++	struct block_map_c *bc;
 +};
++
++/*
++ * Create a sequential list of extents from an inode and return
++ * it in *head. On success return the number of extents found or
++ * -ERRNO on failure.
++ *
++ * Tested range is [logical_blk, last_blk).
++ */
++static int loop_extents(struct pstore *ps,
++			struct list_head *head)
++{
++	int r, nr_extents = 0;
++	blkcnt_t nr_blks = 0, begin_blk = 0, end_blk = 0;
++	struct inode *i = ps->store->cow_file->f_mapping->host;
++	blkcnt_t last_blk = cow_file_size(ps->store) >>
++		(SECTOR_SHIFT + ps->store->chunk_shift);
++	blkcnt_t logical_blk = 0;
++
++	printk("last_blk = %u\n", last_blk);
++
++	/* for each block in the mapped region */
++	while (logical_blk < last_blk) {
++		printk("caling er for %u\n", logical_blk);
++		r = extent_range(i, logical_blk, last_blk,
++				&begin_blk, &end_blk);
++
++		if (unlikely(r)) {
++			printk("%d couldn't build range for blocks %u - %u", r, logical_blk, last_blk);
++			return r;
++		}
++
++		nr_blks = 1 + end_blk - begin_blk;
++
++		if (likely(nr_blks)) {
++			r = list_add_extent(head,
++					    logical_blk,
++					    begin_blk,
++					    nr_blks);
++
++			if (unlikely(r))
++				return r;
++
++			/* advance to next extent */
++			nr_extents++;
++			logical_blk += nr_blks;
++		}
++	}
++
++	return nr_extents;
++}
++
++/*
++ * Walk over the extents in a block_map_c, returning them to the cache and
++ * freeing bc->map and bc.
++ */
++static void destroy_block_map(struct block_map_c *bc)
++{
++	unsigned i;
++
++	if (!bc)
++		return;
++
++	for (i = 0; i < bc->nr_extents; i++)
++		kmem_cache_free(extent_cache, bc->map[i]);
++	DMDEBUG("destroying block map of %d entries", i);
++	vfree(bc->map);
++	kfree(bc);
++}
++
++/*
++ * Find an extent in *bc using binary search. Returns a pointer into the
++ * extent map. Calculate index as (extent - bc->map).
++ */
++static struct extent **extent_binary_lookup(struct block_map_c *bc,
++					   struct extent **extent_mru,
++					   blkcnt_t logical)
++{
++	unsigned nr_extents = bc->nr_extents;
++	unsigned delta, dist, prev_dist = 0;
++	struct extent **eptr;
++
++	/* Optimize lookup range based on MRU extent. */
++	dist = extent_mru - bc->map;
++	if ((*extent_mru)->l < logical) {
++		delta = (nr_extents - dist) / 2;
++		dist += delta;
++	} else
++		delta = dist = dist / 2;
++
++	eptr = bc->map + dist;
++	while(*eptr && !contains_block(*eptr, logical)) {
++		if (logical >= (*eptr)->l + (*eptr)->count) {
++			prev_dist = dist;
++			if (delta > 1)
++				delta /= 2;
++			dist += delta;
++		} else {
++			delta = (dist - prev_dist) / 2;
++			if (!delta)
++				delta = 1;
++			dist -= delta;
++		}
++		eptr = bc->map + dist;
++	}
++
++	return eptr;
++}
++
++/*
++ * Lookup an extent for a sector using the mru cache and binary search.
++ */
++static struct extent *extent_lookup(struct block_map_c *bc,
++				    blkcnt_t logical)
++{
++	struct extent **eptr;
++
++	spin_lock_irq(&bc->mru_lock);
++	eptr = bc->mru;
++	spin_unlock_irq(&bc->mru_lock);
++
++	if (contains_block(*eptr, logical))
++		return *eptr;
++
++	mutex_lock(&bc->lock);
++	eptr = extent_binary_lookup(bc, eptr, logical);
++	if (!eptr) {
++		mutex_unlock(&bc->lock);
++		return NULL;
++        }
++
++	spin_lock_irq(&bc->mru_lock);
++	bc->mru = eptr;
++	spin_unlock_irq(&bc->mru_lock);
++	mutex_unlock(&bc->lock);
++
++	return *eptr;
++}
++
++static blkcnt_t do_bmap(struct pstore *ps,
++			blkcnt_t logical)
++{
++	struct extent *eptr = extent_lookup(ps->bc, logical);
++	if (!eptr)
++		return 0;
++
++	return logical - eptr->l + eptr->p;
++}
++
++/*
++ * Turn an extent_list into a linear pointer map of nr_extents + 1 entries
++ * and set the final entry to NULL.
++ */
++static struct extent **build_extent_map(struct list_head *head,
++				int nr_extents)
++{
++	unsigned map_size, cache_size;
++	struct extent **map, **curr;
++	struct list_head *pos;
++
++	map_size =  sizeof(*map) * nr_extents;
++	cache_size = kmem_cache_size(extent_cache) * nr_extents;
++
++	map = vmalloc(map_size);
++	curr = map;
++
++	printk("allocated extent map of %u %s for %d extents (%u %s)",
++	       (map_size < 8192 ) ? map_size : map_size >> 10,
++	       (map_size < 8192 ) ? "bytes" : "kilobytes", nr_extents,
++	       (cache_size < 8192) ? cache_size : cache_size >> 10,
++	       (cache_size < 8192) ? "bytes" : "kilobytes");
++
++	list_for_each(pos, head) {
++		struct extent_list *el;
++		el = list_entry(pos, struct extent_list, list);
++		*(curr++) = el->extent;
++	}
++	*curr = NULL;
++
++	return map;
++}
++
++/*
++ * Set up a block map context and extent map
++ */
++static int setup_block_map(struct pstore *ps)
++{
++	int r, nr_extents;
++	struct block_map_c *bc;
++	LIST_HEAD(head);
++
++	/* build a linked list of extents in linear order */
++	r = nr_extents = loop_extents(ps, &head);
++	if (nr_extents < 0)
++		return r;
++
++	r = -ENOMEM;
++	bc = kzalloc(sizeof(*bc), GFP_KERNEL);
++	if(!bc)
++		goto out;
++
++	/* create a linear map of pointers into the extent cache */
++	bc->map = build_extent_map(&head, nr_extents + DM_EXTRA_EXTENTS);
++	destroy_extent_list(&head);
++
++	if (IS_ERR(bc->map)) {
++		r = PTR_ERR(bc->map);
++		goto out;
++	}
++
++	spin_lock_init(&bc->mru_lock);
++	mutex_init(&bc->lock);
++	bc->mru = bc->map;
++	bc->nr_extents = nr_extents;
++        bc->nr_possible = nr_extents + DM_EXTRA_EXTENTS;
++	ps->bc = bc;
++	return 0;
++
++out:
++	return r;
++}
++
++static int insert_block_map(struct block_map_c *bc,
++			    blkcnt_t p,
++			    blkcnt_t l,
++			    blkcnt_t count)
++{
++	int r;
++	struct extent *last;
++
++	mutex_lock(&bc->lock);
++
++	if (bc->nr_extents) {
++		last = bc->map[bc->nr_extents - 1];
++		BUG_ON(last->l + last->count != l);
++		if (last->p + last->count == p) {
++			last->count += count;
++			r = 0;
++			goto out;
++		}
++	}
++
++	BUG_ON(bc->nr_extents == bc->nr_possible);
++
++	last = kmem_cache_alloc(extent_cache, GFP_KERNEL);
++	if (!last) {
++		r = -ENOMEM;
++		goto out;
++	}
++
++	last->l = l;
++	last->p = p;
++	last->count = count;
++	bc->map[bc->nr_extents] = last;
++	bc->nr_extents++;
++
++out:
++	mutex_unlock(&bc->lock);
++	return r;
++}
 +
 +static int alloc_area(struct pstore *ps)
 +{
@@ -534,7 +921,7 @@ index 0000000..4791955
 +{
 +	struct dm_io_region where = {
 +		.bdev = dm_snap_cow(ps->store->snap)->bdev,
-+		.sector = bmap(ps->store->cow_file->f_mapping->host,
++		.sector = do_bmap(ps,
 +			       chunk) <<
 +		ps->store->chunk_shift,
 +		.count = ps->store->chunk_size,
@@ -594,29 +981,35 @@ index 0000000..4791955
 +
 +static void do_fallocate_work(struct work_struct *work)
 +{
-+	int r;
 +	sector_t total_secs;
-+	sector_t needed_secs;
++	sector_t used_secs;
++	blkcnt_t start;
++	blkcnt_t end;
++	blkcnt_t p;
++	int r = 0;
 +	struct pstore *ps = container_of(work,
 +					 struct pstore,
 +					 fallocate_work);
 +
-+	needed_secs = area_location(ps, ps->current_area + 2) <<
-+		ps->store->chunk_shift;
 +	total_secs = cow_file_size(ps->store) >> SECTOR_SHIFT;
++	used_secs = ps->next_free << ps->store->chunk_shift;
 +
-+	if (total_secs < needed_secs) {
++	if (!total_secs || (total_secs - used_secs) < DM_FALLOCATE_SECS) {
 +		r = do_fallocate(ps->store->cow_file,
 +				 0,
 +				 total_secs << SECTOR_SHIFT,
-+				 (needed_secs - total_secs) << SECTOR_SHIFT);
++				 (DM_FALLOCATE_SECS * 2) << SECTOR_SHIFT);
 +		if (r)
-+			DMERR("couldn't grow COW file by %d secs\n", needed_secs - total_secs);
-+		else {
-+                  //			printk("grew COW file by %d secs\n", needed_secs - total_secs);
-+                }
-+	} else {
-+          //		printk("no need to fallocate - n %d t %d\n", needed_secs, total_secs);
++			DMERR("couldn't grow COW file\n");
++
++		start = total_secs >> ps->store->chunk_shift;
++		end = start + ((DM_FALLOCATE_SECS * 2) >> ps->store->chunk_shift);
++		while (start < end) {
++			p = bmap(ps->store->cow_file->f_mapping->host,
++				 start);
++			BUG_ON(!p);
++			BUG_ON(insert_block_map(ps->bc, p, start++, 1));
++		}
 +	}
 +}
 +
@@ -637,8 +1030,6 @@ index 0000000..4791955
 +		return -ENOSPC;
 +	}
 +
-+        //        printk("file secs = 0x%x\n", file_secs);
-+        //        printk("new secs = 0x%x, chunk %d\n", new_secs, chunk);
 +	r = chunk_io(ps, ps->area, chunk, rw, 0);
 +	if (r)
 +		return r;
@@ -669,6 +1060,12 @@ index 0000000..4791955
 +	ps->io_client = dm_io_client_create();
 +	if (IS_ERR(ps->io_client))
 +		return PTR_ERR(ps->io_client);
++
++	r = setup_block_map(ps);
++	if (r) {
++		DMERR("couldn't set up the block map");
++		return r;
++	}
 +
 +	r = alloc_area(ps);
 +	if (r)
@@ -892,6 +1289,7 @@ index 0000000..4791955
 +	dm_exception_store_unlock_cow_file(store);
 +
 +	/* Created in read_header */
++	destroy_block_map(ps->bc);
 +	if (ps->io_client)
 +		dm_io_client_destroy(ps->io_client);
 +	free_area(ps);
@@ -1026,7 +1424,7 @@ index 0000000..4791955
 +	 * create the exception. Remember! chunk and block size
 +         * have to be equivalent...
 +	 */
-+	e->new_chunk = bmap(store->cow_file->f_mapping->host,
++	e->new_chunk = do_bmap(ps,
 +			    ps->next_free);
 +
 +        //        printk("chunk %d is bmapped to %d\n", ps->next_free, e->new_chunk);
@@ -1293,9 +1691,15 @@ index 0000000..4791955
 +{
 +	int r;
 +
++	extent_cache = kmem_cache_create("extent_cache", sizeof(struct extent),
++					 0, SLAB_HWCACHE_ALIGN, NULL);
++	if (!extent_cache)
++		return -ENOMEM;
++
 +	r = dm_exception_store_type_register(&_file_type);
 +	if (r) {
 +		DMERR("Unable to register file exception store type");
++		kmem_cache_destroy(extent_cache);
 +		return r;
 +	}
 +
@@ -1304,6 +1708,7 @@ index 0000000..4791955
 +		DMERR("Unable to register old-style file exception "
 +		      "store type");
 +		dm_exception_store_type_unregister(&_file_type);
++		kmem_cache_destroy(extent_cache);
 +		return r;
 +	}
 +
@@ -1314,6 +1719,7 @@ index 0000000..4791955
 +{
 +	dm_exception_store_type_unregister(&_file_type);
 +	dm_exception_store_type_unregister(&_file_compat_type);
++	kmem_cache_destroy(extent_cache);
 +}
 diff --git a/drivers/md/dm-snap.c b/drivers/md/dm-snap.c
 index 6f75887..a26cd92 100644
@@ -1598,5 +2004,5 @@ index 98f34b8..7c99beb 100644
  
  /*
 -- 
-1.7.8.3
+1.7.9.2
 
