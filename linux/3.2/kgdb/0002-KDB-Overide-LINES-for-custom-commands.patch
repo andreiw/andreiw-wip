@@ -1,7 +1,7 @@
-From 476634d0c1c3c57c709aeed3f718b400da99d04f Mon Sep 17 00:00:00 2001
+From 7d831f7a496660d2c07c7a9d101b718e5f75cfcb Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Fri, 17 Feb 2012 20:59:04 -0500
-Subject: [PATCH 3/6] KDB: Overide LINES for custom commands.
+Subject: [PATCH 2/7] KDB: Overide LINES for custom commands.
 
 Commands like dumpall define some maximum
 LINES, which as a default might make sense,
@@ -22,9 +22,9 @@ was not checking the result of strdup.
 
 Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
 ---
- kernel/debug/kdb/kdb_main.c    |   42 ++++++++++++++++++++++++++++++++++++---
- kernel/debug/kdb/kdb_private.h |    3 ++
- kernel/debug/kdb/kdb_support.c |   25 +++++++++++++++++++----
+ kernel/debug/kdb/kdb_main.c    |   42 ++++++++++++++++++++++++++++++++++++----
+ kernel/debug/kdb/kdb_private.h |    3 +++
+ kernel/debug/kdb/kdb_support.c |   25 +++++++++++++++++++-----
  3 files changed, 61 insertions(+), 9 deletions(-)
 
 diff --git a/kernel/debug/kdb/kdb_main.c b/kernel/debug/kdb/kdb_main.c
@@ -195,5 +195,5 @@ index d35cc2d..e0b35b0 100644
  
  /*
 -- 
-1.7.8.3
+1.7.9.2
 

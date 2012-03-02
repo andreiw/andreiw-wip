@@ -1,7 +1,7 @@
-From 17e1736cba48141641c97104d091a21a4dac3dfb Mon Sep 17 00:00:00 2001
+From 44f369840ddb36e8cdac435b614efc8da38a65c5 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Wed, 22 Feb 2012 15:10:45 -0500
-Subject: [PATCH 5/6] NETKGDB: Ethernet/UDP/IP KDB transport.
+Subject: [PATCH 4/7] NETKGDB: Ethernet/UDP/IP KDB transport.
 
 Allows debugging a crashed kernel, and breaking into a
 live kernel via a network interface.
@@ -20,7 +20,7 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
  drivers/net/Kconfig                  |    8 +-
  drivers/net/Makefile                 |    1 +
  drivers/net/netkgdb.c                |  729 ++++++++++++++++++++++++++++++++++
- 4 files changed, 841 insertions(+), 1 deletions(-)
+ 4 files changed, 841 insertions(+), 1 deletion(-)
  create mode 100644 Documentation/networking/netkgdb.txt
  create mode 100644 drivers/net/netkgdb.c
 
@@ -908,5 +908,5 @@ index 0000000..bd03cd7
 +__setup("netkgdb=", option_setup);
 +#endif /* MODULE */
 -- 
-1.7.8.3
+1.7.9.2
 

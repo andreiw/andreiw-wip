@@ -1,7 +1,7 @@
-From a24776154ff0d432d9db04881b44db8748a669ef Mon Sep 17 00:00:00 2001
+From b60b230770b059589ad0e5bc2e962d42ad5b06ed Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Sun, 26 Feb 2012 22:23:49 -0500
-Subject: [PATCH 6/6] KGDB: Allow registering multiple I/O ops.
+Subject: [PATCH 5/7] KGDB: Allow registering multiple I/O ops.
 
 This allows multiple I/O ops, which is useful, if you want
 to be able to support debugging say both via console and
@@ -13,9 +13,9 @@ Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
 Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 ---
  drivers/usb/early/ehci-dbgp.c |    4 +-
- include/linux/kgdb.h          |    6 ++-
+ include/linux/kgdb.h          |    6 +-
  kernel/debug/debug_core.c     |  130 +++++++++++++++++++++++++++--------------
- kernel/debug/gdbstub.c        |   43 ++++++-------
+ kernel/debug/gdbstub.c        |   43 +++++++-------
  kernel/debug/kdb/kdb_io.c     |   26 ++++-----
  5 files changed, 125 insertions(+), 84 deletions(-)
 
@@ -442,5 +442,5 @@ index 5eb7e23..35ef3cb 100644
  			c->write(c, moreprompt, strlen(moreprompt));
  			touch_nmi_watchdog();
 -- 
-1.7.8.3
+1.7.9.2
 

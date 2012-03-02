@@ -1,7 +1,7 @@
-From af11a489a96624737b9aebc7e4c73dc318e8d0f4 Mon Sep 17 00:00:00 2001
+From 8599a6e7931a1fb61ace7b2758011ff613412290 Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andreiw@vmware.com>
 Date: Wed, 22 Feb 2012 15:10:04 -0500
-Subject: [PATCH 4/6] NETPOLL: Extend rx_hook support.
+Subject: [PATCH 3/7] NETPOLL: Extend rx_hook support.
 
 Pass down source information to rx_hook, useful
 for accepting connections from unspecified clients.
@@ -13,8 +13,8 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
 Signed-off-by: Andrei Warkentin <andreiw@vmware.com>
 ---
  include/linux/netpoll.h |   10 +++++++++-
- net/core/netpoll.c      |   10 ++++------
- 2 files changed, 13 insertions(+), 7 deletions(-)
+ net/core/netpoll.c      |   12 ++++++------
+ 2 files changed, 15 insertions(+), 7 deletions(-)
 
 diff --git a/include/linux/netpoll.h b/include/linux/netpoll.h
 index 5dfa091..9a9cfa1 100644
@@ -50,7 +50,7 @@ index 5dfa091..9a9cfa1 100644
  void netpoll_print_options(struct netpoll *np);
  int netpoll_parse_options(struct netpoll *np, char *opt);
 diff --git a/net/core/netpoll.c b/net/core/netpoll.c
-index 3d84fb9..c182bb2 100644
+index 3d84fb9..adf6ffd 100644
 --- a/net/core/netpoll.c
 +++ b/net/core/netpoll.c
 @@ -26,8 +26,6 @@
@@ -71,7 +71,16 @@ index 3d84fb9..c182bb2 100644
  {
  	const struct net_device_ops *ops;
  
-@@ -615,9 +613,9 @@ int __netpoll_rx(struct sk_buff *skb)
+@@ -221,6 +219,8 @@ static void netpoll_poll_dev(struct net_device *dev)
+ 	zap_completion_queue();
+ }
+ 
++EXPORT_SYMBOL(netpoll_poll_dev);
++
+ static void refill_skbs(void)
+ {
+ 	struct sk_buff *skb;
+@@ -615,9 +615,9 @@ int __netpoll_rx(struct sk_buff *skb)
  		if (np->local_port && np->local_port != ntohs(uh->dest))
  			continue;
  
@@ -85,5 +94,5 @@ index 3d84fb9..c182bb2 100644
  	}
  
 -- 
-1.7.8.3
+1.7.9.2
 
