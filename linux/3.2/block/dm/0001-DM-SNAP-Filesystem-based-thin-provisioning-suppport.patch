@@ -1,4 +1,4 @@
-From f5677a3fb65c145ab27e3066f00ee7253e1636df Mon Sep 17 00:00:00 2001
+From 7508ab1576f6e20f0ae2196cf6af45fd971bc2de Mon Sep 17 00:00:00 2001
 From: Andrei Warkentin <andrey.warkentin@gmail.com>
 Date: Fri, 24 Feb 2012 18:44:07 -0500
 Subject: [PATCH] DM-SNAP: Filesystem-based thin provisioning suppport.
@@ -10,11 +10,11 @@ Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
  drivers/md/Makefile             |    2 +-
  drivers/md/dm-exception-store.c |  122 +++-
  drivers/md/dm-exception-store.h |   18 +-
- drivers/md/dm-snap-file.c       | 1428 +++++++++++++++++++++++++++++++++++++++
+ drivers/md/dm-snap-file.c       | 1438 +++++++++++++++++++++++++++++++++++++++
  drivers/md/dm-snap.c            |   64 +-
  drivers/md/dm-table.c           |   53 +-
  include/linux/device-mapper.h   |    2 +
- 7 files changed, 1622 insertions(+), 67 deletions(-)
+ 7 files changed, 1632 insertions(+), 67 deletions(-)
  create mode 100644 drivers/md/dm-snap-file.c
 
 diff --git a/drivers/md/Makefile b/drivers/md/Makefile
@@ -289,10 +289,10 @@ index 0b25362..1eb60c8 100644
  
 diff --git a/drivers/md/dm-snap-file.c b/drivers/md/dm-snap-file.c
 new file mode 100644
-index 0000000..8d11289
+index 0000000..e9e2464
 --- /dev/null
 +++ b/drivers/md/dm-snap-file.c
-@@ -0,0 +1,1428 @@
+@@ -0,0 +1,1438 @@
 +/*
 + * Copyright (C) 2001-2002 Sistina Software (UK) Limited.
 + * Copyright (C) 2006-2008 Red Hat GmbH
@@ -602,11 +602,8 @@ index 0000000..8d11289
 +		(SECTOR_SHIFT + ps->store->chunk_shift);
 +	blkcnt_t logical_blk = 0;
 +
-+	printk("last_blk = %u\n", last_blk);
-+
 +	/* for each block in the mapped region */
 +	while (logical_blk < last_blk) {
-+		printk("caling er for %u\n", logical_blk);
 +		r = extent_range(i, logical_blk, last_blk,
 +				&begin_blk, &end_blk);
 +
@@ -639,9 +636,10 @@ index 0000000..8d11289
 + * Walk over the extents in a block_map_c, returning them to the cache and
 + * freeing bc->map and bc.
 + */
-+static void destroy_block_map(struct block_map_c *bc)
++static void destroy_block_map(struct pstore *ps)
 +{
 +	unsigned i;
++	struct block_map_c *bc = ps->bc;
 +
 +	if (!bc)
 +		return;
@@ -651,6 +649,7 @@ index 0000000..8d11289
 +	DMDEBUG("destroying block map of %d entries", i);
 +	vfree(bc->map);
 +	kfree(bc);
++	ps->bc = NULL;
 +}
 +
 +/*
@@ -733,11 +732,10 @@ index 0000000..8d11289
 +}
 +
 +/*
-+ * Turn an extent_list into a linear pointer map of nr_extents + 1 entries
-+ * and set the final entry to NULL.
++ * Turn an extent_list into a linear pointer map of nr_extents.
 + */
 +static struct extent **build_extent_map(struct list_head *head,
-+				int nr_extents)
++					int nr_extents)
 +{
 +	unsigned map_size, cache_size;
 +	struct extent **map, **curr;
@@ -818,6 +816,7 @@ index 0000000..8d11289
 +	if (bc->nr_extents) {
 +		last = bc->map[bc->nr_extents - 1];
 +		BUG_ON(last->l + last->count != l);
++
 +		if (last->p + last->count == p) {
 +			last->count += count;
 +			r = 0;
@@ -1053,7 +1052,6 @@ index 0000000..8d11289
 +	 */
 +	i = ps->store->cow_file->f_mapping->host;
 +	ps->store->chunk_size = i->i_sb->s_blocksize >> 9;
-+        //	printk("chunk_size = %d\n", ps->store->chunk_size);
 +	ps->store->chunk_mask = ps->store->chunk_size - 1;
 +	ps->store->chunk_shift = ffs(ps->store->chunk_size) - 1;
 +
@@ -1079,7 +1077,19 @@ index 0000000..8d11289
 +		return 0;
 +	}
 +
-+        //        printk("calling header read\n");
++	/*
++	 * COW file size must contain a
++	 * full amount of chunks - if it doesn't,
++	 * it cannot be a valid file, not even
++	 * a corrupt file.
++	 *
++	 */
++	if (cow_file_size(ps->store) %
++	    (ps->store->chunk_size << SECTOR_SHIFT)) {
++		printk("Invalid COW file\n");
++		return -ENXIO;
++	}
++
 +	r = chunk_io(ps, ps->header_area, 0, READ, 1);
 +	if (r)
 +		goto bad;
@@ -1289,7 +1299,7 @@ index 0000000..8d11289
 +	dm_exception_store_unlock_cow_file(store);
 +
 +	/* Created in read_header */
-+	destroy_block_map(ps->bc);
++	destroy_block_map(ps);
 +	if (ps->io_client)
 +		dm_io_client_destroy(ps->io_client);
 +	free_area(ps);
@@ -1355,11 +1365,11 @@ index 0000000..8d11289
 +
 +		ps->current_area = 0;
 +		zero_memory_area(ps);
++		destroy_block_map(ps);
++		setup_block_map(ps);
 +
-+                //		printk("fallocating for at least two areas\n");
 +		queue_work(ps->fallocate_wq, &ps->fallocate_work);
 +		flush_work(&ps->fallocate_work);
-+                //		printk("done fallocating for at least two areas\n");
 +
 +		r = write_header(ps);
 +		if (r) {
