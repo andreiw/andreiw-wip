@@ -1,0 +1,32 @@
+From 4e6997d998b413b50b6d158b341907726dd3d956 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sat, 22 Mar 2014 01:06:17 -0400
+Subject: [PATCH 1/3] qemu: fix page_check_range
+
+Fixes a segfault. In a case, where signals are delivered
+back to back. The second signal causes a segfalt, because
+the frame cannot be written to (it was protected beause
+the restorer executed from it), but the unprotect
+logic exited too early if the checked range exceeded
+1 page.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ translate-all.c |    1 -
+ 1 files changed, 0 insertions(+), 1 deletions(-)
+
+diff --git a/translate-all.c b/translate-all.c
+index f243c10..5759974 100644
+--- a/translate-all.c
++++ b/translate-all.c
+@@ -1777,7 +1777,6 @@ int page_check_range(target_ulong start, target_ulong len, int flags)
+                     return -1;
+                 }
+             }
+-            return 0;
+         }
+     }
+     return 0;
+-- 
+1.7.4.1
+

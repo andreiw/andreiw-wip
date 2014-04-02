@@ -1,0 +1,40 @@
+From ae11217e964e53efca79bbaab97b4e7177ed5f1b Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Wed, 2 Apr 2014 12:35:04 -0400
+Subject: [PATCH 3/3] x86: implement EXCP_TB_EFAULT
+
+This implements the "TCG would access unmapped memory"
+fault for x86_64 and i386.
+
+See 7258982 for more context.
+
+Tested using qemu-i386 and sigtest/sigtest_mprotect binaries.
+x86_64 has no signal handling implemented, presumably would
+work as well.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ linux-user/main.c |    7 +++++++
+ 1 files changed, 7 insertions(+), 0 deletions(-)
+
+diff --git a/linux-user/main.c b/linux-user/main.c
+index ebf68b3..3c326c1 100644
+--- a/linux-user/main.c
++++ b/linux-user/main.c
+@@ -336,6 +336,13 @@ void cpu_loop(CPUX86State *env)
+                 queue_signal(env, info.si_signo, &info);
+             }
+             break;
++        case EXCP_TB_EFAULT:
++            info.si_signo = SIGSEGV;
++            info.si_errno = 0;
++            info.si_code = TARGET_SEGV_MAPERR;
++            info._sifields._sigfault._addr = env->eip;
++            queue_signal(env, info.si_signo, &info);
++            break;
+         case EXCP0E_PAGE:
+             info.si_signo = SIGSEGV;
+             info.si_errno = 0;
+-- 
+1.7.4.1
+

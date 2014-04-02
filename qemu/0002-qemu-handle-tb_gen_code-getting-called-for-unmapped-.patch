@@ -1,0 +1,146 @@
+From 2dfb4f72a7bccdcfdd6a853b0a9e35fe5a2e0c2e Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sat, 22 Mar 2014 03:34:49 -0400
+Subject: [PATCH 2/3] qemu: handle tb_gen_code getting called for unmapped pc
+
+If we try executing code that is in an unreadable page
+back out of the cpu loop before sending signal.
+
+Before we'd end up trying accessing directly, which
+would find us trying to inject a signal while holding
+the tcg_ctx.tb_ctx.tb_lock.
+
+i.e. after a SIGSEGV here:
+
+0  disas_a64_insn (s=0x7fffffffdc40, env=<optimized out>) at /target-arm/translate-a64.c:8972
+1  gen_intermediate_code_internal_a64 (cpu=cpu@entry=0x62532200, tb=tb@entry=0x7ffff440b120, search_pc=search_pc@entry=false) at /target-arm/translate-a64.c:9097
+2  0x00000000600d76e5 in gen_intermediate_code_internal (search_pc=false, tb=0x7ffff440b120, cpu=0x62532200) at /target-arm/translate.c:10629
+3  gen_intermediate_code (env=env@entry=0x6253a468, tb=tb@entry=0x7ffff440b120) at /target-arm/translate.c:10904
+4  0x00000000600e4851 in cpu_arm_gen_code (env=env@entry=0x6253a468, tb=tb@entry=0x7ffff440b120, gen_code_size_ptr=gen_code_size_ptr@entry=0x7fffffffdd64) at /translate-all.c:159
+5  0x00000000600e5152 in tb_gen_code (cpu=cpu@entry=0x62532200, pc=pc@entry=4820992, cs_base=cs_base@entry=0, flags=<optimized out>, cflags=cflags@entry=0) at /translate-all.c:973
+6  0x0000000060040e7a in tb_find_slow (flags=<optimized out>, pc=4820992, env=0x6253a468, cs_base=<optimized out>) at /cpu-exec.c:162
+7  tb_find_fast (env=0x6253a468) at /cpu-exec.c:193
+8  cpu_arm_exec (env=env@entry=0x6253a468) at /cpu-exec.c:611
+9  0x000000006005ad2c in cpu_loop (env=env@entry=0x6253a468) at /linux-user/main.c:1015
+10 0x0000000060004dd1 in main (argc=1, argv=<optimized out>, envp=<optimized out>) at /linux-user/main.c:4392
+
+We deadlock here:
+
+0  __lll_lock_wait () at ../nptl/sysdeps/unix/sysv/linux/x86_64/lowlevellock.S:132
+1  0x000000006012991d in _L_lock_858 ()
+2  0x000000006012978a in __pthread_mutex_lock (mutex=0x604ffa98 <tcg_ctx+350904>) at pthread_mutex_lock.c:61
+3  0x0000000060040bfd in cpu_arm_exec (env=env@entry=0x6253a228) at /cpu-exec.c:610
+4  0x000000006005ad2c in cpu_loop (env=env@entry=0x6253a228) at /linux-user/main.c:1015
+5  0x0000000060004dd1 in main (argc=1, argv=<optimized out>, envp=<optimized out>) at /linux-user/main.c:4392
+
+AArch64 implementation for the signal delivery part.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ cpu-exec.c              |   14 ++++++++++++++
+ include/exec/cpu-defs.h |    1 +
+ linux-user/main.c       |    3 +++
+ translate-all.c         |   20 ++++++++++++++++++++
+ 4 files changed, 38 insertions(+), 0 deletions(-)
+
+diff --git a/cpu-exec.c b/cpu-exec.c
+index 0914d3c..be063a9 100644
+--- a/cpu-exec.c
++++ b/cpu-exec.c
+@@ -103,6 +103,11 @@ static void cpu_exec_nocache(CPUArchState *env, int max_cycles,
+ 
+     tb = tb_gen_code(cpu, orig_tb->pc, orig_tb->cs_base, orig_tb->flags,
+                      max_cycles);
++    if (!tb) {
++       cpu->exception_index = EXCP_TB_EFAULT;
++       cpu_loop_exit(cpu);
++    }
++
+     cpu->current_tb = tb;
+     /* execute the generated code */
+     cpu_tb_exec(cpu, tb->tc_ptr);
+@@ -155,6 +160,9 @@ static TranslationBlock *tb_find_slow(CPUArchState *env,
+  not_found:
+    /* if no translated code available, then translate it now */
+     tb = tb_gen_code(cpu, pc, cs_base, flags, 0);
++    if (!tb) {
++       return NULL;
++    }
+ 
+  found:
+     /* Move the last found TB to the head of the list */
+@@ -601,6 +609,12 @@ int cpu_exec(CPUArchState *env)
+                 }
+                 spin_lock(&tcg_ctx.tb_ctx.tb_lock);
+                 tb = tb_find_fast(env);
++		if (!tb) {
++                    spin_unlock(&tcg_ctx.tb_ctx.tb_lock);
++                    cpu->exception_index = EXCP_TB_EFAULT;
++                    cpu_loop_exit(cpu);
++                }
++
+                 /* Note: we do it here to avoid a gcc bug on Mac OS X when
+                    doing it in tb_find_slow */
+                 if (tcg_ctx.tb_ctx.tb_invalidated_flag) {
+diff --git a/include/exec/cpu-defs.h b/include/exec/cpu-defs.h
+index 2dd6206..dbeb8b5 100644
+--- a/include/exec/cpu-defs.h
++++ b/include/exec/cpu-defs.h
+@@ -59,6 +59,7 @@ typedef uint64_t target_ulong;
+ #define EXCP_DEBUG      0x10002 /* cpu stopped after a breakpoint or singlestep */
+ #define EXCP_HALTED     0x10003 /* cpu is halted (waiting for external event) */
+ #define EXCP_YIELD      0x10004 /* cpu wants to yield timeslice to another */
++#define EXCP_TB_EFAULT  0x10005 /* tb_gen_code translates a page with no perms. */
+ 
+ /* Only the bottom TB_JMP_PAGE_BITS of the jump cache hash bits vary for
+    addresses on the same page.  The top bits are the same.  This allows
+diff --git a/linux-user/main.c b/linux-user/main.c
+index d03ad3a..ebf68b3 100644
+--- a/linux-user/main.c
++++ b/linux-user/main.c
+@@ -1037,6 +1037,9 @@ void cpu_loop(CPUARMState *env)
+             info._sifields._sigfault._addr = env->pc;
+             queue_signal(env, info.si_signo, &info);
+             break;
++        case EXCP_TB_EFAULT:
++            addr = env->pc;
++            goto do_segv;
+         case EXCP_PREFETCH_ABORT:
+             addr = env->cp15.c6_insn;
+             goto do_segv;
+diff --git a/translate-all.c b/translate-all.c
+index 5759974..2ea1557 100644
+--- a/translate-all.c
++++ b/translate-all.c
+@@ -948,8 +948,28 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+     tb_page_addr_t phys_pc, phys_page2;
+     target_ulong virt_page2;
+     int code_gen_size;
++    PageDesc *p;
+ 
+     phys_pc = get_page_addr_code(env, pc);
++    p = page_find(phys_pc >> TARGET_PAGE_BITS);
++    if (!p ||
++        (p->flags == 0) ||
++        (p->flags == PAGE_VALID)) {
++
++        /*
++         * We don't check for PROT_READ/PROT_EXEC. On some
++         * archtitectures, PROT_WRITE implies read, yet others
++         * PROT_EXEC implies PROT_READ or vice versa. Assume
++         * if there are any permissions, then they are reasonable
++         * enough.
++         *
++         * If this ends up being too lax, and we can still catch
++         * a signal on trying to read the original code,
++         * we can do a read probe ("safe memory read") instead.
++         */
++        return NULL;
++    }
++
+     tb = tb_alloc(pc);
+     if (!tb) {
+         /* flush must be done */
+-- 
+1.7.4.1
+
