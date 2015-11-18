@@ -5,10 +5,16 @@ Firmware.
 This is how it works: build GdbSyms - it's a dummy binary that
 contains the relevant symbols needed to find and load image symbols.
 
-$ gdb
-(gdb) taget remote ....
+$ gdb /path/to/GdbSyms.dll
+(gdb) target remote ....
 (gdb) source Scripts/gdb_uefi.py
 (gdb) reload-uefi -o /path/to/GdbSyms.dll
+
+N.B: it was noticed that GDB for certain targets behaves strangely
+when run without any binary - like assuming a certain physical
+address space size and endianness. To avoid this madness and
+seing strange bugs, make sure to pass /path/to/GdbSyms.dll
+when starting gdb.
 
 The -o option should be used if you've debugging EFI, where the PE
 images were converted from MACH-O or ELF binaries.
@@ -84,9 +90,9 @@ class ReloadUefi (gdb.Command):
     #
 
     def set_field (self, value, field_name, data):
-        gdb.execute ("set *(%s *) 0x%x = 0x%x" % \
+        gdb.execute ("set *(%s *) %s = 0x%x" % \
                          (str (value[field_name].type), \
-                              long (value[field_name].address), \
+                              value[field_name].address, \
                               data))
 
     #
