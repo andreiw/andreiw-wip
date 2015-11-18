@@ -1,0 +1,26 @@
+From ec1eb393ceb9432f572a7554e70f59c92354aca2 Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sat, 21 Apr 2012 00:20:40 -0400
+Subject: [PATCH 3/5] OVMF: Enable building MPTest
+
+For WIP MPS work.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ OvmfPkg/OvmfPkgX64.dsc | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/OvmfPkg/OvmfPkgX64.dsc b/OvmfPkg/OvmfPkgX64.dsc
+index a312ddb..87c9ae2 100644
+--- a/OvmfPkg/OvmfPkgX64.dsc
++++ b/OvmfPkg/OvmfPkgX64.dsc
+@@ -493,3 +493,5 @@
+   }
+   SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDxe.inf
+ !endif
++
++  OvmfPkg/Application/MPTest/MPTest.inf
+\ No newline at end of file
+-- 
+2.5.3
+

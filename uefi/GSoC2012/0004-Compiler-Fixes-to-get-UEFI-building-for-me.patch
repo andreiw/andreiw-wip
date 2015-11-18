@@ -1,0 +1,56 @@
+From ad8c2ab12c2274da59347205f846b74d5b1ca3ee Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Fri, 8 Jun 2012 15:15:04 -0400
+Subject: [PATCH 4/5] Compiler: Fixes to get UEFI building for me.
+
+My GCC is too new.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ MdeModulePkg/Universal/SetupBrowserDxe/Expression.c        | 2 --
+ OptionRomPkg/Library/FrameBufferBltLib/FrameBufferBltLib.c | 2 --
+ 2 files changed, 4 deletions(-)
+
+diff --git a/MdeModulePkg/Universal/SetupBrowserDxe/Expression.c b/MdeModulePkg/Universal/SetupBrowserDxe/Expression.c
+index b9034fa..60d9934 100644
+--- a/MdeModulePkg/Universal/SetupBrowserDxe/Expression.c
++++ b/MdeModulePkg/Universal/SetupBrowserDxe/Expression.c
+@@ -1446,7 +1446,6 @@ IfrMid (
+   UINTN          Base;
+   UINTN          Length;
+   CHAR16         *SubString;
+-  UINT8          *Buffer;
+   UINT16         BufferLen;
+ 
+   ZeroMem (Value, sizeof (Value));
+@@ -1502,7 +1501,6 @@ IfrMid (
+ 
+     FreePool (String);
+   } else {
+-    Buffer    = Value[2].Buffer;
+     BufferLen = Value[2].BufferLen;
+     
+     Result->Type = EFI_IFR_TYPE_BUFFER;
+diff --git a/OptionRomPkg/Library/FrameBufferBltLib/FrameBufferBltLib.c b/OptionRomPkg/Library/FrameBufferBltLib/FrameBufferBltLib.c
+index 7138ebf..955ae3d 100644
+--- a/OptionRomPkg/Library/FrameBufferBltLib/FrameBufferBltLib.c
++++ b/OptionRomPkg/Library/FrameBufferBltLib/FrameBufferBltLib.c
+@@ -236,7 +236,6 @@ BltLibVideoFill (
+   )
+ {
+   UINTN                           DstY;
+-  VOID                            *BltMemSrc;
+   VOID                            *BltMemDst;
+   UINTN                           X;
+   UINT8                           Uint8;
+@@ -347,7 +346,6 @@ BltLibVideoFill (
+               );
+             X = X + MIN (X, Width - X);
+           }
+-          BltMemSrc = (VOID *) mBltLibLineBuffer;
+           LineBufferReady = TRUE;
+         }
+         CopyMem (BltMemDst, mBltLibLineBuffer, WidthInBytes);
+-- 
+2.5.3
+

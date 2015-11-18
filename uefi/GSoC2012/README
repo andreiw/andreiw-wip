@@ -1,0 +1,11 @@
+These were some ongoing helpful patches I was
+putting together for a GSoC'12 Tiano Core
+project I was co-mentoring on implementing
+the MP support protocol in OVMF.
+
+I wonder what happened to jljusten's similar
+work...
+
+Since it's unlikely I'll return to these anytime
+soon, they might as well live here instead of
+a separate dead edk2 tree.

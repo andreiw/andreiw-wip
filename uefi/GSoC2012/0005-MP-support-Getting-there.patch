@@ -1,0 +1,408 @@
+From d011f00de6ea1300db06d5a000bfdd5c1139b9ba Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Fri, 8 Jun 2012 15:17:21 -0400
+Subject: [PATCH 5/5] MP support: Getting there.
+
+Can make all CPUs hang loop in 64-bit mode.
+
+Code is based on EdkCompatibilityPkg/Compatibility/MpServicesOnFrameworkMpServicesThunk.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ UefiCpuPkg/CpuDxe/CpuDxe.h     |   1 +
+ UefiCpuPkg/CpuDxe/CpuDxe.inf   |   1 +
+ UefiCpuPkg/CpuDxe/MpService.c  | 156 +++++++++++++++++++++++++++++++++++
+ UefiCpuPkg/CpuDxe/X64/CpuAsm.S | 179 +++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 337 insertions(+)
+
+diff --git a/UefiCpuPkg/CpuDxe/CpuDxe.h b/UefiCpuPkg/CpuDxe/CpuDxe.h
+index e148f66..ae54b03 100644
+--- a/UefiCpuPkg/CpuDxe/CpuDxe.h
++++ b/UefiCpuPkg/CpuDxe/CpuDxe.h
+@@ -26,6 +26,7 @@
+ #include <Library/CpuLib.h>
+ #include <Library/BaseMemoryLib.h>
+ #include <Library/MemoryAllocationLib.h>
++#include <Library/LocalApicLib.h>
+ #include <Library/DebugLib.h>
+ #include <Library/MtrrLib.h>
+ #include <Guid/IdleLoopEvent.h>
+diff --git a/UefiCpuPkg/CpuDxe/CpuDxe.inf b/UefiCpuPkg/CpuDxe/CpuDxe.inf
+index 4b65899..939f32b 100644
+--- a/UefiCpuPkg/CpuDxe/CpuDxe.inf
++++ b/UefiCpuPkg/CpuDxe/CpuDxe.inf
+@@ -36,6 +36,7 @@
+   MemoryAllocationLib
+   MtrrLib
+   UefiBootServicesTableLib
++  LocalApicLib
+   UefiDriverEntryPoint
+ 
+ [Sources]
+diff --git a/UefiCpuPkg/CpuDxe/MpService.c b/UefiCpuPkg/CpuDxe/MpService.c
+index 6c2f7e3..747d8f3 100644
+--- a/UefiCpuPkg/CpuDxe/MpService.c
++++ b/UefiCpuPkg/CpuDxe/MpService.c
+@@ -14,6 +14,151 @@
+ 
+ #include "CpuDxe.h"
+ 
++#define MAX_CPU_NUMBER 256
++#define AP_STACK_SIZE  0x8000
++
++typedef struct {
++  UINT8 *RendezvousFunnelAddress;
++  UINTN PModeEntryOffset;
++  UINTN FlatJumpOffset;
++  UINTN LModeEntryOffset;
++  UINTN LongJumpOffset;
++  UINTN Size;
++} AP_ADDRESS_MAP;
++
++typedef struct {
++  UINTN             Lock;
++  VOID              *StackStart;
++  UINTN             StackSize;
++  VOID              *ApFunction;
++  IA32_DESCRIPTOR   GdtrProfile;
++  IA32_DESCRIPTOR   IdtrProfile;
++  UINT32            BufferStart;
++  UINT32            Cr3;
++  UINT32            ProcessorNumber[MAX_CPU_NUMBER];
++} AP_CPU_EXCHANGE_INFO;
++
++EFI_PHYSICAL_ADDRESS mStartupVector;
++AP_CPU_EXCHANGE_INFO *mExchangeInfo;
++
++extern VOID EFIAPI AsmGetApAddressMap (
++  OUT AP_ADDRESS_MAP *AddressMap
++  );
++
++VOID
++MpPrepareApBlob(
++                VOID
++                )
++{
++  EFI_STATUS           Status;
++  IA32_DESCRIPTOR      GdtrForBSP;
++  IA32_DESCRIPTOR      IdtrForBSP;
++  EFI_PHYSICAL_ADDRESS GdtForAP;
++  EFI_PHYSICAL_ADDRESS IdtForAP;
++  AP_ADDRESS_MAP       Map;
++
++  //
++  // Allocated page must be < 1MB. This is a limitation
++  // of the SIPI protocol.
++  //
++
++  mStartupVector = 0x100000;
++  Status = gBS->AllocatePages (
++                               AllocateMaxAddress,
++                               EfiBootServicesCode,
++                               1,
++                               &mStartupVector
++                               );
++  ASSERT_EFI_ERROR (Status);
++
++  DEBUG ((EFI_D_ERROR, "AP vector at 0x%x\n", mStartupVector));
++
++  ZeroMem((VOID *) &Map, sizeof (Map));
++  DEBUG((EFI_D_ERROR, "Map before: \n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"));
++  DEBUG((EFI_D_ERROR, "FunnelAddress 0x%p     \n", Map.RendezvousFunnelAddress));
++  DEBUG((EFI_D_ERROR, "PModeEntryOffset 0x%x   \n", Map.PModeEntryOffset));
++  DEBUG((EFI_D_ERROR, "FlatJump 0x%x       \n", Map.FlatJumpOffset));
++  DEBUG((EFI_D_ERROR, "LMEntryOffset 0x%x   \n", Map.LongJumpOffset));
++  DEBUG((EFI_D_ERROR, "Size 0x%x   \n", Map.Size));
++
++  DEBUG((EFI_D_ERROR, "Map is at 0x%x\n", &Map));
++  AsmGetApAddressMap (&Map);
++  DEBUG((EFI_D_ERROR, "Map after: \n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"));
++  DEBUG((EFI_D_ERROR, "FunnelAddress 0x%p     \n", Map.RendezvousFunnelAddress));
++  DEBUG((EFI_D_ERROR, "PModeEntryOffset 0x%x   \n", Map.PModeEntryOffset));
++  DEBUG((EFI_D_ERROR, "FlatJump 0x%x       \n", Map.FlatJumpOffset));
++  DEBUG((EFI_D_ERROR, "LMEntryOffset 0x%x   \n", Map.LongJumpOffset));
++  DEBUG((EFI_D_ERROR, "Size 0x%x   \n", Map.Size));
++
++  DEBUG ((EFI_D_ERROR, "from - 0x%x\n", *(UINT32 *) Map.RendezvousFunnelAddress));
++  CopyMem ((VOID *) (UINTN) mStartupVector, Map.RendezvousFunnelAddress,
++           Map.Size);
++  *(UINT32 *) (UINTN) (mStartupVector + Map.FlatJumpOffset + 3) =
++    (UINT32) (mStartupVector + Map.PModeEntryOffset);
++  DEBUG ((EFI_D_ERROR, "to - 0x%x\n", *(UINT32 *) mStartupVector));
++
++  //
++  // For IA32 mode, LongJumpOffset is filled with zero. If non-zero,
++  // then we are in X64 mode, so further redirect for long mode switch.
++  //
++
++  if (Map.LongJumpOffset != 0) {
++    *(UINT32 *) (UINTN) (mStartupVector + Map.LongJumpOffset + 2) =
++      (UINT32) (mStartupVector + Map.LModeEntryOffset);
++  }
++
++  mExchangeInfo = (AP_CPU_EXCHANGE_INFO *) (UINTN)
++    (mStartupVector + Map.Size);
++
++  DEBUG ((EFI_D_ERROR, "AP-BSP exchange buffer at 0x%x\n",
++          mExchangeInfo));
++
++  ZeroMem ((VOID *) mExchangeInfo, sizeof (AP_CPU_EXCHANGE_INFO));
++
++  mExchangeInfo->StackStart  = AllocatePages (EFI_SIZE_TO_PAGES (MAX_CPU_NUMBER * AP_STACK_SIZE));
++  mExchangeInfo->StackSize  = AP_STACK_SIZE;
++
++  AsmReadGdtr (&GdtrForBSP);
++  AsmReadIdtr (&IdtrForBSP);
++
++  //
++  // Allocate memory under 4G to hold GDT for APs.
++  //
++
++  GdtForAP = 0xffffffff;
++  Status   = gBS->AllocatePages (
++                    AllocateMaxAddress,
++                    EfiBootServicesData,
++                    EFI_SIZE_TO_PAGES ((GdtrForBSP.Limit + 1) + (IdtrForBSP.Limit + 1)),
++                    &GdtForAP
++                    );
++  ASSERT_EFI_ERROR (Status);
++
++  IdtForAP = (UINTN) GdtForAP + GdtrForBSP.Limit + 1;
++
++  CopyMem ((VOID *) (UINTN) GdtForAP, (VOID *) GdtrForBSP.Base, GdtrForBSP.Limit + 1);
++  CopyMem ((VOID *) (UINTN) IdtForAP, (VOID *) IdtrForBSP.Base, IdtrForBSP.Limit + 1);
++
++  mExchangeInfo->GdtrProfile.Base  = (UINTN) GdtForAP;
++  mExchangeInfo->GdtrProfile.Limit = GdtrForBSP.Limit;
++  mExchangeInfo->IdtrProfile.Base  = (UINTN) IdtForAP;
++  mExchangeInfo->IdtrProfile.Limit = IdtrForBSP.Limit;
++
++  mExchangeInfo->BufferStart = (UINT32) mStartupVector;
++  DEBUG((EFI_D_ERROR, "---------------CR3 address 0x%x\n", AsmReadCr3()));
++  mExchangeInfo->Cr3         = (UINT32) (AsmReadCr3 ());
++}
++
++
++VOID
++ApProcWrapper (
++  VOID
++  )
++{
++  while(1);
++}
++
++
+ EFI_STATUS
+ EFIAPI MpGetNumberOfProcessors(
+                                IN  EFI_MP_SERVICES_PROTOCOL  *This,
+@@ -26,6 +171,17 @@ EFIAPI MpGetNumberOfProcessors(
+     return EFI_INVALID_PARAMETER;
+   }
+ 
++  MpPrepareApBlob();
++  mExchangeInfo->ApFunction = (VOID *) (UINTN) ApProcWrapper;
++
++  // Get rid of me.
++  ProgramVirtualWireMode();
++  mExchangeInfo->ProcessorNumber[1] = 1;
++  mExchangeInfo->ProcessorNumber[2] = 2;
++  mExchangeInfo->ProcessorNumber[3] = 3;
++  mExchangeInfo->ProcessorNumber[4] = 4;
++  SendInitSipiSipiAllExcludingSelf((UINT32) mStartupVector);
++
+   *NumberOfProcessors = 1;
+   *NumberOfEnabledProcessors = 1;
+   return EFI_SUCCESS;
+diff --git a/UefiCpuPkg/CpuDxe/X64/CpuAsm.S b/UefiCpuPkg/CpuDxe/X64/CpuAsm.S
+index e038f2e..ed3bfce 100644
+--- a/UefiCpuPkg/CpuDxe/X64/CpuAsm.S
++++ b/UefiCpuPkg/CpuDxe/X64/CpuAsm.S
+@@ -23,6 +23,185 @@
+ 
+ #EXTRN ASM_PFX(mErrorCodeFlag):DWORD # Error code flags for exceptions
+ 
++.set                   VacantFlag,       0x0
++.set                   NotVacantFlag,    0xff
++
++.set                   LockLocation,              RendezvousFunnelProcEnd - RendezvousFunnelProcStart
++.set                   StackStartAddressLocation, RendezvousFunnelProcEnd - RendezvousFunnelProcStart + 0x08
++.set                   StackSizeLocation,         RendezvousFunnelProcEnd - RendezvousFunnelProcStart + 0x10
++.set                   CProcedureLocation,        RendezvousFunnelProcEnd - RendezvousFunnelProcStart + 0x18
++.set                   GdtrLocation,              RendezvousFunnelProcEnd - RendezvousFunnelProcStart + 0x20
++.set                   IdtrLocation,              RendezvousFunnelProcEnd - RendezvousFunnelProcStart + 0x2A
++.set                   BufferStartLocation,       RendezvousFunnelProcEnd - RendezvousFunnelProcStart + 0x34
++.set                   Cr3OffsetLocation,         RendezvousFunnelProcEnd - RendezvousFunnelProcStart + 0x38
++.set                   ProcessorNumberLocation,   RendezvousFunnelProcEnd - RendezvousFunnelProcStart + 0x3C
++
++#-------------------------------------------------------------------------------------
++
++#-------------------------------------------------------------------------------------
++#RendezvousFunnelProc  procedure follows. All APs execute their procedure. This
++#procedure serializes all the AP processors through an Init sequence. It must be
++#noted that APs arrive here very raw...ie: real mode, no stack.
++#ALSO THIS PROCEDURE IS EXECUTED BY APs ONLY ON 16 BIT MODE. HENCE THIS PROC
++#IS IN MACHINE CODE.
++#-------------------------------------------------------------------------------------
++#RendezvousFunnelProc (&WakeUpBuffer,MemAddress);
++        
++ASM_GLOBAL ASM_PFX(RendezvousFunnelProc)
++ASM_PFX(RendezvousFunnelProc):
++RendezvousFunnelProcStart:
++# At this point CS = 0x(vv00) and ip= 0x0.
++
++        .byte 0x8c,0xc8               # mov        ax,  cs
++        .byte 0x8e,0xd8               # mov        ds,  ax
++        .byte 0x8e,0xc0               # mov        es,  ax
++        .byte 0x8e,0xd0               # mov        ss,  ax 
++        .byte 0x33,0xc0               # xor        ax,  ax
++        .byte 0x8e,0xe0               # mov        fs,  ax
++        .byte 0x8e,0xe8               # mov        gs,  ax
++
++# Switch to flat mode.
++
++        .byte 0xBE
++        .word BufferStartLocation
++        .byte 0x66,0x8B,0x14          # mov        edx,dword ptr [si]          ; EDX is keeping the start address of wakeup buffer
++
++        .byte 0xBE
++        .word Cr3OffsetLocation
++        .byte 0x66,0x8B,0xC           # mov        ecx,dword ptr [si]          ; ECX is keeping the value of CR3
++
++        .byte 0xBE
++        .word GdtrLocation
++        .byte 0x66                    # db         66h
++        .byte 0x2E,0xF,0x1,0x14       # lgdt       fword ptr cs:[si]
++
++        .byte 0xBE
++        .word IdtrLocation
++        .byte 0x66                    # db         66h
++        .byte 0x2E,0xF,0x1,0x1C       # lidt       fword ptr cs:[si]
++
++        .byte 0x33,0xC0               # xor        ax,  ax
++        .byte 0x8E,0xD8               # mov        ds,  ax
++
++        .byte 0xF,0x20,0xC0           # mov        eax, cr0                    ; Get control register 0
++        .byte 0x66,0x83,0xC8,0x1      # or         eax, 000000001h             ; Set PE bit (bit #0)
++        .byte 0xF,0x22,0xC0           # mov        cr0, eax
++
++FLAT32_JUMP:
++
++        .byte 0x66,0x67,0xEA          # far jump
++        .long 0x0                     # 32-bit offset
++        .word 0x20                    # 16-bit selector
++
++ProtectedModeStart:
++        .byte 0x66,0xB8,0x18,0x0      # mov        ax,  18h
++        .byte 0x66,0x8E,0xD8          # mov        ds,  ax
++        .byte 0x66,0x8E,0xC0          # mov        es,  ax
++        .byte 0x66,0x8E,0xE0          # mov        fs,  ax
++        .byte 0x66,0x8E,0xE8          # mov        gs,  ax
++        .byte 0x66,0x8E,0xD0          # mov        ss,  ax                     ; Flat mode setup.
++
++        .byte 0xF,0x20,0xE0           # mov        eax, cr4
++        .byte 0xF,0xBA,0xE8,0x5       # bts        eax, 5
++        .byte 0xF,0x22,0xE0           # mov        cr4, eax
++
++        .byte 0xF,0x22,0xD9           # mov        cr3, ecx
++
++        .byte 0x8B,0xF2               # mov        esi, edx                    ; Save wakeup buffer address
++
++        .byte 0xB9
++        .long 0xC0000080              # mov        ecx, 0c0000080h             ; EFER MSR number.
++        .byte 0xF,0x32                # rdmsr                                  ; Read EFER.
++        .byte 0xF,0xBA,0xE8,0x8       # bts        eax, 8                      ; Set LME=1.
++        .byte 0xF,0x30                # wrmsr                                  ; Write EFER.
++
++        .byte 0xF,0x20,0xC0           # mov        eax, cr0                    ; Read CR0.
++        .byte 0xF,0xBA,0xE8,0x1F      # bts        eax, 31                     ; Set PG=1.
++        .byte 0xF,0x22,0xC0           # mov        cr0, eax                    ; Write CR0.
++
++LONG_JUMP:
++
++        .byte 0x67,0xEA               # far jump
++        .long 0x0                     # 32-bit offset
++        .word 0x28                    # 16-bit selector
++
++LongModeStart:
++
++        movw        $0x08,%ax
++        .byte       0x66
++        movw        %ax,%ds
++        .byte       0x66
++        movw        %ax,%es
++        .byte       0x66
++        movw        %ax,%ss
++
++        #
++        # ProgramStack
++        #
++        movl        $0x1b, %ecx
++        rdmsr
++        andl        $0xfffff000, %eax
++        addl        $0x20, %eax
++        movl        (%eax), %ebx
++        shrl        $24, %ebx
++        
++        xorq        %rcx, %rcx
++        movl        %esi,%edi
++        addl        $ProcessorNumberLocation, %edi
++        movl        (%edi, %ebx, 4), %ecx
++
++        movl        %esi,%edi
++        addl        $StackSizeLocation, %edi
++        movq        (%edi), %rax
++        incq        %rcx
++        mulq        %rcx
++
++        movl        %esi,%edi
++        addl        $StackStartAddressLocation, %edi
++        movq        (%edi), %rbx
++        addq        %rbx, %rax
++
++        movq        %rax, %rsp
++
++        #
++        # Call C Function
++        #
++        movl        %esi,%edi
++        addl        $CProcedureLocation, %edi
++        movq        (%edi), %rax
++
++        testq       %rax, %rax
++        jz          GoToSleep
++
++        subq        $0x20, %rsp
++        call        *%rax
++        addq        $0x20, %rsp
++
++GoToSleep:
++
++        cli
++        hlt
++        jmp         .-2
++
++RendezvousFunnelProcEnd:
++
++#------------------------------------------------------------------------------
++# VOID
++# AsmGetApAddressMap (
++#   AP_ADDRESS_MAP *Map
++#   );
++#------------------------------------------------------------------------------
++ASM_GLOBAL ASM_PFX(AsmGetApAddressMap)
++ASM_PFX(AsmGetApAddressMap):
++        movq         $RendezvousFunnelProcStart, %rax
++        movq         %rax, (%rcx)
++        movq         $(ProtectedModeStart - RendezvousFunnelProcStart), 0x08(%rcx)
++        movq         $(FLAT32_JUMP - RendezvousFunnelProcStart), 0x10(%rcx)
++        movq         $(LongModeStart - RendezvousFunnelProcStart), 0x18(%rcx)
++        movq         $(LONG_JUMP - RendezvousFunnelProcStart), 0x20(%rcx)
++        movq         $(RendezvousFunnelProcEnd - RendezvousFunnelProcStart), 0x28(%rcx)
++        ret
++
+ 
+ #
+ # point to the external interrupt vector table
+-- 
+2.5.3
+

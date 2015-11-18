@@ -1,0 +1,207 @@
+From eda209f890a5308aae8e941afe5f7290972bd6ac Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sat, 21 Apr 2012 00:17:55 -0400
+Subject: [PATCH 2/5] UefiCpuPkg: MP Support WIP.
+
+WIP.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ UefiCpuPkg/CpuDxe/CpuDxe.c    |   1 +
+ UefiCpuPkg/CpuDxe/CpuDxe.h    |   3 +
+ UefiCpuPkg/CpuDxe/CpuDxe.inf  |   2 +
+ UefiCpuPkg/CpuDxe/MpService.c | 130 ++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 136 insertions(+)
+ create mode 100644 UefiCpuPkg/CpuDxe/MpService.c
+
+diff --git a/UefiCpuPkg/CpuDxe/CpuDxe.c b/UefiCpuPkg/CpuDxe/CpuDxe.c
+index 89dd2df..e1f24f0 100644
+--- a/UefiCpuPkg/CpuDxe/CpuDxe.c
++++ b/UefiCpuPkg/CpuDxe/CpuDxe.c
+@@ -1268,6 +1268,7 @@ InitializeCpu (
+   Status = gBS->InstallMultipleProtocolInterfaces (
+                   &mCpuHandle,
+                   &gEfiCpuArchProtocolGuid, &gCpu,
++                  &gEfiMpServiceProtocolGuid, &gMPS,
+                   NULL
+                   );
+   ASSERT_EFI_ERROR (Status);
+diff --git a/UefiCpuPkg/CpuDxe/CpuDxe.h b/UefiCpuPkg/CpuDxe/CpuDxe.h
+index 6d0d83b..e148f66 100644
+--- a/UefiCpuPkg/CpuDxe/CpuDxe.h
++++ b/UefiCpuPkg/CpuDxe/CpuDxe.h
+@@ -29,6 +29,7 @@
+ #include <Library/DebugLib.h>
+ #include <Library/MtrrLib.h>
+ #include <Guid/IdleLoopEvent.h>
++#include <Protocol/MpService.h>
+ 
+ //
+ //
+@@ -286,5 +287,7 @@ RestoreInterruptDescriptorTableHandlerAddress (
+   IN UINTN       Index
+   );
+ 
++extern EFI_MP_SERVICES_PROTOCOL gMPS;
++
+ #endif
+ 
+diff --git a/UefiCpuPkg/CpuDxe/CpuDxe.inf b/UefiCpuPkg/CpuDxe/CpuDxe.inf
+index 0c70b32..4b65899 100644
+--- a/UefiCpuPkg/CpuDxe/CpuDxe.inf
++++ b/UefiCpuPkg/CpuDxe/CpuDxe.inf
+@@ -42,6 +42,7 @@
+   CpuDxe.c
+   CpuDxe.h
+   CpuGdt.c
++  MpService.c
+ 
+   Ia32/IvtAsm.asm | MSFT
+   Ia32/IvtAsm.asm | INTEL
+@@ -59,6 +60,7 @@
+ 
+ [Protocols]
+   gEfiCpuArchProtocolGuid
++  gEfiMpServiceProtocolGuid
+ 
+ [Guids]
+   gIdleLoopEventGuid                            ## CONSUMES ## GUID
+diff --git a/UefiCpuPkg/CpuDxe/MpService.c b/UefiCpuPkg/CpuDxe/MpService.c
+new file mode 100644
+index 0000000..6c2f7e3
+--- /dev/null
++++ b/UefiCpuPkg/CpuDxe/MpService.c
+@@ -0,0 +1,130 @@
++/** @file
++  CPU MP support.
++
++  Copyright (c) 2012, Andrei Warkentin <andrey.warkentin@gmail.com>
++  This program and the accompanying materials
++  are licensed and made available under the terms and conditions of the BSD License
++  which accompanies this distribution.  The full text of the license may be found at
++  http://opensource.org/licenses/bsd-license.php
++
++  THE PROGRAM IS DISTRIBUTED UNDER THE BSD LICENSE ON AN "AS IS" BASIS,
++  WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
++
++**/
++
++#include "CpuDxe.h"
++
++EFI_STATUS
++EFIAPI MpGetNumberOfProcessors(
++                               IN  EFI_MP_SERVICES_PROTOCOL  *This,
++                               OUT UINTN                     *NumberOfProcessors,
++                               OUT UINTN                     *NumberOfEnabledProcessors
++                               )
++{
++  if (NumberOfProcessors == NULL ||
++      NumberOfEnabledProcessors == NULL) {
++    return EFI_INVALID_PARAMETER;
++  }
++
++  *NumberOfProcessors = 1;
++  *NumberOfEnabledProcessors = 1;
++  return EFI_SUCCESS;
++}
++
++
++EFI_STATUS
++EFIAPI MpGetProcessorInfo(
++                          IN  EFI_MP_SERVICES_PROTOCOL   *This,
++                          IN  UINTN                      ProcessorNumber,
++                          OUT EFI_PROCESSOR_INFORMATION  *ProcessorInfoBuffer
++                          )
++{
++  return EFI_UNSUPPORTED;
++}
++
++
++EFI_STATUS
++EFIAPI MpStartupAllAPs(
++                       IN  EFI_MP_SERVICES_PROTOCOL  *This,
++                       IN  EFI_AP_PROCEDURE          Procedure,
++                       IN  BOOLEAN                   SingleThread,
++                       IN  EFI_EVENT                 WaitEvent               OPTIONAL,
++                       IN  UINTN                     TimeoutInMicroSeconds,
++                       IN  VOID                      *ProcedureArgument      OPTIONAL,
++                       OUT UINTN                     **FailedCpuList         OPTIONAL
++                       )
++{
++  return EFI_NOT_STARTED;
++}
++
++
++EFI_STATUS
++EFIAPI MpStartupThisAP(
++                       IN  EFI_MP_SERVICES_PROTOCOL  *This,
++                       IN  EFI_AP_PROCEDURE          Procedure,
++                       IN  UINTN                     ProcessorNumber,
++                       IN  EFI_EVENT                 WaitEvent               OPTIONAL,
++                       IN  UINTN                     TimeoutInMicroseconds,
++                       IN  VOID                      *ProcedureArgument      OPTIONAL,
++                       OUT BOOLEAN                   *Finished               OPTIONAL
++  )
++{
++  if (ProcessorNumber == 0) {
++    return EFI_INVALID_PARAMETER;
++  }
++
++  return EFI_NOT_FOUND;
++}
++
++
++EFI_STATUS
++EFIAPI MpSwitchBSP(
++                   IN EFI_MP_SERVICES_PROTOCOL  *This,
++                   IN UINTN                     ProcessorNumber,
++                   IN BOOLEAN                   EnableOldBSP
++                   )
++{
++  if (ProcessorNumber == 0) {
++    return EFI_INVALID_PARAMETER;
++  }
++
++  return EFI_NOT_FOUND;
++}
++           
++
++EFI_STATUS
++EFIAPI MpEnableDisableAP(
++                         IN  EFI_MP_SERVICES_PROTOCOL  *This,
++                         IN  UINTN                     ProcessorNumber,
++                         IN  BOOLEAN                   EnableAP,
++                         IN  UINT32                    *HealthFlag OPTIONAL
++                         )
++{
++  if (ProcessorNumber == 0) {
++    return EFI_INVALID_PARAMETER;
++  }
++
++  return EFI_NOT_FOUND;
++}
++
++
++EFI_STATUS
++EFIAPI MpWhoAmI(
++                IN  EFI_MP_SERVICES_PROTOCOL  *This,
++                OUT UINTN                     *ProcessorNumber
++                )
++{
++  *ProcessorNumber = 1;
++  return EFI_SUCCESS;
++}
++
++
++EFI_MP_SERVICES_PROTOCOL gMPS = {
++  MpGetNumberOfProcessors,
++  MpGetProcessorInfo,
++  MpStartupAllAPs,
++  MpStartupThisAP,
++  MpSwitchBSP,
++  MpEnableDisableAP,
++  MpWhoAmI
++};
+-- 
+2.5.3
+
