@@ -1,0 +1,9 @@
+ISO=/hgfs/Desktop/VMware-VMvisor-Installer-7.0.0-17068872.aarch64.iso
+DISK=/hgfs/Desktop/disk.img
+
+./build/aarch64-softmmu/qemu-system-aarch64 -M virt -machine virtualization=on -cpu cortex-a57 \
+   -m 4G -smp 2 -pflash flash0.img -pflash flash1.img -serial stdio -device ramfb \
+   -device usb-ehci,id=ehci -device usb-kbd \
+   -drive if=none,id=iso,file=$ISO -device usb-storage,bus=ehci.0,drive=iso \
+   -drive if=none,id=disk,file=$DISK -device usb-storage,bus=ehci.0,drive=disk \
+   -device e1000e,netdev=net0 -netdev tap,id=net0,ifname=tap0,script=no,downscript=no
