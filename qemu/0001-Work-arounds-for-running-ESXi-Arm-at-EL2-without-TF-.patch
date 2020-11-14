@@ -1,0 +1,70 @@
+From 4bb736e0c9ee5bcb67962bc5ac2ca4590fa81c0d Mon Sep 17 00:00:00 2001
+From: Andrei Warkentin <andrey.warkentin@gmail.com>
+Date: Sat, 14 Nov 2020 13:32:09 -0800
+Subject: [PATCH] Work-arounds for running ESXi-Arm at EL2 without TF-A.
+
+Signed-off-by: Andrei Warkentin <andrey.warkentin@gmail.com>
+---
+ target/arm/cpu.c  | 14 +++++++++-----
+ target/arm/psci.c | 13 +++++++++++--
+ 2 files changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index 07492e9f9a..d808964ec5 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -1680,11 +1680,15 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
+          */
+         unset_feature(env, ARM_FEATURE_EL3);
+ 
+-        /* Disable the security extension feature bits in the processor feature
+-         * registers as well. These are id_pfr1[7:4] and id_aa64pfr0[15:12].
+-         */
+-        cpu->isar.id_pfr1 &= ~0xf0;
+-        cpu->isar.id_aa64pfr0 &= ~0xf000;
++        //
++        // AndreiW: allow EL3 checks in OS to pass, to allow it to call SMCs
++        // and have those be handled by qemu (UEFI fw has no TF-A)
++        //
++        // /* Disable the security extension feature bits in the processor feature
++        // * registers as well. These are id_pfr1[7:4] and id_aa64pfr0[15:12].
++        // */
++        // cpu->isar.id_pfr1 &= ~0xf0;
++        // cpu->isar.id_aa64pfr0 &= ~0xf000;
+     }
+ 
+     if (!cpu->has_el2) {
+diff --git a/target/arm/psci.c b/target/arm/psci.c
+index 6709e28013..0363a16a6d 100644
+--- a/target/arm/psci.c
++++ b/target/arm/psci.c
+@@ -71,7 +71,11 @@ bool arm_is_psci_call(ARMCPU *cpu, int excp_type)
+     case QEMU_PSCI_0_2_FN_MIGRATE:
+         return true;
+     default:
+-        return false;
++        //
++        // AndreiW: allow any SMCCC call (e.g. SDEI).
++        //
++        // return false;
++        return true;
+     }
+ }
+ 
+@@ -197,7 +201,12 @@ void arm_handle_psci_call(ARMCPU *cpu)
+         ret = QEMU_PSCI_RET_NOT_SUPPORTED;
+         break;
+     default:
+-        g_assert_not_reached();
++        //
++        // AndreiW: fail any unknown call (e.g. SDEI).
++        //
++        // g_assert_not_reached();
++        ret = QEMU_PSCI_RET_NOT_SUPPORTED;
++        break;
+     }
+ 
+ err:
+-- 
+2.17.1
+
