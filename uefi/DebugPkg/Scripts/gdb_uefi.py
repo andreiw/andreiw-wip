@@ -21,9 +21,12 @@ images were converted from MACH-O or ELF binaries.
 
 """
 
+from __future__ import absolute_import
+from __future__ import print_function
 import array
 import getopt
 import binascii
+from six.moves import range
 
 __license__ = "BSD"
 __version = "1.0.0"
@@ -44,7 +47,7 @@ class ReloadUefi (gdb.Command):
     CV_MTOC = 0x434F544D
     DOS_MAGIC = 0x5A4D
     PE32PLUS_MAGIC = 0x20b
-    EST_SIGNATURE = 0x5453595320494249L
+    EST_SIGNATURE = 0x5453595320494249
     DEBUG_GUID = [0x49152E77, 0x1ADA, 0x4764,
                   [0xB7,0xA2,0x7A,0xFE,
                    0xFE,0xD9,0x5E, 0x8B]]
@@ -122,15 +125,15 @@ class ReloadUefi (gdb.Command):
         while True:
             estp = gdb.Value(address).cast(estp_t)
             if estp['Signature'] == self.EST_SIGNATURE:
-                oldcrc = long (estp['Crc32'])
+                oldcrc = int (estp['Crc32'])
                 self.set_field (estp, 'Crc32', 0)
                 newcrc = self.crc32 (self.value_data (estp.dereference (), 0))
-                self.set_field (estp, 'Crc32', long (oldcrc))
+                self.set_field (estp, 'Crc32', int (oldcrc))
                 if newcrc == oldcrc:
                     return estp['EfiSystemTableBase']
 
             address = address + 4*1024*1024
-            if long (address) == 0:
+            if int (address) == 0:
                 return gdb.Value(self.EINVAL)
 
     #
@@ -170,7 +173,7 @@ class ReloadUefi (gdb.Command):
 
     def offsetof (self, typename, field):
         t = gdb.Value (0).cast (self.ptype (typename))
-        return long (t[field].address)
+        return int (t[field].address)
 
     #
     # Returns sizeof of a type.
@@ -251,7 +254,7 @@ class ReloadUefi (gdb.Command):
             sym_name = sym_name.cast (self.ptype('CHAR8')).string ()
             syms.append ("add-symbol-file %s 0x%x" % \
                              (sym_name,
-                              long (base)))
+                              int (base)))
 
     #
     # Parses table EFI_DEBUG_IMAGE_INFO structures, builds
@@ -268,13 +271,13 @@ class ReloadUefi (gdb.Command):
                 entry = entry['NormalImage']
                 self.parse_image(entry['LoadedImageProtocolInstance'], syms)
             else:
-                print "Skipping unknown EFI_DEBUG_IMAGE_INFO (Type 0x%x)" % \
-                entry['ImageInfoType'].dereference ()
+                print("Skipping unknown EFI_DEBUG_IMAGE_INFO (Type 0x%x)" % \
+                entry['ImageInfoType'].dereference ())
             index = index + 1
         gdb.execute ("symbol-file")
-        print "Loading new symbols..."
+        print("Loading new symbols...")
         for sym in syms:
-            print sym
+            print(sym)
             gdb.execute (sym)
 
     #
@@ -285,10 +288,10 @@ class ReloadUefi (gdb.Command):
     def parse_dh (self, dh):
         dh_t = self.ptype ('EFI_DEBUG_IMAGE_INFO_TABLE_HEADER')
         dh = dh.cast (dh_t)
-        print "DebugImageInfoTable @ 0x%x, 0x%x entries" \
-            % (long (dh['EfiDebugImageInfoTable']), dh['TableSize'])
+        print("DebugImageInfoTable @ 0x%x, 0x%x entries" \
+            % (int (dh['EfiDebugImageInfoTable']), dh['TableSize']))
         if dh['UpdateStatus'] & self.DEBUG_IS_UPDATING:
-            print "EfiDebugImageInfoTable update in progress, retry later"
+            print("EfiDebugImageInfoTable update in progress, retry later")
             return
         self.parse_edii (dh['EfiDebugImageInfoTable'], dh['TableSize'])
 
@@ -299,17 +302,17 @@ class ReloadUefi (gdb.Command):
     def parse_est (self, est):
         est_t = self.ptype ('EFI_SYSTEM_TABLE')
         est = est.cast (est_t)
-        print "Connected to %s (Rev. 0x%x)" % \
+        print("Connected to %s (Rev. 0x%x)" % \
             (self.parse_utf16 (est['FirmwareVendor']), \
-                 long (est['FirmwareRevision']))
-        print "ConfigurationTable @ 0x%x, 0x%x entries" \
-            % (long (est['ConfigurationTable']), est['NumberOfTableEntries'])
+                 int (est['FirmwareRevision'])))
+        print("ConfigurationTable @ 0x%x, 0x%x entries" \
+            % (int (est['ConfigurationTable']), est['NumberOfTableEntries']))
 
         dh = self.search_config(est['ConfigurationTable'],
                                     est['NumberOfTableEntries'],
                                     self.DEBUG_GUID)
         if dh == self.EINVAL:
-            print "No EFI_DEBUG_IMAGE_INFO_TABLE_HEADER"
+            print("No EFI_DEBUG_IMAGE_INFO_TABLE_HEADER")
             return
         self.parse_dh (dh)
 
@@ -318,7 +321,7 @@ class ReloadUefi (gdb.Command):
     #
 
     def usage (self):
-        print "Usage: reload-uefi [-o] /path/to/GdbSyms.dll"
+        print("Usage: reload-uefi [-o] /path/to/GdbSyms.dll")
 
     #
     # Handler for reload-uefi.
@@ -328,7 +331,7 @@ class ReloadUefi (gdb.Command):
         args = arg.split(' ')
         try:
             opts, args = getopt.getopt(args, "o", ["offset-by-headers"])
-        except getopt.GetoptError, err:
+        except getopt.GetoptError as err:
             self.usage ()
             return
         for opt, arg in opts:
@@ -343,10 +346,10 @@ class ReloadUefi (gdb.Command):
         gdb.execute ("symbol-file %s" % args[0])
         est = self.search_est ()
         if est == self.EINVAL:
-            print "No EFI_SYSTEM_TABLE..."
+            print("No EFI_SYSTEM_TABLE...")
             return
 
-        print "EFI_SYSTEM_TABLE @ 0x%x" % est
+        print("EFI_SYSTEM_TABLE @ 0x%x" % est)
         self.parse_est (est)
 
 ReloadUefi ()
